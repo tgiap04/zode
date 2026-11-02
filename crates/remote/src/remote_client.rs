@@ -1370,6 +1370,47 @@ mod tests {
 
         assert_eq!(options.display_name(), "1.2.3.4");
     }
+
+    /// A peer built against a newer protocol sends payloads this build cannot
+    /// decode. Without an answer, the peer's request waits for good.
+    #[gpui::test]
+    async fn an_undecodable_request_is_answered_with_an_error(cx: &mut gpui::TestAppContext) {
+        let (incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
+        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded::<Envelope>();
+        let _client =
+            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test", false));
+
+        incoming_tx
+            .unbounded_send(Envelope {
+                id: 7,
+                responding_to: None,
+                original_sender_id: None,
+                ack_id: None,
+                payload: None,
+            })
+            .expect("the client is listening");
+        cx.run_until_parked();
+
+        let mut answers = Vec::new();
+        while let Ok(envelope) = outgoing_rx.try_recv() {
+            if envelope.responding_to.is_some() {
+                answers.push(envelope);
+            }
+        }
+        assert_eq!(answers.len(), 1, "exactly one answer, got {answers:?}");
+        let Some(answer) = answers.first() else {
+            return;
+        };
+        assert_eq!(answer.responding_to, Some(7));
+        let Some(proto::envelope::Payload::Error(error)) = &answer.payload else {
+            panic!("the answer must be an error, got {answer:?}");
+        };
+        assert!(
+            error.message.contains("no handler registered"),
+            "got {:?}",
+            error.message
+        );
+    }
 }
 
 impl From<SshConnectionOptions> for RemoteConnectionOptions {
@@ -1594,6 +1635,23 @@ impl ChannelClient {
                             sender.send((incoming, tx)).ok();
                         }
                         rx.await.ok();
+                    }
+                } else if incoming.payload.is_none() {
+                    // A payload this build cannot decode, from a peer built
+                    // against a newer protocol. An envelope does not say whether
+                    // it is a request, so it is answered as one: a sender that
+                    // awaits a response would otherwise wait forever, and a
+                    // one-way message's id is never in the sender's response
+                    // channels, so the answer is dropped there unread.
+                    log::warn!("{}:unhandled remote message of an unknown type", this.name);
+                    if let Err(error) = AnyProtoClient::from(this.clone()).send_response(
+                        incoming.id,
+                        anyhow::anyhow!("no handler registered for an unknown message").to_proto(),
+                    ) {
+                        log::error!(
+                            "{}:error sending error response for an unknown message:{error:#}",
+                            this.name
+                        );
                     }
                 } else if let Some(envelope) =
                     build_typed_envelope(peer_id, Instant::now(), incoming)

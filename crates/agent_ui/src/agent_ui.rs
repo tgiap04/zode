@@ -28,7 +28,7 @@ pub use agent_view::{
 // Only another crate's tests build a tab of a chosen intent.
 #[cfg(any(test, feature = "test-support"))]
 pub use agent_view::SessionIntent;
-pub use permission_bypass::PermissionBypassStore;
+pub use permission_bypass::{BypassHost, PermissionBypassStore};
 pub use session_history::{
     AgentHistoryPanel, DeleteAll, DeleteTarget, PROJECT_SCOPE, ResumeRefusal, delete_all_detail,
     delete_session, execute_session_deletion, plan_delete_all, resume_refusal,

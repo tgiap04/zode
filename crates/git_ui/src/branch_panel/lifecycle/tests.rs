@@ -1575,6 +1575,9 @@ mod permission_bypass {
         }
     }
 
+    /// These panels open local projects, so their checkouts are this machine's.
+    const LOCAL: agent_ui::BypassHost = agent_ui::BypassHost::Local;
+
     fn store(cx: &mut gpui::VisualTestContext) -> gpui::Entity<agent_ui::PermissionBypassStore> {
         cx.update(|_, cx| agent_ui::PermissionBypassStore::global(cx))
     }
@@ -1601,7 +1604,7 @@ mod permission_bypass {
 
         store(cx).read_with(cx, |store, _| {
             assert!(
-                !store.is_enabled(std::path::Path::new(CHECKOUT)),
+                !store.is_enabled(&LOCAL, std::path::Path::new(CHECKOUT)),
                 "a declined confirmation must not switch the prompts off"
             );
         });
@@ -1627,17 +1630,18 @@ mod permission_bypass {
 
         let store = store(cx);
         store.read_with(cx, |store, _| {
-            assert!(store.is_enabled(std::path::Path::new(CHECKOUT)));
+            assert!(store.is_enabled(&LOCAL, std::path::Path::new(CHECKOUT)));
         });
 
         store.update(cx, |store, cx| {
             store.prune(
+                &LOCAL,
                 std::path::Path::new(ANCHOR),
                 &[PathBuf::from("/repos/zode/other")],
                 cx,
             );
             assert!(
-                !store.is_enabled(std::path::Path::new(CHECKOUT)),
+                !store.is_enabled(&LOCAL, std::path::Path::new(CHECKOUT)),
                 "this repository's prune must reach the entry, which it can only \
                  do if the anchor was stored rather than the checkout path"
             );
@@ -1654,6 +1658,7 @@ mod permission_bypass {
 
         store(cx).update(cx, |store, cx| {
             store.set(
+                &LOCAL,
                 std::path::Path::new(CHECKOUT),
                 std::path::Path::new(ANCHOR),
                 true,
@@ -1671,7 +1676,7 @@ mod permission_bypass {
             "switching the prompts back on must not itself prompt"
         );
         store(cx).read_with(cx, |store, _| {
-            assert!(!store.is_enabled(std::path::Path::new(CHECKOUT)));
+            assert!(!store.is_enabled(&LOCAL, std::path::Path::new(CHECKOUT)));
         });
     }
 
@@ -1981,6 +1986,40 @@ mod confirm_delete_checkout {
                 "and so must the one nested inside it"
             );
         });
+    }
+
+    /// A checkout whose files are not on this machine offers no sessions to
+    /// delete: the session index is this machine's, so the stocked sessions
+    /// that spell the checkout's path are local ones it merely shares a path
+    /// with. A collaboration guest stands in for a remote server -- both
+    /// answer `is_local() == false`, which is all the menu reads.
+    #[gpui::test]
+    async fn a_checkout_not_on_this_machine_plans_no_session_deletion(cx: &mut TestAppContext) {
+        let (panel, id, cx) = panel_ready_to_delete(cx).await;
+        let target = PathBuf::from(TARGET);
+        stock_sessions_inside_target(&panel, cx);
+        let project = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("the panel's workspace is still alive")
+            .read_with(cx, |workspace, _| workspace.project().clone());
+        project.update(cx, |project, _| project.mark_as_collab_for_testing());
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.confirm_delete_checkout(id, target.clone(), "wt-a".into(), window, cx);
+        });
+        cx.run_until_parked();
+
+        let (_, detail) = cx.pending_prompt().expect("the delete must prompt");
+        assert_eq!(
+            detail,
+            format!(
+                "wt-a\n\nThe worktree at {TARGET} will be removed. Its branch and its commits stay."
+            ),
+            "the local sessions that share the path must not be offered"
+        );
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
     }
 
     /// `TARGET` is never registered as a worktree (see the module doc), so

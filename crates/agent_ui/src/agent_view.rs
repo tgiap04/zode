@@ -12,7 +12,7 @@ use project::agent_bypass::BypassCheck;
 use project::agent_server_store::AgentServerStore;
 use project::{AgentBinary, AgentBinaryMissing, AgentId, Project, builtin_agent};
 
-use crate::permission_bypass::PermissionBypassStore;
+use crate::permission_bypass::{BypassHost, PermissionBypassStore};
 use crate::subagents::{
     ScanRequest, SubagentPass, SubagentTracker, SuccessorSearch, provider_for_agent,
 };
@@ -144,6 +144,10 @@ pub struct AgentView {
     mode: AgentViewMode,
     state: State,
     project: Entity<Project>,
+    /// Whether this tab's sessions are in the stores on this machine, which
+    /// for a remote project they are not. Read once: a project does not move
+    /// between hosts.
+    reads_local_sessions: bool,
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     self_handle: WeakEntity<Self>,
@@ -605,6 +609,7 @@ impl AgentView {
             _rename_subscription: None,
             mode,
             state: State::Starting,
+            reads_local_sessions: project.read(cx).is_local(),
             project,
             workspace,
             focus_handle: cx.focus_handle(),
@@ -735,6 +740,7 @@ impl AgentView {
             _rename_subscription: None,
             mode,
             state: State::Starting,
+            reads_local_sessions: project.read(cx).is_local(),
             project,
             workspace,
             focus_handle: cx.focus_handle(),
@@ -1144,7 +1150,8 @@ impl AgentView {
     /// to the turn state run on this, never on [`Self::reports_turns`] -- a tab
     /// that has fallen back still has to look, to notice when marks appear.
     fn follows_transcript(&self) -> bool {
-        matches!(self.origin.intent, SessionIntent::Tracked(_))
+        self.reads_local_sessions
+            && matches!(self.origin.intent, SessionIntent::Tracked(_))
             && provider_for_agent(&self.agent).is_some_and(|provider| provider.reports_turns())
     }
 
@@ -1181,6 +1188,11 @@ impl AgentView {
     /// check behind however long a disk takes. Two loops, and neither waits on
     /// the other.
     fn track_subagents(&mut self, cx: &mut Context<Self>) {
+        // The transcripts a remote project's subagents write are on the
+        // remote, and a lookup here would read this machine's.
+        if !self.reads_local_sessions {
+            return;
+        }
         // Resolved once, outside the loop: neither can change for the life of
         // a tab, and both are needed on the first pass.
         let Some(provider) = provider_for_agent(&self.agent) else {
@@ -1749,6 +1761,10 @@ impl AgentView {
             .visible_worktrees(cx)
             .next()
             .map(|worktree| worktree.read(cx).abs_path().to_path_buf());
+        // A remote checkout's bypass is recorded against its host; a guest's
+        // has none, and so is never on.
+        let bypass_host = BypassHost::for_project(project.read(cx), cx);
+        let reads_local_sessions = self.reads_local_sessions;
 
         self._startup = Some(cx.spawn_in(window, async move |this, cx| {
             // `store` and `project` are strong handles owned by this task, so the
@@ -1785,20 +1801,28 @@ impl AgentView {
             // the task that was already awaiting the binary, rather than at
             // construction, because a tab has to be able to exist before it knows
             // whether its session is still on disk.
-            let session =
-                match resolve_session(&agent, &intent, anchor, default_cwd.clone(), cx).await {
-                    SessionStart::Fresh => None,
-                    SessionStart::Command(command) => Some(command),
-                    SessionStart::Gone => {
-                        this.update(cx, |this, cx| {
-                            this.state = State::SessionGone;
-                            cx.emit(AgentViewEvent::UpdateTab);
-                            cx.notify();
-                        })
-                        .ok();
-                        return;
-                    }
-                };
+            let session = match resolve_session(
+                &agent,
+                &intent,
+                anchor,
+                default_cwd.clone(),
+                reads_local_sessions,
+                cx,
+            )
+            .await
+            {
+                SessionStart::Fresh => None,
+                SessionStart::Command(command) => Some(command),
+                SessionStart::Gone => {
+                    this.update(cx, |this, cx| {
+                        this.state = State::SessionGone;
+                        cx.emit(AgentViewEvent::UpdateTab);
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
 
             // The directory the agent will actually run in. A resumed session
             // runs where it ran before, not where this window happens to be
@@ -1808,19 +1832,28 @@ impl AgentView {
             // and the spawn come to disagree about which checkout this is.
             let cwd = launch_cwd(session.as_ref(), default_cwd);
 
-            let extra_args =
-                match resolve_bypass(&agent, &binary, cwd.as_deref(), prompts, &store, cx).await {
-                    Ok(extra_args) => extra_args,
-                    Err(refusal) => {
-                        this.update(cx, |this, cx| {
-                            this.state = State::Failed(refusal);
-                            cx.emit(AgentViewEvent::UpdateTab);
-                            cx.notify();
-                        })
-                        .ok();
-                        return;
-                    }
-                };
+            let extra_args = match resolve_bypass(
+                &agent,
+                &binary,
+                bypass_host.as_ref(),
+                cwd.as_deref(),
+                prompts,
+                &store,
+                cx,
+            )
+            .await
+            {
+                Ok(extra_args) => extra_args,
+                Err(refusal) => {
+                    this.update(cx, |this, cx| {
+                        this.state = State::Failed(refusal);
+                        cx.emit(AgentViewEvent::UpdateTab);
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
 
             let extra_args_taken = extra_args.clone();
             let terminal = project
@@ -2119,8 +2152,12 @@ async fn resolve_session(
     intent: &SessionIntent,
     anchor: Option<SessionSummary>,
     default_cwd: Option<std::path::PathBuf>,
+    reads_local_sessions: bool,
     cx: &mut gpui::AsyncApp,
 ) -> SessionStart {
+    if !reads_local_sessions {
+        return remote_session_start(intent);
+    }
     let id = match intent {
         SessionIntent::Untracked => return SessionStart::Fresh,
         SessionIntent::Tracked(id) | SessionIntent::Fork(id) => id.to_string(),
@@ -2137,6 +2174,21 @@ async fn resolve_session(
         start_after_lookup(provider.as_ref(), &intent, default_cwd, &id, lookup)
     })
     .await
+}
+
+/// What a tab of a remote project starts as, decided without a lookup.
+///
+/// The session stores this editor reads are on this machine, and a remote
+/// project's transcripts are on the remote. Asking the local store would answer
+/// "never run" for every tab, and a `Tracked` tab would then be relaunched under
+/// `--session-id <its id>` -- which collides once the remote CLI has written that
+/// session. So a tracked tab starts fresh, and a fork, which has no source it
+/// can read, is gone.
+fn remote_session_start(intent: &SessionIntent) -> SessionStart {
+    match intent {
+        SessionIntent::Untracked | SessionIntent::Tracked(_) => SessionStart::Fresh,
+        SessionIntent::Fork(_) => SessionStart::Gone,
+    }
 }
 
 /// The session a tab starts from: the store's answer for the id, unless the tab
@@ -2345,6 +2397,7 @@ impl AgentView {
 async fn resolve_bypass(
     agent: &AgentId,
     binary: &std::path::Path,
+    host: Option<&BypassHost>,
     cwd: Option<&std::path::Path>,
     prompts: PermissionPrompts,
     store: &Entity<AgentServerStore>,
@@ -2359,7 +2412,7 @@ async fn resolve_bypass(
     let wanted = match prompts {
         PermissionPrompts::SkipOnce => true,
         PermissionPrompts::AsConfigured => {
-            let Some(cwd) = cwd else {
+            let (Some(cwd), Some(host)) = (cwd, host) else {
                 return Ok(Vec::new());
             };
             let bypass = cx.update(|_, cx| PermissionBypassStore::global(cx));
@@ -2367,7 +2420,7 @@ async fn resolve_bypass(
                 return Ok(Vec::new());
             };
             bypass.update(cx, |bypass, cx| bypass.load(cx)).await;
-            bypass.read_with(cx, |bypass, _| bypass.is_enabled(cwd))
+            bypass.read_with(cx, |bypass, _| bypass.is_enabled(host, cwd))
         }
     };
     if !wanted {
@@ -2915,6 +2968,37 @@ mod tests {
     use project::agent_bypass::BypassCheck;
     use std::path::PathBuf;
 
+    /// A remote project's sessions are on the remote, so its tabs are decided
+    /// without asking the stores on this machine -- `remote_session_start`
+    /// takes no provider, which is what keeps that true.
+    mod remote_sessions {
+        use super::super::{SessionIntent, SessionStart, remote_session_start};
+
+        #[test]
+        fn a_tracked_remote_tab_starts_fresh_rather_than_reusing_its_id() {
+            assert!(matches!(
+                remote_session_start(&SessionIntent::Tracked("0b1c".into())),
+                SessionStart::Fresh
+            ));
+        }
+
+        #[test]
+        fn a_remote_fork_has_no_source_to_branch_from() {
+            assert!(matches!(
+                remote_session_start(&SessionIntent::Fork("0b1c".into())),
+                SessionStart::Gone
+            ));
+        }
+
+        #[test]
+        fn an_untracked_remote_tab_starts_fresh() {
+            assert!(matches!(
+                remote_session_start(&SessionIntent::Untracked),
+                SessionStart::Fresh
+            ));
+        }
+    }
+
     /// What counts as answering.
     ///
     /// The rule decides two things at once: whether a tab's mark spins, and —
@@ -3109,8 +3193,11 @@ mod tests {
         // Enabled first. Without this the `set(.., false)` below removes nothing
         // and the store never reaches the state this test is named for -- it
         // would still go red against a render-time lookup, but by accident.
-        store.update(cx, |store, cx| store.set(checkout, anchor, true, cx));
-        store.update(cx, |store, cx| store.set(checkout, anchor, false, cx));
+        let host = crate::BypassHost::Local;
+        store.update(cx, |store, cx| store.set(&host, checkout, anchor, true, cx));
+        store.update(cx, |store, cx| {
+            store.set(&host, checkout, anchor, false, cx)
+        });
 
         view.read_with(cx, |view, _| {
             assert!(
@@ -3857,6 +3944,7 @@ mod tests {
             mode: AgentViewMode::Terminal,
             state: State::Starting,
             project: project.clone(),
+            reads_local_sessions: true,
             workspace: workspace.downgrade(),
             focus_handle: cx.focus_handle(),
             self_handle: cx.entity().downgrade(),
@@ -4453,6 +4541,7 @@ mod tests {
             mode: AgentViewMode::Terminal,
             state: State::Terminal(terminal_view.clone()),
             project: project.clone(),
+            reads_local_sessions: true,
             workspace: workspace.downgrade(),
             focus_handle: cx.focus_handle(),
             self_handle: cx.entity().downgrade(),
@@ -5410,6 +5499,52 @@ mod tests {
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
         let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
         (workspace, project, cx)
+    }
+
+    /// Built through the real constructor, so what is checked is the decision
+    /// a launched tab carries: a tracked tab of a project whose files are on
+    /// this machine follows its transcript, and the same tab of one whose files
+    /// are elsewhere does not, since the transcript it would read is this
+    /// machine's. A collaboration guest stands in for a remote server: both
+    /// answer `is_local() == false`, and this crate cannot build the other.
+    #[gpui::test]
+    async fn a_tab_of_a_non_local_project_never_follows_a_local_transcript(
+        cx: &mut TestAppContext,
+    ) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let tracked_tab = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                cx.new(|cx| {
+                    AgentView::new(
+                        AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                        AgentViewMode::Terminal,
+                        project.clone(),
+                        workspace.downgrade(),
+                        SessionOrigin::new(SessionIntent::Tracked("0b1c".into()), None),
+                        PermissionPrompts::AsConfigured,
+                        window,
+                        cx,
+                    )
+                })
+            })
+        };
+
+        let local = tracked_tab(cx);
+        assert!(
+            local.read_with(cx, |view, _| view.follows_transcript()),
+            "the fixture must be a tab that follows its transcript when local"
+        );
+
+        project.update(cx, |project, _| project.mark_as_collab_for_testing());
+        let remote = tracked_tab(cx);
+        remote.read_with(cx, |view, _| {
+            assert!(!view.reads_local_sessions);
+            assert!(
+                !view.follows_transcript(),
+                "a tab whose transcript is not on this machine must not follow one here"
+            );
+        });
+        cx.run_until_parked();
     }
 
     fn open_claude(workspace: &Entity<Workspace>, cx: &mut gpui::VisualTestContext) {

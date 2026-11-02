@@ -381,19 +381,15 @@ impl WorktreePickerDelegate {
         // action might get pressed. `None` here means an empty plan -- and
         // today's exact prompt, unchanged.
         let session_store = agent_ui::SessionStore::try_global(cx);
-        let plan = session_store
+        let index = session_store
             .as_ref()
-            .map(|store| {
-                checkout_deletion::plan_session_deletion(
-                    store.read(cx).index(),
-                    &path,
-                    &other_live_worktrees,
-                )
-            })
-            .unwrap_or(agent_ui::DeleteAll {
-                targets: Vec::new(),
-                total_bytes: 0,
-            });
+            .map(|store| store.read(cx).index().clone());
+        let plan = checkout_deletion::checkout_session_plan(
+            self.project.read(cx).is_local(),
+            index.as_deref(),
+            &path,
+            &other_live_worktrees,
+        );
 
         let detail = checkout_deletion::confirm_detail(&label, &path, &plan);
         let buttons = checkout_deletion::confirm_buttons(&plan);

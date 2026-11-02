@@ -30,6 +30,40 @@ message AgentServerCommand {
   optional SpawnInTerminal login = 5;
 }
 
+// Asks the host the project lives on where an agent's own CLI is, using that
+// host's shell environment rather than the client's.
+message LocateAgentCli {
+  uint64 project_id = 1;
+  string agent_id = 2;
+}
+
+message LocateAgentCliResponse {
+  // Absent when the CLI is not installed on the host.
+  optional string path = 1;
+}
+
+message ProbeAgentBypassFlag {
+  uint64 project_id = 1;
+  string agent_id = 2;
+  string binary = 3;
+}
+
+message ProbeAgentBypassFlagResponse {
+  message Present {}
+
+  message Absent {}
+
+  message Unprobed {
+    string reason = 1;
+  }
+
+  oneof check {
+    Present present = 1;
+    Absent absent = 2;
+    Unprobed unprobed = 3;
+  }
+}
+
 message ExternalAgentsUpdated {
   uint64 project_id = 1;
   repeated string names = 2;

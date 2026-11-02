@@ -95,6 +95,27 @@ pub(crate) fn plan_session_deletion(
     agent_ui::plan_delete_all(scoped)
 }
 
+/// The sessions removing the checkout at `path` would take with it.
+///
+/// None for a remote project. The session index is this machine's, so a local
+/// session whose `cwd` happens to spell the remote checkout's path would be
+/// matched -- and trashed here, on the wrong machine. The worktree itself is
+/// still removed, on the remote, by git.
+pub(crate) fn checkout_session_plan(
+    project_is_local: bool,
+    index: Option<&agent_sessions::SessionIndex>,
+    path: &Path,
+    other_live_worktrees: &[PathBuf],
+) -> agent_ui::DeleteAll {
+    match index {
+        Some(index) if project_is_local => plan_session_deletion(index, path, other_live_worktrees),
+        _ => agent_ui::DeleteAll {
+            targets: Vec::new(),
+            total_bytes: 0,
+        },
+    }
+}
+
 /// Today's confirmation body, for a worktree deletion that reaches no
 /// sessions. Kept as its own function -- and its text copied verbatim from
 /// `checkout_menu`'s existing prompt rather than retyped -- so a plan holding
@@ -258,6 +279,42 @@ pub(crate) fn close_agent_tabs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session_in(cwd: &str) -> agent_sessions::SessionSummary {
+        let cwd = PathBuf::from(cwd);
+        agent_sessions::SessionSummary {
+            id: std::sync::Arc::from("a"),
+            agent: agent_sessions::AgentKind::Claude,
+            title: "a".to_string(),
+            preview: String::new(),
+            preview_speaker: None,
+            log_path: Some(cwd.join("a.jsonl")),
+            cwd,
+            branch: None,
+            model: None,
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
+            log_bytes: 1024,
+        }
+    }
+
+    #[test]
+    fn removing_a_remote_checkout_plans_no_session_trash() {
+        let index = agent_sessions::SessionIndex::new(vec![session_in("/home/me/repo/wt")]);
+        let checkout = Path::new("/home/me/repo/wt");
+
+        let local = checkout_session_plan(true, Some(&index), checkout, &[]);
+        assert_eq!(
+            local.count(),
+            1,
+            "the fixture must be one a local plan takes"
+        );
+
+        let remote = checkout_session_plan(false, Some(&index), checkout, &[]);
+        assert!(
+            remote.is_empty(),
+            "a local session that spells the remote path must not be trashed"
+        );
+    }
     use agent_sessions::SessionSummary;
     use std::time::SystemTime;
 

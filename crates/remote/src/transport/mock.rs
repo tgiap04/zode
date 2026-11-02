@@ -67,6 +67,7 @@ pub struct MockRemoteConnection {
     server_channel: Arc<ChannelClient>,
     server_cx: SendableCx,
     terminals_over_rpc: AtomicBool,
+    path_style: parking_lot::Mutex<PathStyle>,
 }
 
 /// Wrapper to pass `AsyncApp` across thread boundaries in tests.
@@ -109,6 +110,14 @@ impl MockConnectionRegistry {
     pub fn route_terminals_over_rpc(&mut self, opts: &MockConnectionOptions) {
         if let Some((_, connection)) = self.pending.get(&opts.id) {
             connection.terminals_over_rpc.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Makes a registered connection report `path_style` as the remote's, so a
+    /// test can tell the remote's path style from this machine's.
+    pub fn set_path_style(&mut self, opts: &MockConnectionOptions, path_style: PathStyle) {
+        if let Some((_, connection)) = self.pending.get(&opts.id) {
+            *connection.path_style.lock() = path_style;
         }
     }
 
@@ -178,6 +187,7 @@ impl MockConnection {
             server_channel: server_client.clone(),
             server_cx: SendableCx::new(server_cx),
             terminals_over_rpc: AtomicBool::new(false),
+            path_style: parking_lot::Mutex::new(PathStyle::local()),
         });
 
         let (tx, rx) = oneshot::channel();
@@ -298,7 +308,7 @@ impl RemoteConnection for MockRemoteConnection {
     }
 
     fn path_style(&self) -> PathStyle {
-        PathStyle::local()
+        *self.path_style.lock()
     }
 
     fn shell(&self) -> String {

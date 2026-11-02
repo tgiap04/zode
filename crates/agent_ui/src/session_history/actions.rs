@@ -237,6 +237,13 @@ pub fn delete_session(
     window: &mut Window,
     cx: &mut App,
 ) {
+    // The paths a provider names are this machine's, and `project.fs()` of a
+    // remote project is this machine's too: a delete here would take a local
+    // transcript that merely shares a path with the remote one.
+    if !workspace.read(cx).project().read(cx).is_local() {
+        notify_remote_delete_refused(workspace, cx);
+        return;
+    }
     let provider = agent_sessions::provider_for(session.agent);
     match provider.deletion(session) {
         Deletion::Nothing => offer_to_drop_the_row(session, window, cx),
@@ -892,13 +899,47 @@ pub fn execute_session_deletion(
     targets: Vec<DeleteTarget>,
     cx: &mut App,
 ) -> Task<()> {
-    let fs = workspace.read(cx).project().read(cx).fs().clone();
-    let agent_store = workspace
-        .read(cx)
-        .project()
-        .read(cx)
-        .agent_server_store()
-        .clone();
+    let project = workspace.read(cx).project().clone();
+    let project_is_local = project.read(cx).is_local();
+    if !project_is_local {
+        notify_remote_delete_refused(workspace, cx);
+    }
+    let fs = project.read(cx).fs().clone();
+    let agent_store = project.read(cx).agent_server_store().clone();
+    sweep_session_deletion(fs, agent_store, project_is_local, targets, cx)
+}
+
+/// What refusing a delete in a remote project tells the reader.
+pub(crate) const REMOTE_DELETE_REFUSAL: &str =
+    "Deleting sessions of a remote project is not supported yet";
+
+struct RemoteDeleteRefused;
+
+fn notify_remote_delete_refused(workspace: &Entity<workspace::Workspace>, cx: &mut App) {
+    workspace.update(cx, |workspace, cx| {
+        workspace.show_notification(NotificationId::unique::<RemoteDeleteRefused>(), cx, |cx| {
+            cx.new(|cx| {
+                workspace::notifications::simple_message_notification::MessageNotification::new(
+                    REMOTE_DELETE_REFUSAL,
+                    cx,
+                )
+            })
+        });
+    });
+}
+
+/// The sweep behind [`execute_session_deletion`], given what it acts through.
+pub(crate) fn sweep_session_deletion(
+    fs: Arc<dyn fs::Fs>,
+    agent_store: Entity<project::AgentServerStore>,
+    project_is_local: bool,
+    targets: Vec<DeleteTarget>,
+    cx: &mut App,
+) -> Task<()> {
+    // Before anything is resolved, let alone touched: see `delete_session`.
+    if !project_is_local {
+        return Task::ready(());
+    }
     let store = crate::SessionStore::global(cx);
 
     cx.spawn(async move |cx| {
@@ -1076,6 +1117,11 @@ impl AgentHistoryPanel {
         let Some(workspace) = self.workspace().upgrade() else {
             return;
         };
+        // Before the plan is built: see `delete_session`.
+        if !workspace.read(cx).project().read(cx).is_local() {
+            notify_remote_delete_refused(&workspace, cx);
+            return;
+        }
 
         let roots = self.project_roots(cx);
         let scoped: Vec<(&SessionSummary, Deletion)> =

@@ -2564,6 +2564,27 @@ async fn init_test_routing_terminals(
     cx: &mut TestAppContext,
     server_cx: &mut TestAppContext,
 ) -> (Entity<Project>, Entity<HeadlessProject>) {
+    init_test_with_connection(
+        server_fs,
+        |opts, cx| {
+            if terminals_over_rpc {
+                RemoteClient::route_mock_terminals_over_rpc(opts, cx);
+            }
+        },
+        cx,
+        server_cx,
+    )
+    .await
+}
+
+/// Like [`init_test`], with `configure` shaping the mock connection before the
+/// client connects over it.
+async fn init_test_with_connection(
+    server_fs: &Arc<FakeFs>,
+    configure: impl FnOnce(&remote::RemoteConnectionOptions, &mut TestAppContext),
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) -> (Entity<Project>, Entity<HeadlessProject>) {
     let server_fs = server_fs.clone();
     cx.update(|cx| {
         release_channel::init(semver::Version::new(0, 0, 0), cx);
@@ -2574,9 +2595,7 @@ async fn init_test_routing_terminals(
     init_logger();
 
     let (opts, ssh_server_client, _) = RemoteClient::fake_server(cx, server_cx);
-    if terminals_over_rpc {
-        RemoteClient::route_mock_terminals_over_rpc(&opts, cx);
-    }
+    configure(&opts, cx);
     let http_client = Arc::new(BlockedHttpClient);
     let node_runtime = NodeRuntime::unavailable();
     let languages = Arc::new(LanguageRegistry::new(cx.executor()));
@@ -3062,5 +3081,343 @@ mod terminals {
         assert!(!alive(), "the process outlived the shutdown");
         drop(terminal);
         std::fs::remove_file(&pid_file).ok();
+    }
+}
+
+/// Agent CLIs are looked up and probed on the host the project lives on, with
+/// that host's environment, and the answers ride back over the connection.
+#[cfg(unix)]
+mod agent_cli {
+    use super::*;
+    use futures::FutureExt as _;
+    use project::agent_bypass::BypassCheck;
+    use project::agent_server_store::{
+        AgentBinary, AgentId, AgentServerStore, CLAUDE_CODE_AGENT_ID, builtin_agent,
+    };
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::time::Duration;
+    use util::paths::PathStyle;
+
+    /// A real directory on the server's `PATH`. `which` and the `--help`
+    /// probe both stat and run real files, which `FakeFs` cannot provide.
+    fn server_bin_dir(script: Option<&str>) -> util::test::TempTree {
+        let tree = match script {
+            Some(script) => util::test::TempTree::new(json!({ "claude": script })),
+            None => util::test::TempTree::new(json!({})),
+        };
+        if script.is_some() {
+            std::fs::set_permissions(
+                tree.path().join("claude"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .expect("the fake CLI is executable");
+        }
+        tree
+    }
+
+    const OFFERS_THE_FLAG: &str =
+        "#!/bin/sh\nprintf '  --dangerously-skip-permissions  Skip prompts\\n'\n";
+
+    fn server_store(
+        headless: &Entity<HeadlessProject>,
+        server_cx: &mut TestAppContext,
+    ) -> Entity<AgentServerStore> {
+        headless.read_with(server_cx, |headless, _| headless.agent_server_store.clone())
+    }
+
+    fn client_store(
+        project: &Entity<Project>,
+        cx: &mut TestAppContext,
+    ) -> Entity<AgentServerStore> {
+        project.read_with(cx, |project, _| project.agent_server_store().clone())
+    }
+
+    fn point_server_path_at(
+        headless: &Entity<HeadlessProject>,
+        directory: &Path,
+        server_cx: &mut TestAppContext,
+    ) {
+        server_store(headless, server_cx).update(server_cx, |store, _| {
+            store.set_search_path_for_test(Some(directory.to_string_lossy().into_owned()))
+        });
+    }
+
+    async fn resolve_claude(
+        project: &Entity<Project>,
+        cx: &mut TestAppContext,
+    ) -> anyhow::Result<AgentBinary> {
+        client_store(project, cx)
+            .update(cx, |store, cx| {
+                store.resolve_agent_binary(&AgentId::new(CLAUDE_CODE_AGENT_ID), cx)
+            })
+            .await
+    }
+
+    fn start_probe(
+        project: &Entity<Project>,
+        binary: PathBuf,
+        cx: &mut TestAppContext,
+    ) -> gpui::Task<BypassCheck> {
+        client_store(project, cx).update(cx, |store, cx| {
+            store.verify_bypass_flag(&AgentId::new(CLAUDE_CODE_AGENT_ID), binary, cx)
+        })
+    }
+
+    async fn probe_claude(
+        project: &Entity<Project>,
+        binary: PathBuf,
+        cx: &mut TestAppContext,
+    ) -> BypassCheck {
+        start_probe(project, binary, cx).await
+    }
+
+    #[gpui::test]
+    async fn test_remote_locate_agent_cli(cx: &mut TestAppContext, server_cx: &mut TestAppContext) {
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let (project, headless) = init_test(&fs, cx, server_cx).await;
+        let bin = server_bin_dir(Some("#!/bin/sh\n"));
+        point_server_path_at(&headless, bin.path(), server_cx);
+
+        let binary = resolve_claude(&project, cx)
+            .await
+            .expect("a remote project can locate its agent CLI");
+
+        assert_eq!(
+            binary,
+            AgentBinary::Found(bin.path().join("claude")),
+            "the CLI is the one on the server's PATH"
+        );
+    }
+
+    /// Run with the remote reporting the path style this machine does not
+    /// have, so an install line taken from the host would be the wrong one.
+    #[gpui::test]
+    async fn test_remote_missing_agent_cli_offers_the_remotes_installer(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let remote_style = match PathStyle::local() {
+            PathStyle::Posix => PathStyle::Windows,
+            PathStyle::Windows => PathStyle::Posix,
+        };
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let (project, headless) = init_test_with_connection(
+            &fs,
+            |opts, cx| {
+                if let remote::RemoteConnectionOptions::Mock(mock) = opts {
+                    cx.update(|cx| {
+                        cx.default_global::<remote::MockConnectionRegistry>()
+                            .set_path_style(mock, remote_style)
+                    });
+                }
+            },
+            cx,
+            server_cx,
+        )
+        .await;
+        let empty = server_bin_dir(None);
+        point_server_path_at(&headless, empty.path(), server_cx);
+
+        let binary = resolve_claude(&project, cx)
+            .await
+            .expect("a missing CLI is an answer, not an error");
+
+        let AgentBinary::Missing(missing) = binary else {
+            panic!("nothing on the server's PATH must read as missing, got {binary:?}");
+        };
+        let claude = builtin_agent(CLAUDE_CODE_AGENT_ID).expect("claude is a builtin");
+        assert_eq!(
+            missing.install_command,
+            claude.install_command_for(remote_style)
+        );
+    }
+
+    #[gpui::test]
+    async fn test_remote_probe_runs_on_the_server(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        // The probe's output arrives from a real process.
+        cx.executor().allow_parking();
+        server_cx.executor().allow_parking();
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let (project, headless) = init_test(&fs, cx, server_cx).await;
+
+        let offers = server_bin_dir(Some(OFFERS_THE_FLAG));
+        point_server_path_at(&headless, offers.path(), server_cx);
+        let binary = offers.path().join("claude");
+        let check = probe_claude(&project, binary.clone(), cx).await;
+        assert_eq!(check, BypassCheck::Present);
+        // Client and server share a disk here, so only the caches tell which
+        // side ran `--help`: a remote path names nothing on the client.
+        assert_eq!(
+            client_store(&project, cx)
+                .read_with(cx, |store, _| store.cached_bypass_flag_for_test(&binary)),
+            None,
+            "the client must not have probed the binary itself"
+        );
+        assert_eq!(
+            server_store(&headless, server_cx).read_with(server_cx, |store, _| store
+                .cached_bypass_flag_for_test(&binary)),
+            Some(true),
+            "the server ran the probe and keeps the answer"
+        );
+
+        let renamed = server_bin_dir(Some(
+            "#!/bin/sh\nprintf '  --some-other-flag  Something else\\n'\n",
+        ));
+        point_server_path_at(&headless, renamed.path(), server_cx);
+        let binary = renamed.path().join("claude");
+        let check = probe_claude(&project, binary.clone(), cx).await;
+        assert_eq!(
+            check,
+            BypassCheck::Absent {
+                flag: "--dangerously-skip-permissions",
+                binary,
+            }
+        );
+    }
+
+    /// The server probes the CLI it finds itself. A request naming another
+    /// program -- even another `claude` -- is refused, not run.
+    #[gpui::test]
+    async fn test_remote_probe_ignores_a_binary_the_server_did_not_find(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        server_cx.executor().allow_parking();
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let (project, headless) = init_test(&fs, cx, server_cx).await;
+        let on_path = server_bin_dir(Some(OFFERS_THE_FLAG));
+        point_server_path_at(&headless, on_path.path(), server_cx);
+        let elsewhere = server_bin_dir(Some(OFFERS_THE_FLAG));
+
+        for requested in [elsewhere.path().join("claude"), PathBuf::from("/bin/sh")] {
+            let check = probe_claude(&project, requested.clone(), cx).await;
+            assert!(
+                matches!(check, BypassCheck::Unprobed { .. }),
+                "`{}` is not the CLI the server found, got {check:?}",
+                requested.display()
+            );
+            assert_eq!(
+                server_store(&headless, server_cx).read_with(server_cx, |store, _| store
+                    .cached_bypass_flag_for_test(&requested)),
+                None,
+                "`{}` must not have been run",
+                requested.display()
+            );
+        }
+    }
+
+    /// A server session that knows these requests but has no handler for them
+    /// answers "no handler registered". That answer is named as an out-of-date
+    /// server. A server built before the requests existed cannot even decode
+    /// them, and never answers: see the timeout test below.
+    #[gpui::test]
+    async fn test_server_without_agent_handlers_is_named_out_of_date(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        init_logger();
+        let (opts, server_session, connect_guard) = RemoteClient::fake_server(cx, server_cx);
+        // Only the heartbeat the connection itself needs.
+        let server_keepalive = server_cx.new(|_| ());
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::Ping>, _| async { Ok(rpc::proto::Ack {}) },
+        );
+        drop(connect_guard);
+        let remote = RemoteClient::connect_mock(opts, cx).await;
+        let project = build_project(remote, cx);
+
+        let error = resolve_claude(&project, cx)
+            .await
+            .expect_err("a server without the handler cannot locate the CLI");
+        assert_eq!(
+            error.to_string(),
+            "the remote server does not support agent terminals yet; reconnect to update it"
+        );
+
+        let check = probe_claude(&project, PathBuf::from("/usr/bin/claude"), cx).await;
+        assert_eq!(
+            check,
+            BypassCheck::Unprobed {
+                reason:
+                    "the remote server does not support agent terminals yet; reconnect to update it"
+                        .to_string()
+            },
+            "a server without the handler fails the probe closed"
+        );
+    }
+
+    /// What a server built before these requests existed does with them:
+    /// nothing at all. The client has to give up on its own.
+    #[gpui::test]
+    async fn test_client_gives_up_on_a_server_that_never_answers(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        init_logger();
+        let (opts, server_session, connect_guard) = RemoteClient::fake_server(cx, server_cx);
+        let server_keepalive = server_cx.new(|_| ());
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::Ping>, _| async { Ok(rpc::proto::Ack {}) },
+        );
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::LocateAgentCli>, _| {
+                futures::future::pending::<anyhow::Result<rpc::proto::LocateAgentCliResponse>>()
+            },
+        );
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::ProbeAgentBypassFlag>, _| {
+                futures::future::pending::<
+                    anyhow::Result<rpc::proto::ProbeAgentBypassFlagResponse>,
+                >()
+            },
+        );
+        drop(connect_guard);
+        let remote = RemoteClient::connect_mock(opts, cx).await;
+        let project = build_project(remote, cx);
+
+        let mut locate = client_store(&project, cx).update(cx, |store, cx| {
+            store.resolve_agent_binary(&AgentId::new(CLAUDE_CODE_AGENT_ID), cx)
+        });
+        let mut probe = start_probe(&project, PathBuf::from("/usr/bin/claude"), cx);
+        cx.run_until_parked();
+        assert!(
+            (&mut locate).now_or_never().is_none() && (&mut probe).now_or_never().is_none(),
+            "the server must not have answered, or this test proves nothing"
+        );
+
+        cx.executor().advance_clock(Duration::from_secs(31));
+        cx.run_until_parked();
+
+        let Some(located) = (&mut locate).now_or_never() else {
+            panic!("the client must stop waiting for a server that never answers");
+        };
+        let error = located.expect_err("no answer is not a CLI");
+        assert!(
+            error.to_string().contains("did not answer"),
+            "got {error:#}"
+        );
+        let Some(check) = (&mut probe).now_or_never() else {
+            panic!("the probe must stop waiting too");
+        };
+        assert!(
+            matches!(&check, BypassCheck::Unprobed { reason } if reason.contains("did not answer")),
+            "got {check:?}"
+        );
     }
 }
