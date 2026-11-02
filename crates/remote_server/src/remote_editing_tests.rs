@@ -3421,3 +3421,255 @@ mod agent_cli {
         );
     }
 }
+
+/// A remote project's agent sessions are the remote host's: listed, checked
+/// and deleted there, with nothing on this machine read or trashed for them.
+///
+/// Unix only: the server's stores are real files (the providers read with
+/// `std::fs`) mirrored into the server's `FakeFs` at the same absolute paths,
+/// and those are temp-dir paths of the machine running the test.
+#[cfg(unix)]
+mod agent_sessions_on_remote {
+    use super::*;
+    use agent_sessions::{AgentKind, ClaudeProvider, SessionProvider};
+    use project::agent_session_host::{
+        AgentSessionHost, REMOTE_LIST_TIMEOUT, REMOTE_SESSIONS_OUT_OF_DATE, RemoteSessionHost,
+    };
+
+    const SERVER_SESSION: &str = "00000000-0000-4000-8000-0000000000c1";
+
+    /// A Claude store with one transcript that ran in `/project`, laid out
+    /// the way the CLI writes it.
+    fn server_claude_store() -> util::test::TempTree {
+        util::test::TempTree::new(json!({
+            "-project": {
+                format!("{SERVER_SESSION}.jsonl"): concat!(
+                    r#"{"type":"user","message":{"role":"user","content":"hello from the server"},"cwd":"/project"}"#,
+                    "\n",
+                    r#"{"type":"ai-title","aiTitle":"Server session"}"#,
+                    "\n"
+                ),
+            }
+        }))
+    }
+
+    fn give_the_server(
+        headless: &Entity<HeadlessProject>,
+        store: &Path,
+        server_cx: &mut TestAppContext,
+    ) {
+        let service = headless.read_with(server_cx, |headless, _| headless.agent_sessions.clone());
+        service.update(server_cx, |service, _| {
+            service.set_providers_for_test(vec![
+                Arc::new(ClaudeProvider::new(store.to_path_buf())) as Arc<dyn SessionProvider>
+            ])
+        });
+    }
+
+    fn remote_host(project: &Entity<Project>, cx: &mut TestAppContext) -> RemoteSessionHost {
+        match project.read_with(cx, |project, cx| project.agent_session_host(cx)) {
+            Some(AgentSessionHost::Remote(remote)) => remote,
+            Some(AgentSessionHost::Local(_)) => {
+                panic!("a remote project's sessions must be remote")
+            }
+            None => panic!("a remote project has a session host"),
+        }
+    }
+
+    #[gpui::test]
+    async fn test_remote_history_lists_the_servers_sessions(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let (project, headless) = init_test(&fs, cx, server_cx).await;
+        let store = server_claude_store();
+        give_the_server(&headless, store.path(), server_cx);
+
+        let host = remote_host(&project, cx);
+        let listing = cx.update(|cx| host.list(cx)).await;
+        cx.run_until_parked();
+
+        let listed: Vec<(String, String)> = listing
+            .as_ref()
+            .map(|listing| {
+                listing
+                    .sessions
+                    .iter()
+                    .map(|session| {
+                        (
+                            session.id.to_string(),
+                            session.cwd.to_string_lossy().into_owned(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            listed,
+            vec![(SERVER_SESSION.to_string(), "/project".to_string())],
+            "the server's own store, and only it, is listed: {listing:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_remote_history_delete_trashes_on_the_server_only(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let store = server_claude_store();
+        let transcript = store
+            .path()
+            .join("-project")
+            .join(format!("{SERVER_SESSION}.jsonl"));
+        fs.insert_tree(
+            store.path().join("-project"),
+            json!({ format!("{SERVER_SESSION}.jsonl"): "" }),
+        )
+        .await;
+        let (project, headless) = init_test(&fs, cx, server_cx).await;
+        give_the_server(&headless, store.path(), server_cx);
+        let client_fs = project.read_with(cx, |project, _| project.fs().as_fake());
+        // The same path on this machine, so a delete that ran here would have
+        // something to take.
+        client_fs
+            .insert_tree(
+                store.path().join("-project"),
+                json!({ format!("{SERVER_SESSION}.jsonl"): "" }),
+            )
+            .await;
+
+        let host = remote_host(&project, cx);
+        let outcome = cx
+            .update(|cx| host.delete(AgentKind::Claude, SERVER_SESSION, cx))
+            .await;
+        cx.run_until_parked();
+
+        assert_eq!(
+            outcome.ok(),
+            Some(agent_sessions::wire::WireDeleteOutcome::Gone)
+        );
+        let server_trashed: Vec<String> = fs
+            .trash_entries()
+            .into_iter()
+            .map(|entry| entry.name.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            server_trashed.contains(&format!("{SERVER_SESSION}.jsonl")),
+            "the transcript went to the server's trash, got {server_trashed:?}"
+        );
+        assert!(!fs.is_file(&transcript).await);
+        assert_eq!(
+            client_fs.trash_entries().len(),
+            0,
+            "nothing on this machine may be trashed for a remote project"
+        );
+        assert!(client_fs.is_file(&transcript).await);
+    }
+
+    #[gpui::test]
+    async fn test_remote_history_checks_directories_on_the_server(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({ "src": {} }))
+            .await;
+        let (project, _headless) = init_test(&fs, cx, server_cx).await;
+
+        let host = remote_host(&project, cx);
+        let exists = cx
+            .update(|cx| {
+                host.directories_exist(
+                    vec![
+                        PathBuf::from("/project/src"),
+                        PathBuf::from("/nowhere"),
+                        PathBuf::from("relative"),
+                    ],
+                    cx,
+                )
+            })
+            .await;
+
+        assert_eq!(exists.ok(), Some(vec![true, false, false]));
+    }
+
+    /// A server that knows the request but has no handler for it answers at
+    /// once, and the history names the fix rather than showing an error.
+    #[gpui::test]
+    async fn test_remote_history_names_an_out_of_date_server(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        init_logger();
+        let (opts, server_session, connect_guard) = RemoteClient::fake_server(cx, server_cx);
+        let server_keepalive = server_cx.new(|_| ());
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::Ping>, _| async { Ok(rpc::proto::Ack {}) },
+        );
+        drop(connect_guard);
+        let remote = RemoteClient::connect_mock(opts, cx).await;
+        let project = build_project(remote, cx);
+
+        let host = remote_host(&project, cx);
+        let listing = cx.update(|cx| host.list(cx)).await;
+
+        assert_eq!(
+            listing.map_err(|error| error.to_string()).err().as_deref(),
+            Some(REMOTE_SESSIONS_OUT_OF_DATE)
+        );
+    }
+
+    /// A server too old to know the request drops it without a word. The
+    /// deadline ends the wait, and what the history then shows -- the store
+    /// keeps a failed listing's error as the empty list's text -- says what to
+    /// try without claiming the server is old.
+    #[gpui::test]
+    async fn test_remote_history_names_a_server_that_never_answers(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        init_logger();
+        let (opts, server_session, connect_guard) = RemoteClient::fake_server(cx, server_cx);
+        let server_keepalive = server_cx.new(|_| ());
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::Ping>, _| async { Ok(rpc::proto::Ack {}) },
+        );
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::AgentSessionRequest>, _| {
+                futures::future::pending::<anyhow::Result<rpc::proto::AgentSessionResponse>>()
+            },
+        );
+        drop(connect_guard);
+        let remote = RemoteClient::connect_mock(opts, cx).await;
+        let project = build_project(remote, cx);
+
+        let host = remote_host(&project, cx);
+        let listing = cx.update(|cx| host.list(cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(REMOTE_LIST_TIMEOUT);
+        cx.run_until_parked();
+
+        assert_eq!(
+            listing
+                .await
+                .map_err(|error| error.to_string())
+                .err()
+                .as_deref(),
+            Some(
+                "the remote server did not answer within 60s; if it is older than this app, \
+                 reconnect, then refresh"
+            )
+        );
+    }
+}

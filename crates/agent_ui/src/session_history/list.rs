@@ -160,6 +160,30 @@ fn group_label(cwd: &Path, roots: &[PathBuf]) -> String {
     }
 }
 
+/// What an empty list says.
+///
+/// Four different nothings, and telling them apart is the whole value of the
+/// element: no project open, nothing matched, a host that could not be asked,
+/// or genuinely no history.
+pub(crate) fn empty_message(
+    no_roots: bool,
+    query: &str,
+    loading: bool,
+    error: Option<&SharedString>,
+) -> SharedString {
+    if no_roots {
+        "Open a project to see its agent sessions".into()
+    } else if !query.trim().is_empty() {
+        "No sessions match".into()
+    } else if loading {
+        "Reading sessions…".into()
+    } else if let Some(error) = error {
+        error.clone()
+    } else {
+        "No agent sessions for this project yet".into()
+    }
+}
+
 impl Render for AgentHistoryPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (background, border) = {
@@ -186,7 +210,7 @@ impl Render for AgentHistoryPanel {
             &self.collapsed_agents,
             &self.collapsed_groups,
         );
-        let unavailable = self.unavailable();
+        let unavailable = self.unavailable(cx);
 
         v_flex()
             .id("agent-history-panel")
@@ -283,19 +307,14 @@ impl AgentHistoryPanel {
         &self,
         roots: &[PathBuf],
         query: &str,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        // Three different nothings, and telling them apart is the whole value of
-        // this element: no project open, nothing matched, or genuinely no history.
-        let message = if roots.is_empty() {
-            "Open a project to see its agent sessions"
-        } else if !query.trim().is_empty() {
-            "No sessions match"
-        } else if self.loading {
-            "Reading sessions…"
-        } else {
-            "No agent sessions for this project yet"
-        };
+        let message = empty_message(
+            roots.is_empty(),
+            query,
+            self.loading,
+            self.store.read(cx).error(),
+        );
         v_flex()
             .flex_1()
             .size_full()
@@ -719,5 +738,27 @@ mod tests {
         };
         assert_eq!(hits("release checklist"), 1);
         assert_eq!(hits("newest"), 1, "the transcript title still finds it");
+    }
+
+    /// A host that could not be asked is named in the empty list, in place of
+    /// "no sessions yet" -- which would tell the reader there is nothing to
+    /// find when there is, on a server that needs a reconnect.
+    #[test]
+    fn an_empty_list_names_a_host_that_could_not_be_asked() {
+        let out_of_date: SharedString =
+            project::agent_session_host::REMOTE_SESSIONS_OUT_OF_DATE.into();
+        assert_eq!(
+            super::empty_message(false, "", false, Some(&out_of_date)),
+            out_of_date
+        );
+        assert_eq!(
+            super::empty_message(false, "", false, None).as_ref(),
+            "No agent sessions for this project yet"
+        );
+        assert_eq!(
+            super::empty_message(false, "", true, Some(&out_of_date)).as_ref(),
+            "Reading sessions…",
+            "a sweep in flight is still said as one"
+        );
     }
 }

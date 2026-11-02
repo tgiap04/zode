@@ -115,7 +115,8 @@ pub(crate) fn render_session(
     let colors = cx.theme().colors();
     let expanded = panel.expanded_rows.contains(&session.id);
     let alive = panel.cwd_alive(&session.cwd);
-    let can_fork = panel.can_fork(session);
+    let controls = resume_controls(alive, panel.can_fork(session), panel.remote);
+    let can_reveal = panel.can_reveal(cx);
     let roots = panel.project_roots(cx);
     let menu_handle = panel.menu_handle(&session.id);
     let title = crate::SessionNames::try_global(cx)
@@ -158,8 +159,9 @@ pub(crate) fn render_session(
                     ix,
                     session,
                     open,
-                    alive,
-                    can_fork,
+                    controls,
+                    alive && can_reveal,
+                    can_reveal,
                     expanded,
                     menu_handle,
                     cx,
@@ -210,14 +212,55 @@ fn row_group(ix: usize) -> SharedString {
     SharedString::from(format!("agent-history-row-{ix}"))
 }
 
+/// Whether a row's two resume controls are on, and what each one's tooltip
+/// says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ResumeControls {
+    pub(crate) resume: bool,
+    pub(crate) resume_tooltip: &'static str,
+    pub(crate) fork: bool,
+    pub(crate) fork_tooltip: &'static str,
+}
+
+/// Several reasons a control can be off, and its tooltip names the one that
+/// applies, in the order they are checked: a session on a remote host first,
+/// since nothing here can run it; then a dead directory; then an agent with no
+/// fork.
+pub(crate) fn resume_controls(alive: bool, can_fork: bool, remote: bool) -> ResumeControls {
+    use crate::session_history::actions::REMOTE_RESUME_UNSUPPORTED;
+    if remote {
+        return ResumeControls {
+            resume: false,
+            resume_tooltip: REMOTE_RESUME_UNSUPPORTED,
+            fork: false,
+            fork_tooltip: REMOTE_RESUME_UNSUPPORTED,
+        };
+    }
+    ResumeControls {
+        resume: alive,
+        resume_tooltip: if alive {
+            "Resume in Worktree"
+        } else {
+            "Resume in Worktree — the directory is gone"
+        },
+        fork: alive && can_fork,
+        fork_tooltip: match (alive, can_fork) {
+            (true, true) => "Continue in New Session…",
+            (false, _) => "Continue in New Session — the directory is gone",
+            (true, false) => "Continue in New Session — Codex has no fork",
+        },
+    }
+}
+
 /// The hover toolbar, the menu behind the ellipsis, and the disclosure that
 /// stays visible to say the row opens.
 fn render_controls(
     ix: usize,
     session: &SessionSummary,
     open: bool,
-    alive: bool,
-    can_fork: bool,
+    controls: ResumeControls,
+    can_open_directory: bool,
+    can_reveal: bool,
     expanded: bool,
     menu_handle: PopoverMenuHandle<ContextMenu>,
     cx: &mut Context<AgentHistoryPanel>,
@@ -258,18 +301,9 @@ fn render_controls(
         .child(
             IconButton::new(("resume", ix), IconName::PlayFilled)
                 .icon_size(IconSize::Small)
-                .disabled(!alive)
+                .disabled(!controls.resume)
                 .visible_on_hover(group.clone())
-                .tooltip(move |_window, cx| {
-                    Tooltip::simple(
-                        if alive {
-                            "Resume in Worktree"
-                        } else {
-                            "Resume in Worktree — the directory is gone"
-                        },
-                        cx,
-                    )
-                })
+                .tooltip(move |_window, cx| Tooltip::simple(controls.resume_tooltip, cx))
                 .on_click(cx.listener({
                     let session = session.clone();
                     move |this, _, window, cx| {
@@ -280,21 +314,9 @@ fn render_controls(
         .child(
             IconButton::new(("fork", ix), IconName::Plus)
                 .icon_size(IconSize::Small)
-                .disabled(!alive || !can_fork)
+                .disabled(!controls.fork)
                 .visible_on_hover(group.clone())
-                // Two different reasons this can be off, and the tooltip must name
-                // the one that applies: a dead directory first, since that is
-                // checked first.
-                .tooltip(move |_window, cx| {
-                    Tooltip::simple(
-                        match (alive, can_fork) {
-                            (true, true) => "Continue in New Session…",
-                            (false, _) => "Continue in New Session — the directory is gone",
-                            (true, false) => "Continue in New Session — Codex has no fork",
-                        },
-                        cx,
-                    )
-                })
+                .tooltip(move |_window, cx| Tooltip::simple(controls.fork_tooltip, cx))
                 .on_click(cx.listener({
                     let session = session.clone();
                     move |this, _, window, cx| {
@@ -310,8 +332,9 @@ fn render_controls(
                 .child(render_menu(
                     ix,
                     session,
-                    alive,
-                    can_fork,
+                    controls,
+                    can_open_directory,
+                    can_reveal,
                     menu_handle,
                     group,
                     cx,
@@ -339,8 +362,9 @@ fn render_controls(
 fn render_menu(
     ix: usize,
     session: &SessionSummary,
-    alive: bool,
-    can_fork: bool,
+    controls: ResumeControls,
+    can_open_directory: bool,
+    can_reveal: bool,
     menu_handle: PopoverMenuHandle<ContextMenu>,
     group: SharedString,
     cx: &mut Context<AgentHistoryPanel>,
@@ -395,7 +419,7 @@ fn render_menu(
                         menu,
                         "Resume in Worktree",
                         IconName::PlayFilled,
-                        alive,
+                        controls.resume,
                         |panel, session, window, cx| {
                             panel.resume(session, Fork::Continue, window, cx)
                         },
@@ -404,7 +428,7 @@ fn render_menu(
                         menu,
                         "Continue in New Session…",
                         IconName::Plus,
-                        alive && can_fork,
+                        controls.fork,
                         |panel, session, window, cx| panel.resume(session, Fork::New, window, cx),
                     );
                     menu = add(
@@ -426,14 +450,14 @@ fn render_menu(
                         menu,
                         "Reveal Log",
                         IconName::Folder,
-                        has_log,
+                        has_log && can_reveal,
                         |panel, session, _window, cx| panel.reveal_log(session, cx),
                     );
                     menu = add(
                         menu,
                         "Open Working Directory",
                         IconName::Folder,
-                        alive,
+                        can_open_directory,
                         |panel, session, _window, cx| panel.open_working_directory(session, cx),
                     );
                     menu = menu.separator();

@@ -497,7 +497,10 @@ message Envelope {
     LocateAgentCli locate_agent_cli = 456;
     LocateAgentCliResponse locate_agent_cli_response = 457;
     ProbeAgentBypassFlag probe_agent_bypass_flag = 458;
-    ProbeAgentBypassFlagResponse probe_agent_bypass_flag_response = 459; // current max
+    ProbeAgentBypassFlagResponse probe_agent_bypass_flag_response = 459;
+
+    AgentSessionRequest agent_session_request = 460;
+    AgentSessionResponse agent_session_response = 461; // current max
   }
 
   reserved 87 to 88;

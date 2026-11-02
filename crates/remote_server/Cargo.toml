@@ -86,6 +86,7 @@ windows.workspace = true
 gpui = { workspace = true, features = ["windows-manifest"] }
 
 [dev-dependencies]
+agent_sessions.workspace = true
 client = { workspace = true, features = ["test-support"] }
 clock = { workspace = true, features = ["test-support"] }
 editor = { workspace = true, features = ["test-support"] }

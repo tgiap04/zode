@@ -280,12 +280,15 @@ const REMOTE_LOCATE_TIMEOUT: Duration = Duration::from_secs(30);
 /// budget, plus room for the round trip.
 const REMOTE_PROBE_TIMEOUT: Duration = Duration::from_secs(PROBE_TIMEOUT.as_secs() + 5);
 
-/// A server built before these requests existed answers them with "no
-/// handler registered". Said in terms the user can act on, since the fix is a
-/// reconnect, which fetches the server matching this app.
-fn remote_agent_error(error: anyhow::Error) -> anyhow::Error {
+/// What a timed-out agent terminal request adds to "did not answer".
+const REMOTE_AGENT_UNANSWERED: &str = "if it predates agent terminals, reconnect to update it";
+
+/// A server built before a request existed answers it with "no handler
+/// registered". Said as `out_of_date` instead, in terms the user can act on,
+/// since the fix is a reconnect, which fetches the server matching this app.
+pub(crate) fn name_out_of_date_server(error: anyhow::Error, out_of_date: &str) -> anyhow::Error {
     if format!("{error:#}").contains("no handler registered") {
-        anyhow::anyhow!(REMOTE_SERVER_OUT_OF_DATE)
+        anyhow::anyhow!("{out_of_date}")
     } else {
         error
     }
@@ -293,22 +296,43 @@ fn remote_agent_error(error: anyhow::Error) -> anyhow::Error {
 
 /// `request`, unless `timer` fires first.
 ///
-/// A server built before these requests existed drops them without a word --
-/// its message loop has no type to decode them into -- so without a deadline
-/// the launch would wait on it forever.
+/// A server built before a request existed may drop it without a word -- its
+/// message loop has no type to decode it into -- so without a deadline the
+/// caller would wait on it forever. `out_of_date` replaces the answer of a
+/// server that says it has no handler; `if_unanswered` is what a timeout adds
+/// after "did not answer", and must not claim the server is old: a current one
+/// that is merely slow ends the same way.
+pub(crate) async fn remote_request_within<T>(
+    request: impl Future<Output = Result<T>>,
+    timer: impl Future<Output = ()>,
+    timeout: Duration,
+    out_of_date: &str,
+    if_unanswered: &str,
+) -> Result<T> {
+    match futures::future::select(std::pin::pin!(request), std::pin::pin!(timer)).await {
+        futures::future::Either::Left((response, _)) => {
+            response.map_err(|error| name_out_of_date_server(error, out_of_date))
+        }
+        futures::future::Either::Right(_) => Err(anyhow::anyhow!(
+            "the remote server did not answer within {}s; {if_unanswered}",
+            timeout.as_secs()
+        )),
+    }
+}
+
 async fn remote_agent_request<T>(
     request: impl Future<Output = Result<T>>,
     timer: impl Future<Output = ()>,
     timeout: Duration,
 ) -> Result<T> {
-    match futures::future::select(std::pin::pin!(request), std::pin::pin!(timer)).await {
-        futures::future::Either::Left((response, _)) => response.map_err(remote_agent_error),
-        futures::future::Either::Right(_) => Err(anyhow::anyhow!(
-            "the remote server did not answer within {}s; if it predates agent terminals, \
-             reconnect to update it",
-            timeout.as_secs()
-        )),
-    }
+    remote_request_within(
+        request,
+        timer,
+        timeout,
+        REMOTE_SERVER_OUT_OF_DATE,
+        REMOTE_AGENT_UNANSWERED,
+    )
+    .await
 }
 
 /// Looks `binary` up in `search_path`, which is meant to be the `PATH` of the
@@ -1809,14 +1833,20 @@ mod tests {
 
     #[test]
     fn an_old_server_is_named_as_out_of_date() {
-        let mapped = remote_agent_error(anyhow::anyhow!(
-            "RPC request LocateAgentCli failed: no handler registered for LocateAgentCli"
-        ));
+        let mapped = name_out_of_date_server(
+            anyhow::anyhow!(
+                "RPC request LocateAgentCli failed: no handler registered for LocateAgentCli"
+            ),
+            REMOTE_SERVER_OUT_OF_DATE,
+        );
         assert_eq!(
             mapped.to_string(),
             "the remote server does not support agent terminals yet; reconnect to update it"
         );
-        let other = remote_agent_error(anyhow::anyhow!("connection lost"));
+        let other = name_out_of_date_server(
+            anyhow::anyhow!("connection lost"),
+            REMOTE_SERVER_OUT_OF_DATE,
+        );
         assert_eq!(
             other.to_string(),
             "connection lost",

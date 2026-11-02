@@ -64,6 +64,19 @@ message ProbeAgentBypassFlagResponse {
   }
 }
 
+// One question about the agent sessions stored on the host a project lives
+// on. `op_json` is an `agent_sessions::wire::SessionOp`; app and server ship
+// together, so one envelope carries every operation.
+message AgentSessionRequest {
+  uint64 project_id = 1;
+  string op_json = 2;
+}
+
+// An `agent_sessions::wire::SessionOpResult`.
+message AgentSessionResponse {
+  string result_json = 1;
+}
+
 message ExternalAgentsUpdated {
   uint64 project_id = 1;
   repeated string names = 2;

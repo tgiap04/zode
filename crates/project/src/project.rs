@@ -1,5 +1,6 @@
 pub mod agent_bypass;
 pub mod agent_server_store;
+pub mod agent_session_host;
 pub mod bookmark_store;
 pub mod buffer_store;
 pub mod color_extractor;
@@ -6255,6 +6256,36 @@ impl Project {
 
     pub fn agent_server_store(&self) -> &Entity<AgentServerStore> {
         &self.agent_server_store
+    }
+
+    /// Where this project's agent sessions are kept: this machine for a local
+    /// project, the remote server's host for a remote one. `None` for a
+    /// collaboration guest, whose sessions are on a collaborator's machine
+    /// that nothing here can ask.
+    pub fn agent_session_host(&self, cx: &App) -> Option<agent_session_host::AgentSessionHost> {
+        if self.is_local() {
+            return Some(agent_session_host::AgentSessionHost::Local(
+                agent_sessions::default_providers(),
+            ));
+        }
+        self.remote_session_host(cx)
+            .map(agent_session_host::AgentSessionHost::Remote)
+    }
+
+    /// The remote server this project's sessions are kept on, through this
+    /// project's own connection to it. `None` for any project not opened over
+    /// a remote server. Cheap, unlike [`Self::agent_session_host`] for a local
+    /// project, which builds the providers.
+    pub fn remote_session_host(&self, cx: &App) -> Option<agent_session_host::RemoteSessionHost> {
+        if !self.is_via_remote_server() {
+            return None;
+        }
+        let remote = self.remote_client.as_ref()?.read(cx);
+        Some(agent_session_host::RemoteSessionHost::new(
+            remote.proto_client(),
+            REMOTE_SERVER_PROJECT_ID,
+            remote.path_style(),
+        ))
     }
 
     #[cfg(feature = "test-support")]

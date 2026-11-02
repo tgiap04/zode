@@ -368,6 +368,14 @@ impl BranchPanel {
         else {
             return;
         };
+        // These rows come from this machine's own store, so for a project on
+        // another host one only matches a checkout by its path string: the id
+        // is not one the host holds, and asking it to delete would remove
+        // nothing while saying it did.
+        if !workspace.read(cx).project().read(cx).is_local() {
+            log::warn!("not deleting agent session {id}: its checkout is not on this machine");
+            return;
+        }
         let index = store.read(cx).index().clone();
         let Some(session) = index.find(id) else {
             return;

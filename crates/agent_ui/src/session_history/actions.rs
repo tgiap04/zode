@@ -1,21 +1,18 @@
 use crate::{AgentView, agent_view::SessionIntent, session_history::panel::AgentHistoryPanel};
-use agent_sessions::{AgentCommand, AgentKind, Deletion, Fork, SessionProvider, SessionSummary};
-use futures::{FutureExt as _, select_biased};
-use gpui::{
-    App, AppContext as _, AsyncWindowContext, ClipboardItem, Context, Entity, Task, Window,
+use agent_sessions::{
+    AgentCommand, AgentKind, Deletion, Fork, SessionProvider, SessionSummary,
+    wire::WireDeleteOutcome,
 };
+use gpui::{
+    App, AppContext as _, AsyncWindowContext, ClipboardItem, Context, Entity, SharedString, Task,
+    Window,
+};
+use project::agent_session_host::{AgentSessionHost, CommandDeleteOutcome, run_command_delete};
 use std::collections::HashSet;
-use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 use util::ResultExt as _;
 use workspace::notifications::NotificationId;
-
-/// How long a single `Deletion::Command` invocation may run before the delete
-/// gives up on it and treats it as a failure (M6). A wedged CLI call must not
-/// stall every trash and delete queued behind it in the same sequential sweep.
-const COMMAND_DELETE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Whether the directory a session ran in is still there.
 ///
@@ -26,39 +23,7 @@ pub(crate) fn cwd_exists(session: &SessionSummary) -> bool {
     directory_exists(&session.cwd)
 }
 
-/// [`cwd_exists`] for a bare path. Stats the disk, so never from a render.
-pub(crate) fn directory_exists(path: &Path) -> bool {
-    is_local_absolute_path(path) && path.is_dir()
-}
-
-/// M2 -- every provider's `cwd` is untrusted data (it is read from a store this
-/// editor does not own), and it reaches an `is_dir()` call here, plus, for a
-/// `Deletion::Command`, a subprocess `current_dir` in
-/// [`run_resolved_command_delete`]. On Windows, merely stat-ing a UNC path
-/// (`\\host\share`) is itself a side effect -- it can trigger an outbound SMB
-/// authentication attempt -- so the shape has to be rejected *before* any
-/// `is_dir()` call, not after. The minimum this rejects: anything empty,
-/// relative, or -- on Windows only -- not an ordinary local drive path.
-fn is_local_absolute_path(path: &Path) -> bool {
-    if path.as_os_str().is_empty() || !path.is_absolute() {
-        return false;
-    }
-    #[cfg(windows)]
-    {
-        matches!(
-            path.components().next(),
-            Some(std::path::Component::Prefix(prefix))
-                if matches!(
-                    prefix.kind(),
-                    std::path::Prefix::Disk(_) | std::path::Prefix::VerbatimDisk(_)
-                )
-        )
-    }
-    #[cfg(not(windows))]
-    {
-        true
-    }
-}
+pub(crate) use project::agent_session_host::directory_exists;
 
 /// Why [`resume_session`] would do nothing for a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -144,6 +109,14 @@ pub fn resume_session(
     window: &mut Window,
     cx: &mut App,
 ) {
+    // The checks below stat this machine's disk and build this machine's
+    // providers. For a session on a remote host they answer about the wrong
+    // machine: nothing at all on Windows with WSL, or, where a local path
+    // happens to match, a tab that starts fresh while looking resumed.
+    if workspace.read(cx).project().read(cx).is_via_remote_server() {
+        refuse_remote_resume(workspace, cx);
+        return;
+    }
     let refusal = resume_refusal_in_background(session, fork, cx);
     let agent = session.agent.builtin_agent_id();
     // `SessionOrigin::new` drops the title of a tab that is not tracked -- so a
@@ -170,6 +143,37 @@ pub fn resume_session(
                 .log_err();
         })
         .detach();
+}
+
+/// What resuming a session on a remote host says, until a tab can run the
+/// agent there.
+pub(crate) const REMOTE_RESUME_UNSUPPORTED: &str = "Resuming a remote session is not supported yet";
+
+fn refuse_remote_resume(workspace: &Entity<workspace::Workspace>, cx: &mut App) {
+    workspace.update(cx, |workspace, cx| {
+        show_message(workspace, named_message(REMOTE_RESUME_UNSUPPORTED), cx)
+    });
+}
+
+/// A message whose notification is named by its own text, so the same message
+/// raised twice refreshes one toast rather than stacking a second.
+fn named_message(text: &'static str) -> (NotificationId, SharedString) {
+    let text = SharedString::new_static(text);
+    (NotificationId::named(text.clone()), text)
+}
+
+fn show_message(
+    workspace: &mut workspace::Workspace,
+    (id, text): (NotificationId, SharedString),
+    cx: &mut Context<workspace::Workspace>,
+) {
+    workspace.show_notification(id, cx, |cx| {
+        cx.new(|cx| {
+            workspace::notifications::simple_message_notification::MessageNotification::new(
+                text, cx,
+            )
+        })
+    });
 }
 
 /// What a confirmation adds when sessions it is about to take are running in
@@ -237,16 +241,36 @@ pub fn delete_session(
     window: &mut Window,
     cx: &mut App,
 ) {
-    // The paths a provider names are this machine's, and `project.fs()` of a
-    // remote project is this machine's too: a delete here would take a local
-    // transcript that merely shares a path with the remote one.
-    if !workspace.read(cx).project().read(cx).is_local() {
-        notify_remote_delete_refused(workspace, cx);
-        return;
+    // The paths a provider here names are this machine's, and `project.fs()`
+    // of a remote project is this machine's too: a delete here would take a
+    // local transcript that merely shares a path with the remote one. A remote
+    // project's sessions are deleted by its host, and a collaboration guest's
+    // by nobody.
+    match session_host(workspace, cx) {
+        Some(AgentSessionHost::Local(_)) => {}
+        Some(AgentSessionHost::Remote(remote)) => {
+            let project = workspace.read(cx).project().clone();
+            let store = crate::SessionStore::for_project(&project, cx);
+            delete_on_remote_host(
+                workspace,
+                store,
+                session,
+                move |agent, id, cx| remote.delete(agent, &id, cx),
+                window,
+                cx,
+            );
+            return;
+        }
+        None => {
+            notify_shared_delete_refused(workspace, cx);
+            return;
+        }
     }
     let provider = agent_sessions::provider_for(session.agent);
     match provider.deletion(session) {
-        Deletion::Nothing => offer_to_drop_the_row(session, window, cx),
+        Deletion::Nothing => {
+            offer_to_drop_the_row(crate::SessionStore::global(cx), session, window, cx)
+        }
         Deletion::Trash(paths) => delete_via_trash(workspace, session, paths, window, cx),
         Deletion::Command(command) => {
             delete_via_command(workspace, provider, session, command, window, cx)
@@ -416,178 +440,142 @@ fn delete_via_command(
         .detach();
 }
 
-/// What running a `Deletion::Command` once found out.
-#[derive(Debug)]
-enum CommandDeleteOutcome {
-    /// The session is gone -- either the command exited zero, or it did not,
-    /// but the store no longer holds the id either way (see
-    /// [`run_command_delete`]): the goal was already met.
-    Gone,
-    /// The CLI that owns this session is not on this machine. Kept distinct
-    /// from [`Self::Failed`] because a missing binary must not be offered the
-    /// same way a `Trash` failure is -- see H3 in the phase notes.
-    BinaryMissing(project::AgentBinaryMissing),
-    /// The command ran, or tried to, and failed, and the store still holds
-    /// the session. Carries text already stripped of control characters, fit
-    /// to put in a toast.
-    Failed(String),
+/// Where `workspace`'s project keeps its sessions; `None` for a collaboration
+/// guest. See [`project::Project::agent_session_host`].
+fn session_host(workspace: &Entity<workspace::Workspace>, cx: &App) -> Option<AgentSessionHost> {
+    workspace.read(cx).project().read(cx).agent_session_host(cx)
 }
 
-/// Runs one `Deletion::Command`, resolving the binary through
-/// `AgentServerStore` -- never the advisory `command.program` -- and racing it
-/// against [`COMMAND_DELETE_TIMEOUT`] (M6) so one wedged invocation cannot stall
-/// a sequential sweep.
+/// What a delete on a remote host will do, as far as the confirmation can say
+/// before asking it: opencode keeps its sessions in a database only its CLI
+/// may write, so its delete cannot be undone; every other store's files go to
+/// the host's trash.
 ///
-/// A non-zero exit is not treated as final: `opencode session delete` on an id
-/// already gone exits 1, so a failure re-checks `provider.find` and only keeps
-/// the row if the store still holds the session (C2/H9) -- the store is the
-/// authority, not the exit code.
-///
-/// Generic over the context so the same logic serves both the single delete
-/// (`AsyncWindowContext`, for the missing-binary prompt) and the bulk sweep
-/// (`AsyncApp`, which never prompts mid-sweep).
-async fn run_command_delete<C: gpui::AppContext>(
-    provider: &Arc<dyn SessionProvider>,
-    agent_store: &Entity<project::AgentServerStore>,
-    executor: &gpui::BackgroundExecutor,
-    agent: AgentKind,
-    id: &Arc<str>,
-    command: &AgentCommand,
-    cx: &mut C,
-) -> CommandDeleteOutcome {
-    let agent_id = project::AgentId::new(agent.builtin_agent_id());
-    let resolve = agent_store.update(cx, |store, cx| store.resolve_agent_binary(&agent_id, cx));
-    let binary = match resolve.await {
-        Ok(project::AgentBinary::Found(path)) => path,
-        Ok(project::AgentBinary::Missing(missing)) => {
-            return CommandDeleteOutcome::BinaryMissing(missing);
-        }
-        Err(error) => return CommandDeleteOutcome::Failed(error.to_string()),
-    };
-    run_resolved_command_delete(provider, executor, &binary, id, command, cx).await
+/// Decided by agent rather than by the provider's own `deletion`, which would
+/// read this machine's disk for a session that is not on it.
+fn deletes_through_cli(agent: AgentKind) -> bool {
+    matches!(agent, AgentKind::OpenCode)
 }
 
-/// The half of [`run_command_delete`] that runs once a binary is already in
-/// hand: builds the real subprocess and races it through [`race_command_delete`].
+/// The body of a remote delete's confirmation, and its confirm button.
 ///
-/// No `--` argv separator is inserted here, even though an earlier draft of
-/// this mechanism called for one. Verified against opencode's real CLI (the
-/// only agent that reaches this path today): a `--` placed before its
-/// `session`/`delete` subcommand words stops them being recognised at all,
-/// falling through to opencode's default action -- which launches its
-/// interactive TUI as a detached child process. That is a strictly worse
-/// outcome than the wedged call M6's timeout exists to survive, since it
-/// would happen on *every* delete rather than an occasional stuck one. A
-/// provider whose id shape needs protecting from being read as a flag (H1)
-/// carries its own guard in its own `args`, at the position that actually
-/// works for its CLI; this spawn site trusts `command.args` verbatim.
-async fn run_resolved_command_delete<C: gpui::AppContext>(
-    provider: &Arc<dyn SessionProvider>,
-    executor: &gpui::BackgroundExecutor,
-    binary: &std::path::Path,
-    id: &Arc<str>,
-    command: &AgentCommand,
-    cx: &mut C,
-) -> CommandDeleteOutcome {
-    let mut process = util::command::Command::new(binary);
-    process.args(command.args.iter());
-    // M2: the same shape guard `cwd_exists` applies, and for the same reason
-    // -- `command.cwd` is untrusted data reaching a subprocess `current_dir`,
-    // and on Windows merely stat-ing a UNC path is itself a network side
-    // effect, so the check has to run before `is_dir()` rather than after.
-    if is_local_absolute_path(&command.cwd) && command.cwd.is_dir() {
-        process.current_dir(&command.cwd);
+/// Worded per agent from the row's own paths, to name everything the host's
+/// provider takes rather than only the transcript: Claude's subagent folder
+/// beside it, and Copilot's whole session folder.
+pub(crate) fn remote_delete_prompt(session: &SessionSummary) -> (String, &'static str) {
+    let agent_label = session.agent.label();
+    if deletes_through_cli(session.agent) {
+        return (
+            format!(
+                "{agent_label}'s own store on the remote host holds this session. Deleting \
+                 it asks {agent_label} there to remove it. This cannot be undone."
+            ),
+            "Delete",
+        );
     }
-    race_command_delete(provider, executor, id, process.output(), cx).await
+    let log = session
+        .log_path
+        .as_ref()
+        .map(|path| path.display().to_string());
+    let what = match (session.agent, log) {
+        (AgentKind::Claude, Some(log)) => format!("{log} and its subagent folder"),
+        (AgentKind::Copilot, Some(_)) => match session.log_path.as_deref().and_then(Path::parent) {
+            Some(folder) => format!("The session folder {}", folder.display()),
+            None => "The session folder".to_string(),
+        },
+        (AgentKind::Copilot, None) => "The session folder".to_string(),
+        (_, Some(log)) => log,
+        (_, None) => "Its files".to_string(),
+    };
+    (
+        format!(
+            "{what} will move to the trash on the remote host ({}).",
+            format_bytes(session.log_bytes)
+        ),
+        "Move to Trash",
+    )
 }
 
-/// Races one command-delete attempt against [`COMMAND_DELETE_TIMEOUT`] (M6),
-/// then resolves the outcome -- checking back with `provider.find` when the
-/// attempt failed or ran out of time (C2/H9), since a wedged or non-zero exit
-/// for a session the store no longer holds means the goal was already met.
+/// The remote half of [`delete_session`]: asks, then has the host delete the
+/// session by its id. The host finds the session in its own store and decides
+/// what to take, so nothing here names a path to it.
 ///
-/// Generic over the future that actually produces the process's output, which
-/// is what makes this independently testable: a real `smol::process` child
-/// plus its own OS reactor thread does not compose safely with
-/// `#[gpui::test]`'s deterministic dispatcher -- trying exactly that produced
-/// two different failure modes, a wrong outcome once and a panic inside
-/// `blocking::Executor`'s thread pool the next. Passing the run as a plain
-/// `Future` lets a test drive the timeout and the idempotency re-check with a
-/// value built by hand (`std::future::ready`/`std::future::pending`), with no
-/// subprocess and no reactor involved, so M6 and C2/H9 get a real test instead
-/// of staying implemented-but-unproven a second time.
-async fn race_command_delete<C: gpui::AppContext>(
-    provider: &Arc<dyn SessionProvider>,
-    executor: &gpui::BackgroundExecutor,
-    id: &Arc<str>,
-    run: impl Future<Output = std::io::Result<std::process::Output>>,
-    cx: &mut C,
-) -> CommandDeleteOutcome {
-    let spawned = select_biased! {
-        output = run.fuse() => Some(output),
-        _ = executor.timer(COMMAND_DELETE_TIMEOUT).fuse() => None,
-    };
+/// `delete` is the request to the host, taken as a function so the outcomes
+/// can be driven without a connection.
+pub(crate) fn delete_on_remote_host(
+    workspace: &Entity<workspace::Workspace>,
+    store: Entity<crate::SessionStore>,
+    session: &SessionSummary,
+    delete: impl FnOnce(AgentKind, Arc<str>, &mut App) -> Task<anyhow::Result<WireDeleteOutcome>>
+    + 'static,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let agent_label = session.agent.label();
+    let (body, confirm) = remote_delete_prompt(session);
+    let detail = with_running_note(
+        format!("{}\n\n{body}", session.title),
+        running_in_tabs_note(running_in_tabs([(session.agent, &session.id)], cx), 1),
+    );
+    let prompt = window.prompt(
+        gpui::PromptLevel::Warning,
+        "Delete this session?",
+        Some(&detail),
+        &[confirm, "Cancel"],
+        cx,
+    );
 
-    if let Some(Ok(output)) = &spawned {
-        if output.status.success() {
-            return CommandDeleteOutcome::Gone;
-        }
-    }
-
-    let recheck_provider = provider.clone();
-    let recheck_id = id.to_string();
-    let still_there = cx
-        .background_spawn(async move { recheck_provider.find(&recheck_id) })
-        .await;
-    match still_there {
-        Ok(None) => CommandDeleteOutcome::Gone,
-        Ok(Some(_)) | Err(_) => {
-            let message = match spawned {
-                Some(Ok(output)) => {
-                    let stderr = strip_ansi_first_line(&output.stderr);
-                    if stderr.is_empty() {
-                        format!("exited with {}", output.status)
-                    } else {
-                        stderr
+    let workspace_weak = workspace.downgrade();
+    let agent = session.agent;
+    let id = session.id.clone();
+    let title = session.title.clone();
+    window
+        .spawn(cx, async move |cx| {
+            if prompt.await.ok() != Some(0) {
+                return;
+            }
+            let outcome = match cx.update(|_, cx| delete(agent, id.clone(), cx)) {
+                Ok(deleting) => deleting.await,
+                Err(error) => Err(error),
+            };
+            match outcome {
+                Ok(WireDeleteOutcome::Gone) => {
+                    store.update(cx, |store, cx| store.forget(&id, cx));
+                }
+                Ok(WireDeleteOutcome::NothingToDelete) => {
+                    let detail = nothing_left_detail(&title, agent_label, "on the remote host");
+                    let follow_up = cx.prompt(
+                        gpui::PromptLevel::Info,
+                        NOTHING_LEFT_TITLE,
+                        Some(&detail),
+                        &["Remove From List", "Cancel"],
+                    );
+                    if follow_up.await.ok() == Some(0) {
+                        store.update(cx, |store, cx| store.forget(&id, cx));
                     }
                 }
-                Some(Err(error)) => error.to_string(),
-                None => format!("timed out after {}s", COMMAND_DELETE_TIMEOUT.as_secs()),
-            };
-            CommandDeleteOutcome::Failed(message)
-        }
-    }
-}
-
-/// Strips ANSI CSI escape sequences from `bytes`, then returns the first
-/// non-empty line of what remains.
-///
-/// "Trim control characters" is not enough (M3): that removes the `ESC`
-/// (`0x1B`) byte alone and leaves e.g. `[91m` behind as ordinary printable
-/// text -- exactly the garbage a strip exists to prevent. A CSI sequence is
-/// `ESC` `[`, then any number of bytes, ending at the first one in
-/// `0x40..=0x7E` (its "final byte"); this scans for that shape and drops the
-/// whole run, `ESC` included.
-fn strip_ansi_first_line(bytes: &[u8]) -> String {
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut iter = bytes.iter().copied().peekable();
-    while let Some(byte) = iter.next() {
-        if byte == 0x1B && iter.peek() == Some(&b'[') {
-            iter.next();
-            for next in iter.by_ref() {
-                if (0x40..=0x7E).contains(&next) {
-                    break;
+                Ok(WireDeleteOutcome::BinaryMissing { binary }) => {
+                    let message = format!(
+                        "`{binary}` is not installed on the remote host, so {agent_label} \
+                         cannot be asked to remove it"
+                    );
+                    notify_command_delete_failed(&workspace_weak, agent_label, &id, &message, cx);
+                }
+                Ok(WireDeleteOutcome::Failed { message }) => {
+                    notify_command_delete_failed(&workspace_weak, agent_label, &id, &message, cx);
+                }
+                Err(error) => {
+                    notify_command_delete_failed(
+                        &workspace_weak,
+                        agent_label,
+                        &id,
+                        &format!("{error:#}"),
+                        cx,
+                    );
                 }
             }
-            continue;
-        }
-        out.push(byte);
-    }
-    String::from_utf8_lossy(&out)
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or_default()
-        .to_string()
+        })
+        .detach();
 }
 
 /// Type tag for the failed-command-delete toast. Paired with the session id it
@@ -636,9 +624,35 @@ pub struct DeleteTarget {
     /// The agent that owns this session, needed to resolve the right CLI for
     /// a `Deletion::Command` target.
     pub agent: AgentKind,
-    /// What this target actually takes: nothing, a set of paths to trash, or
-    /// a command to run against the agent's own store.
-    pub deletion: Deletion,
+    /// What this target actually takes.
+    pub deletion: TargetDeletion,
+}
+
+/// What one target of a bulk delete takes.
+pub enum TargetDeletion {
+    /// What this machine's provider says the session owns: nothing, a set of
+    /// paths to trash, or a command to run against the agent's own store. The
+    /// local sweep acts on exactly this.
+    Here(Deletion),
+    /// A session on the project's remote host, as the confirmation counts it.
+    /// The host decides what goes, so this carries nothing a sweep here could
+    /// act on -- no path, no command.
+    OnHost(HostDeletion),
+}
+
+impl From<Deletion> for TargetDeletion {
+    fn from(deletion: Deletion) -> Self {
+        Self::Here(deletion)
+    }
+}
+
+/// What a remote host's delete of a session is expected to be.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostDeletion {
+    /// Files the host moves to its trash.
+    Trash,
+    /// A record only the agent's CLI on the host may remove, for good.
+    Command,
 }
 
 /// Everything a "delete all" will take, decided before anything is asked or
@@ -677,17 +691,28 @@ impl DeleteAll {
     pub fn trashed(&self) -> usize {
         self.targets
             .iter()
-            .filter(|target| matches!(target.deletion, Deletion::Trash(_)))
+            .filter(|target| {
+                matches!(
+                    target.deletion,
+                    TargetDeletion::Here(Deletion::Trash(_))
+                        | TargetDeletion::OnHost(HostDeletion::Trash)
+                )
+            })
             .count()
     }
 
     /// How many targets go through their agent's own CLI and cannot be
-    /// recovered. C1 exists because this number used to be invisible to the
-    /// bulk prompt.
+    /// recovered. The bulk prompt has to say so whenever this is not zero.
     pub fn commanded(&self) -> usize {
         self.targets
             .iter()
-            .filter(|target| matches!(target.deletion, Deletion::Command(_)))
+            .filter(|target| {
+                matches!(
+                    target.deletion,
+                    TargetDeletion::Here(Deletion::Command(_))
+                        | TargetDeletion::OnHost(HostDeletion::Command)
+                )
+            })
             .count()
     }
 }
@@ -737,7 +762,29 @@ pub fn plan_delete_all<'a>(
         targets.push(DeleteTarget {
             id: session.id.clone(),
             agent: session.agent,
-            deletion,
+            deletion: deletion.into(),
+        });
+    }
+    DeleteAll {
+        targets,
+        total_bytes,
+    }
+}
+
+/// [`plan_delete_all`] for sessions on a remote host, counted without reading
+/// anything: this machine has none of their files.
+fn plan_remote_delete_all<'a>(sessions: impl IntoIterator<Item = &'a SessionSummary>) -> DeleteAll {
+    let mut targets = Vec::new();
+    let mut total_bytes = 0;
+    for session in sessions {
+        let Some(deletion) = remote_deletion_preview(session) else {
+            continue;
+        };
+        total_bytes += session.log_bytes;
+        targets.push(DeleteTarget {
+            id: session.id.clone(),
+            agent: session.agent,
+            deletion: TargetDeletion::OnHost(deletion),
         });
     }
     DeleteAll {
@@ -757,7 +804,7 @@ pub const PROJECT_SCOPE: &str =
 
 /// The body of the confirmation.
 ///
-/// Branches on which kinds of session are in the plan (C1): a `Command`
+/// Branches on which kinds of session are in the plan: a `Command`
 /// session is not recoverable, so a prompt that only ever said "move to the
 /// trash ... can be recovered from there" would tell the user the opposite of
 /// the truth the moment the plan held even one of them. The two counts are
@@ -846,24 +893,21 @@ pub fn delete_all_detail(
 /// stores belong to the agents, and this editor does not write to them. Said
 /// plainly, because a row that reappears on the next sweep with no explanation
 /// is the second half of the same confusion.
-fn offer_to_drop_the_row(session: &SessionSummary, window: &mut Window, cx: &mut App) {
-    let agent = session.agent.label();
-    let detail = format!(
-        "{}\n\nNothing this session owns is still on disk, so there is nothing to \
-         move to the trash.\n\nRemoving it here only takes it off this list. It does \
-         not touch {agent}'s own store, so the row comes back if {agent} still lists \
-         the session.",
-        session.title
-    );
+fn offer_to_drop_the_row(
+    store: Entity<crate::SessionStore>,
+    session: &SessionSummary,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let detail = nothing_left_detail(&session.title, session.agent.label(), "on disk");
     let prompt = window.prompt(
         gpui::PromptLevel::Info,
-        "Nothing left to delete",
+        NOTHING_LEFT_TITLE,
         Some(&detail),
         &["Remove From List", "Cancel"],
         cx,
     );
 
-    let store = crate::SessionStore::global(cx);
     let id = session.id.clone();
     cx.spawn(async move |cx| {
         if prompt.await.ok() != Some(0) {
@@ -874,23 +918,37 @@ fn offer_to_drop_the_row(session: &SessionSummary, window: &mut Window, cx: &mut
     .detach();
 }
 
+const NOTHING_LEFT_TITLE: &str = "Nothing left to delete";
+
+/// The body of [`offer_to_drop_the_row`]'s prompt. `place` says where nothing
+/// is left: this machine's disk, or the remote host.
+fn nothing_left_detail(title: &str, agent: &str, place: &str) -> String {
+    format!(
+        "{title}\n\nNothing this session owns is still {place}, so there is nothing to \
+         move to the trash.\n\nRemoving it here only takes it off this list. It does \
+         not touch {agent}'s own store, so the row comes back if {agent} still lists \
+         the session."
+    )
+}
+
 /// Runs a plan already agreed to: takes every `target`, then forgets the ones
 /// it actually finished.
 ///
 /// Free rather than a method on the panel, for the reason [`delete_session`]
 /// is: a second surface with its own targets -- a worktree checkout, for
-/// instance -- runs the identical sweep rather than reimplementing it. `fs`
-/// and the agent-server store are read off `workspace` once, up front, so the
-/// caller does not have to supply them separately.
+/// instance -- runs the identical sweep rather than reimplementing it.
 ///
-/// Keeps every discipline the sweep already had: sequential `Command` runs
-/// (they are writers against one sqlite database in WAL mode, and N concurrent
-/// writers is contention at best), it never aborts early -- one failure must
-/// not strand the rest of the batch behind it -- and a session is forgotten
+/// Where the sweep runs follows the project. A local project's runs here,
+/// through the project's `fs` and agent-server store: `Command` runs one at a
+/// time (they are writers against one sqlite database in WAL mode), one
+/// failure never strands the rest of the batch, and a session is forgotten
 /// only once everything it owns is confirmed gone, matching the rule
-/// [`delete_via_trash`] keeps for a single delete. `forget_many` runs through
-/// the global store handle rather than any particular panel, so a window
-/// closed mid-sweep still leaves the shared index agreeing with the disk.
+/// [`delete_via_trash`] keeps for a single delete. A remote project's runs on
+/// its host, one session at a time by agent and id (see
+/// [`sweep_on_remote_host`]). A collaboration guest's is refused with a
+/// notification. Either sweep forgets through the store rather than any
+/// panel, so a window closed mid-sweep still leaves the index agreeing with
+/// the stores.
 ///
 /// The returned [`Task`] must be awaited or detached like any other -- dropped
 /// early, it cancels the rest of the sweep the same way any other `Task` would.
@@ -900,46 +958,167 @@ pub fn execute_session_deletion(
     cx: &mut App,
 ) -> Task<()> {
     let project = workspace.read(cx).project().clone();
-    let project_is_local = project.read(cx).is_local();
-    if !project_is_local {
-        notify_remote_delete_refused(workspace, cx);
+    if project.read(cx).is_local() {
+        let fs = project.read(cx).fs().clone();
+        let agent_store = project.read(cx).agent_server_store().clone();
+        return sweep_session_deletion(fs, agent_store, targets, cx);
     }
-    let fs = project.read(cx).fs().clone();
-    let agent_store = project.read(cx).agent_server_store().clone();
-    sweep_session_deletion(fs, agent_store, project_is_local, targets, cx)
-}
-
-/// What refusing a delete in a remote project tells the reader.
-pub(crate) const REMOTE_DELETE_REFUSAL: &str =
-    "Deleting sessions of a remote project is not supported yet";
-
-struct RemoteDeleteRefused;
-
-fn notify_remote_delete_refused(workspace: &Entity<workspace::Workspace>, cx: &mut App) {
-    workspace.update(cx, |workspace, cx| {
-        workspace.show_notification(NotificationId::unique::<RemoteDeleteRefused>(), cx, |cx| {
-            cx.new(|cx| {
-                workspace::notifications::simple_message_notification::MessageNotification::new(
-                    REMOTE_DELETE_REFUSAL,
+    let Some(remote) = project.read(cx).remote_session_host(cx) else {
+        notify_shared_delete_refused(workspace, cx);
+        return Task::ready(());
+    };
+    let store = crate::SessionStore::for_project(&project, cx);
+    let sweep = sweep_on_remote_host(
+        store,
+        targets,
+        move |agent, id, cx| remote.delete(agent, &id, cx),
+        cx,
+    );
+    let workspace = workspace.downgrade();
+    cx.spawn(async move |cx| {
+        let Some(message) = sweep.await.stopped_message() else {
+            return;
+        };
+        workspace
+            .update(cx, |workspace, cx| {
+                show_message(
+                    workspace,
+                    (
+                        NotificationId::unique::<RemoteSweepStopped>(),
+                        message.into(),
+                    ),
                     cx,
                 )
             })
-        });
+            .log_err();
+    })
+}
+
+/// What refusing a delete in a collaboration guest's project tells the
+/// reader: its sessions are on the collaborator's machine.
+pub(crate) const SHARED_DELETE_REFUSAL: &str =
+    "Deleting sessions of a shared project is not supported";
+
+fn notify_shared_delete_refused(workspace: &Entity<workspace::Workspace>, cx: &mut App) {
+    workspace.update(cx, |workspace, cx| {
+        show_message(workspace, named_message(SHARED_DELETE_REFUSAL), cx)
     });
 }
 
-/// The sweep behind [`execute_session_deletion`], given what it acts through.
+struct RemoteSweepStopped;
+
+/// How a sweep on a remote host went.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RemoteSweepReport {
+    /// Targets there was something to ask the host about.
+    pub(crate) planned: usize,
+    /// Targets the host said are gone, and so were forgotten.
+    pub(crate) deleted: usize,
+    /// Why the sweep ended before asking about every target: the host could
+    /// not be reached at all.
+    pub(crate) stopped: Option<String>,
+}
+
+impl RemoteSweepReport {
+    /// The one message a sweep the host stopped answering ends on.
+    pub(crate) fn stopped_message(&self) -> Option<String> {
+        let error = self.stopped.as_ref()?;
+        Some(format!(
+            "Deleted {} of {} sessions; the remote host stopped answering: {error}",
+            self.deleted, self.planned
+        ))
+    }
+}
+
+/// The sweep behind [`execute_session_deletion`] for a remote project: each
+/// target is deleted by the host, one at a time, by agent and id alone.
+///
+/// A session is forgotten only once the host says it is gone. An answer that
+/// the host could not delete one session moves on to the next, as the local
+/// sweep does; no answer at all ends the batch, since every request after it
+/// would wait out the same deadline on the same dead link.
+pub(crate) fn sweep_on_remote_host(
+    store: Entity<crate::SessionStore>,
+    targets: Vec<DeleteTarget>,
+    delete: impl Fn(AgentKind, Arc<str>, &mut App) -> Task<anyhow::Result<WireDeleteOutcome>> + 'static,
+    cx: &mut App,
+) -> Task<RemoteSweepReport> {
+    cx.spawn(async move |cx| {
+        let targets: Vec<DeleteTarget> = targets
+            .into_iter()
+            .filter(|target| !matches!(target.deletion, TargetDeletion::Here(Deletion::Nothing)))
+            .collect();
+        let mut report = RemoteSweepReport {
+            planned: targets.len(),
+            deleted: 0,
+            stopped: None,
+        };
+        let mut forget: HashSet<Arc<str>> = HashSet::default();
+        for target in targets {
+            let outcome = cx
+                .update(|cx| delete(target.agent, target.id.clone(), cx))
+                .await;
+            match outcome {
+                Ok(WireDeleteOutcome::Gone) => {
+                    forget.insert(target.id);
+                }
+                Ok(WireDeleteOutcome::NothingToDelete) => {
+                    log::info!(
+                        "bulk delete: session {} has nothing left on the remote host, kept",
+                        target.id
+                    );
+                }
+                Ok(WireDeleteOutcome::BinaryMissing { binary }) => {
+                    log::warn!(
+                        "bulk delete: {binary} missing on the remote host, session {} kept",
+                        target.id
+                    );
+                }
+                Ok(WireDeleteOutcome::Failed { message }) => {
+                    log::warn!("bulk delete: session {} failed: {message}", target.id);
+                }
+                Err(error) => {
+                    log::warn!(
+                        "bulk delete: the remote host did not answer for session {}: {error:#}",
+                        target.id
+                    );
+                    report.stopped = Some(format!("{error:#}"));
+                    break;
+                }
+            }
+        }
+        report.deleted = forget.len();
+        store.update(cx, |store, cx| store.forget_many(&forget, cx));
+        report
+    })
+}
+
+/// What a remote session's delete is expected to take, for the bulk
+/// confirmation to count, or `None` when there is nothing to ask the host.
+/// Built without reading anything -- this machine has none of the session's
+/// files.
+///
+/// Copilot's session folder is all its delete takes and is there whether or
+/// not a transcript is; the host finds it. Claude's and Codex's stores own
+/// nothing without their transcript.
+fn remote_deletion_preview(session: &SessionSummary) -> Option<HostDeletion> {
+    if deletes_through_cli(session.agent) {
+        return Some(HostDeletion::Command);
+    }
+    match (session.agent, &session.log_path) {
+        (_, Some(_)) | (AgentKind::Copilot, None) => Some(HostDeletion::Trash),
+        (_, None) => None,
+    }
+}
+
+/// The local sweep behind [`execute_session_deletion`], given what it acts
+/// through.
 pub(crate) fn sweep_session_deletion(
     fs: Arc<dyn fs::Fs>,
     agent_store: Entity<project::AgentServerStore>,
-    project_is_local: bool,
     targets: Vec<DeleteTarget>,
     cx: &mut App,
 ) -> Task<()> {
-    // Before anything is resolved, let alone touched: see `delete_session`.
-    if !project_is_local {
-        return Task::ready(());
-    }
     let store = crate::SessionStore::global(cx);
 
     cx.spawn(async move |cx| {
@@ -953,8 +1132,14 @@ pub(crate) fn sweep_session_deletion(
             // either -- one failure must not strand the rest of the batch
             // behind it. Commands run sequentially and one at a time.
             match target.deletion {
-                Deletion::Nothing => {}
-                Deletion::Trash(paths) => {
+                TargetDeletion::Here(Deletion::Nothing) => {}
+                TargetDeletion::OnHost(_) => {
+                    log::error!(
+                        "bulk delete: session {} is on a remote host, nothing taken here",
+                        target.id
+                    );
+                }
+                TargetDeletion::Here(Deletion::Trash(paths)) => {
                     let mut every_path_gone = true;
                     for path in &paths {
                         let trashed = fs
@@ -975,7 +1160,7 @@ pub(crate) fn sweep_session_deletion(
                         forget.insert(target.id);
                     }
                 }
-                Deletion::Command(command) => {
+                TargetDeletion::Here(Deletion::Command(command)) => {
                     let provider = agent_sessions::provider_for(target.agent);
                     let outcome = run_command_delete(
                         &provider,
@@ -1028,6 +1213,10 @@ impl AgentHistoryPanel {
         let Some(workspace) = self.workspace().upgrade() else {
             return;
         };
+        if self.remote {
+            refuse_remote_resume(&workspace, cx);
+            return;
+        }
         resume_session(&workspace, session, fork, window, cx);
     }
 
@@ -1067,7 +1256,7 @@ impl AgentHistoryPanel {
 
     pub(crate) fn reveal_log(&self, session: &SessionSummary, cx: &mut App) {
         if let Some(path) = session.log_path.clone() {
-            cx.reveal_path(&path);
+            self.reveal(&path, cx);
         }
     }
 
@@ -1076,8 +1265,23 @@ impl AgentHistoryPanel {
         // project already open, and swapping that out from under the user because
         // they clicked a menu entry would be a surprise.
         if self.cwd_alive(&session.cwd) {
-            cx.reveal_path(&session.cwd);
+            self.reveal(&session.cwd, cx);
         }
+    }
+
+    /// Shows `path` in the system file manager, through the project: a WSL
+    /// project's paths are the distro's, and the project maps them to the
+    /// `\\wsl$` share this machine can open. Callers only offer this where
+    /// [`Self::can_reveal`] says the file manager can reach the path at all.
+    fn reveal(&self, path: &std::path::Path, cx: &mut App) {
+        if !self.can_reveal(cx) {
+            return;
+        }
+        let Some(workspace) = self.workspace().upgrade() else {
+            return;
+        };
+        let project = workspace.read(cx).project().clone();
+        project.update(cx, |project, cx| project.reveal_path(path, cx));
     }
 
     /// Move a session's transcript to the OS trash, after asking.
@@ -1118,23 +1322,28 @@ impl AgentHistoryPanel {
             return;
         };
         // Before the plan is built: see `delete_session`.
-        if !workspace.read(cx).project().read(cx).is_local() {
-            notify_remote_delete_refused(&workspace, cx);
-            return;
-        }
+        let remote = match session_host(&workspace, cx) {
+            Some(AgentSessionHost::Local(_)) => false,
+            Some(AgentSessionHost::Remote(_)) => true,
+            None => {
+                notify_shared_delete_refused(&workspace, cx);
+                return;
+            }
+        };
 
         let roots = self.project_roots(cx);
-        let scoped: Vec<(&SessionSummary, Deletion)> =
-            sessions_in_project(self.sessions(cx), &roots)
-                .map(|session| {
-                    let deletion = self
-                        .provider_for(session)
-                        .map(|provider| provider.deletion(session))
-                        .unwrap_or(Deletion::Nothing);
-                    (session, deletion)
-                })
-                .collect();
-        let plan = plan_delete_all(scoped);
+        let in_project = sessions_in_project(self.sessions(cx), &roots);
+        let plan = if remote {
+            plan_remote_delete_all(in_project)
+        } else {
+            plan_delete_all(in_project.map(|session| {
+                let deletion = self
+                    .provider_for(session)
+                    .map(|provider| provider.deletion(session))
+                    .unwrap_or(Deletion::Nothing);
+                (session, deletion)
+            }))
+        };
 
         // The truthful half of the empty rule. The button is already disabled
         // when this project has no sessions, but "has sessions" and "has
@@ -1171,7 +1380,7 @@ impl AgentHistoryPanel {
             plan.commanded()
         );
 
-        // C1: a plan holding even one `Command` target is a plan that cannot be
+        // A plan holding even one `Command` target is a plan that cannot be
         // fully recovered, so both the label and the detail text below derive
         // from the same test rather than one being updated and the other not.
         let irreversible = plan.commanded() > 0;
@@ -1258,6 +1467,7 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
 mod tests {
     use super::*;
     use agent_sessions::AgentKind;
+    use std::path::Path;
     use std::time::SystemTime;
 
     fn session(id: &str, cwd: &str, log_bytes: u64) -> SessionSummary {
@@ -1618,262 +1828,106 @@ mod tests {
         assert!(!mixed.contains(PROJECT_SCOPE), "got: {mixed}");
     }
 
-    /// M3: opencode's real failure output, byte for byte. "Trim control
-    /// characters" alone would leave `[91m`/`[1m` behind as ordinary text --
-    /// this is the one thing that proves a real CSI scan instead.
+    /// A remote bulk delete is counted without reading anything: opencode's
+    /// sessions as irreversible, a transcript as trash with its size, a
+    /// Copilot session as its folder whether or not it has a transcript, and a
+    /// Codex session with no rollout as nothing to take.
     #[test]
-    fn the_csi_scanner_leaves_only_the_message() {
-        let raw = b"\x1b[91m\x1b[1mError: \x1b[0mSession not found: x";
-        assert_eq!(strip_ansi_first_line(raw), "Error: Session not found: x");
-    }
-
-    #[test]
-    fn the_csi_scanner_is_a_no_op_on_plain_text() {
-        assert_eq!(
-            strip_ansi_first_line(b"plain error, no escapes"),
-            "plain error, no escapes"
-        );
-    }
-
-    #[test]
-    fn the_csi_scanner_skips_a_blank_first_line() {
-        assert_eq!(
-            strip_ansi_first_line(b"\n\x1b[0mSession not found: x"),
-            "Session not found: x"
-        );
-    }
-
-    /// A stand-in for whatever `provider.find` would answer, so the timeout
-    /// race and the idempotency re-check can be driven without a real store.
-    struct FindOnlyProvider(Option<SessionSummary>);
-
-    impl SessionProvider for FindOnlyProvider {
-        fn agent(&self) -> AgentKind {
-            AgentKind::OpenCode
-        }
-        fn availability(&self) -> agent_sessions::Availability {
-            agent_sessions::Availability::Ready
-        }
-        fn list(&self) -> anyhow::Result<Vec<SessionSummary>> {
-            Ok(Vec::new())
-        }
-        fn find(&self, _id: &str) -> anyhow::Result<Option<SessionSummary>> {
-            Ok(self.0.clone())
-        }
-        fn new_session_command(&self, _id: &str, _cwd: &std::path::Path) -> Option<AgentCommand> {
-            None
-        }
-        fn counts(
-            &self,
-            _session: &SessionSummary,
-        ) -> anyhow::Result<agent_sessions::SessionCounts> {
-            Ok(agent_sessions::SessionCounts::default())
-        }
-        fn resume_command(&self, _session: &SessionSummary, _fork: Fork) -> Option<AgentCommand> {
-            None
-        }
-        fn deletion(&self, _session: &SessionSummary) -> Deletion {
-            Deletion::Nothing
-        }
-    }
-
-    fn stub_session(id: &str) -> SessionSummary {
-        SessionSummary {
-            id: Arc::from(id),
+    fn a_remote_plan_counts_what_the_host_will_take_without_reading_it() {
+        let transcript = SessionSummary {
+            log_path: Some(PathBuf::from("/home/u/.claude/projects/-p/a.jsonl")),
+            ..session("a", "/home/u/p", 2048)
+        };
+        let opencode = SessionSummary {
             agent: AgentKind::OpenCode,
-            title: id.to_string(),
-            preview: String::new(),
-            preview_speaker: None,
-            cwd: PathBuf::from("/w/one"),
-            branch: None,
-            model: None,
-            updated_at: SystemTime::UNIX_EPOCH,
-            log_path: None,
-            log_bytes: 0,
-        }
-    }
-
-    /// A fabricated exit, with no subprocess anywhere behind it -- see
-    /// `race_command_delete`'s doc comment for why that is exactly the point.
-    #[cfg(unix)]
-    fn fake_exit_status(code: i32) -> std::process::ExitStatus {
-        use std::os::unix::process::ExitStatusExt;
-        // The raw wait-status encoding: a normal exit packs the code into the
-        // high byte.
-        std::process::ExitStatus::from_raw(code << 8)
-    }
-    #[cfg(windows)]
-    fn fake_exit_status(code: i32) -> std::process::ExitStatus {
-        use std::os::windows::process::ExitStatusExt;
-        std::process::ExitStatus::from_raw(code as u32)
-    }
-
-    /// C2/H9 -- the mechanism behind a Critical finding, reachable for the
-    /// first time now that opencode is a real `Deletion::Command` producer:
-    /// a command that exits non-zero for a session the store no longer holds
-    /// must be treated as success, not failure. `opencode session delete` on
-    /// an id already gone is exactly this shape.
-    #[gpui::test]
-    async fn a_failed_exit_is_forgiven_once_the_store_no_longer_holds_the_session(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let provider: Arc<dyn SessionProvider> = Arc::new(FindOnlyProvider(None));
-        let id: Arc<str> = Arc::from("ses_gone");
-        let executor = cx.background_executor.clone();
-        let run = std::future::ready(Ok(std::process::Output {
-            status: fake_exit_status(1),
-            stdout: Vec::new(),
-            stderr: b"Error: Session not found: ses_gone".to_vec(),
-        }));
-
-        let outcome = cx
-            .spawn(async move |mut cx| {
-                race_command_delete(&provider, &executor, &id, run, &mut cx).await
-            })
-            .await;
-
-        assert!(
-            matches!(outcome, CommandDeleteOutcome::Gone),
-            "a non-zero exit for a session the store no longer holds must be \
-             forgiven, got {outcome:?}"
-        );
-    }
-
-    /// The other half of C2/H9: a non-zero exit for a session the store
-    /// *still* holds must not be silently forgiven -- the row has to stay,
-    /// and the failure has to be reported.
-    #[gpui::test]
-    async fn a_failed_exit_is_reported_when_the_store_still_holds_the_session(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let provider: Arc<dyn SessionProvider> =
-            Arc::new(FindOnlyProvider(Some(stub_session("ses_here"))));
-        let id: Arc<str> = Arc::from("ses_here");
-        let executor = cx.background_executor.clone();
-        let run = std::future::ready(Ok(std::process::Output {
-            status: fake_exit_status(1),
-            stdout: Vec::new(),
-            stderr: b"boom".to_vec(),
-        }));
-
-        let outcome = cx
-            .spawn(async move |mut cx| {
-                race_command_delete(&provider, &executor, &id, run, &mut cx).await
-            })
-            .await;
-
-        match outcome {
-            CommandDeleteOutcome::Failed(message) => assert_eq!(message, "boom"),
-            other => panic!("expected Failed, got {other:?}"),
-        }
-    }
-
-    /// M6 -- a command that never returns must be abandoned by the timer
-    /// rather than blocking the caller forever. It falls through to the same
-    /// idempotency re-check a failed exit does (C2/H9), which this also
-    /// proves: the timeout path and the non-zero-exit path share one ending.
-    #[gpui::test]
-    async fn a_command_that_never_returns_is_abandoned_after_the_timeout(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let provider: Arc<dyn SessionProvider> =
-            Arc::new(FindOnlyProvider(Some(stub_session("ses_stuck"))));
-        let id: Arc<str> = Arc::from("ses_stuck");
-        let executor = cx.background_executor.clone();
-
-        let task = cx.spawn(async move |mut cx| {
-            race_command_delete(
-                &provider,
-                &executor,
-                &id,
-                std::future::pending::<std::io::Result<std::process::Output>>(),
-                &mut cx,
-            )
-            .await
-        });
-
-        cx.run_until_parked();
-        cx.executor().advance_clock(COMMAND_DELETE_TIMEOUT);
-        cx.run_until_parked();
-        let outcome = task.await;
-
-        match outcome {
-            CommandDeleteOutcome::Failed(message) => {
-                assert!(message.contains("timed out"), "got: {message}");
-            }
-            other => panic!("expected Failed(timed out...), got {other:?}"),
-        }
-    }
-
-    /// Builds a real, local `AgentServerStore` with an empty project
-    /// environment -- enough for `resolve_agent_binary` to run its real
-    /// logic. `ProjectEnvironment::get_cli_environment` always answers
-    /// `Some(HashMap::default())` under `cfg!(test)`/`test-support`, which
-    /// short-circuits before any real shell would be spawned, so this never
-    /// touches a real login shell or a real filesystem.
-    fn test_agent_server_store(cx: &mut gpui::TestAppContext) -> Entity<project::AgentServerStore> {
-        cx.update(|cx| {
-            let settings_store = settings::SettingsStore::test(cx);
-            cx.set_global(settings_store);
-            let fs: Arc<dyn fs::Fs> =
-                Arc::new(fs::RealFs::new(None, cx.background_executor().clone()));
-            let worktree_store = cx.new(|cx| {
-                project::worktree_store::WorktreeStore::local(
-                    false,
-                    fs,
-                    project::worktree_store::WorktreeIdCounter::get(cx),
-                )
-            });
-            let project_environment = cx.new(|cx| {
-                project::ProjectEnvironment::new(None, worktree_store.downgrade(), None, false, cx)
-            });
-            cx.new(|cx| project::AgentServerStore::local(project_environment, cx))
-        })
-    }
-
-    /// H3 -- a `Command` delete with the CLI absent must show its own
-    /// message, not `offer_to_drop_the_row`'s "nothing is still on disk"
-    /// text, and must not forget the row: the session might still be real,
-    /// this machine just cannot ask its agent to remove it.
-    #[gpui::test]
-    async fn a_missing_binary_is_reported_distinctly_and_keeps_the_row(
-        cx: &mut gpui::TestAppContext,
-    ) {
-        let provider: Arc<dyn SessionProvider> =
-            Arc::new(FindOnlyProvider(Some(stub_session("ses_needs_opencode"))));
-        let id: Arc<str> = Arc::from("ses_needs_opencode");
-        let agent_store = test_agent_server_store(cx);
-        let executor = cx.background_executor.clone();
-        let command = AgentCommand {
-            program: "opencode".to_string(),
-            args: vec![
-                "session".to_string(),
-                "delete".to_string(),
-                "ses_needs_opencode".to_string(),
-            ],
-            cwd: PathBuf::from("/w/one"),
+            ..session("b", "/home/u/p", 0)
+        };
+        let no_files = SessionSummary {
+            agent: AgentKind::Codex,
+            ..session("c", "/home/u/p", 0)
+        };
+        let copilot_without_transcript = SessionSummary {
+            agent: AgentKind::Copilot,
+            ..session("d", "/home/u/p", 0)
         };
 
-        let outcome = cx
-            .spawn(async move |mut cx| {
-                run_command_delete(
-                    &provider,
-                    &agent_store,
-                    &executor,
-                    AgentKind::OpenCode,
-                    &id,
-                    &command,
-                    &mut cx,
-                )
-                .await
-            })
-            .await;
+        let plan = plan_remote_delete_all([
+            &transcript,
+            &opencode,
+            &no_files,
+            &copilot_without_transcript,
+        ]);
 
-        match outcome {
-            CommandDeleteOutcome::BinaryMissing(missing) => {
-                assert_eq!(missing.binary, "opencode");
-            }
-            other => panic!("expected BinaryMissing, got {other:?}"),
-        }
+        let planned: Vec<&str> = plan
+            .targets
+            .iter()
+            .map(|target| target.id.as_ref())
+            .collect();
+        assert_eq!(planned, vec!["a", "b", "d"]);
+        assert_eq!(plan.trashed(), 2);
+        assert_eq!(plan.commanded(), 1);
+        assert_eq!(plan.total_bytes, 2048);
+        assert!(
+            plan.targets
+                .iter()
+                .all(|target| matches!(target.deletion, TargetDeletion::OnHost(_))),
+            "a remote plan carries nothing a sweep here could act on"
+        );
+    }
+
+    /// The prompt names what the host's provider will take, not only the
+    /// transcript: Claude's subagent folder goes with it, and Copilot's whole
+    /// session folder.
+    #[test]
+    fn a_remote_delete_prompt_names_everything_the_host_takes() {
+        let with_log = |agent: AgentKind, log: &str| SessionSummary {
+            agent,
+            log_path: Some(PathBuf::from(log)),
+            ..session("s", "/home/u/p", 2048)
+        };
+
+        let (claude, confirm) = remote_delete_prompt(&with_log(
+            AgentKind::Claude,
+            "/home/u/.claude/projects/-p/s.jsonl",
+        ));
+        assert_eq!(
+            claude,
+            "/home/u/.claude/projects/-p/s.jsonl and its subagent folder will move to the \
+             trash on the remote host (2 KB)."
+        );
+        assert_eq!(confirm, "Move to Trash");
+
+        let (copilot, _) = remote_delete_prompt(&with_log(
+            AgentKind::Copilot,
+            "/home/u/.copilot/session-state/abc/events.jsonl",
+        ));
+        assert!(
+            copilot.starts_with("The session folder /home/u/.copilot/session-state/abc will move"),
+            "{copilot}"
+        );
+        let (copilot_without_log, _) = remote_delete_prompt(&SessionSummary {
+            agent: AgentKind::Copilot,
+            ..session("s", "/home/u/p", 0)
+        });
+        assert!(
+            copilot_without_log.starts_with("The session folder will move"),
+            "{copilot_without_log}"
+        );
+
+        let (codex, _) = remote_delete_prompt(&with_log(
+            AgentKind::Codex,
+            "/home/u/.codex/sessions/rollout-s.jsonl",
+        ));
+        assert!(
+            codex.starts_with("/home/u/.codex/sessions/rollout-s.jsonl will move"),
+            "{codex}"
+        );
+
+        let (opencode, confirm) = remote_delete_prompt(&SessionSummary {
+            agent: AgentKind::OpenCode,
+            ..session("s", "/home/u/p", 0)
+        });
+        assert!(opencode.contains("cannot be undone"), "{opencode}");
+        assert_eq!(confirm, "Delete");
     }
 }

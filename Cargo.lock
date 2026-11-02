@@ -142,7 +142,6 @@ dependencies = [
  "db",
  "editor",
  "fs",
- "futures 0.3.32",
  "gpui",
  "log",
  "menu",
@@ -11652,6 +11651,7 @@ dependencies = [
 name = "project"
 version = "0.1.0"
 dependencies = [
+ "agent_sessions",
  "aho-corasick",
  "anyhow",
  "askpass",
@@ -12806,6 +12806,7 @@ dependencies = [
 name = "remote_server"
 version = "0.1.0"
 dependencies = [
+ "agent_sessions",
  "alacritty_terminal",
  "anyhow",
  "askpass",

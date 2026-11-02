@@ -1634,60 +1634,94 @@ async fn the_panel_is_notified_when_a_tab_opens_or_closes(cx: &mut TestAppContex
     assert!(count() > after_open, "a tab closing must redraw the panel");
 }
 
-/// A remote project's `fs()` is this machine's, so a sweep run for one would
-/// trash local files that merely share a path with the remote transcripts.
-/// It must refuse before any path is touched -- and the local half proves the
-/// fixture is one a sweep would otherwise take.
+/// A remote project's sweep asks the host to delete each session by agent and
+/// id, and touches nothing here: the fixture's paths exist on this machine, so
+/// a sweep that trashed locally would have something to take. Only what the
+/// host says is gone leaves the list, a target with nothing to take is never
+/// sent, and one failure does not stop the rest.
 #[gpui::test]
-async fn a_remote_projects_sweep_trashes_nothing(cx: &mut TestAppContext) {
+async fn a_remote_projects_sweep_asks_the_host_and_trashes_nothing_here(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
-    fs.insert_tree("/logs", json!({ "one.jsonl": "", "two.jsonl": "" }))
-        .await;
-    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
-    let project = Project::test(fs.clone(), [std::path::Path::new("/root")], cx).await;
-    let agent_store = project.read_with(cx, |project, _| project.agent_server_store().clone());
-    let target = |id: &str| super::DeleteTarget {
+    fs.insert_tree(
+        "/logs",
+        json!({ "gone.jsonl": "", "failed.jsonl": "", "nothing.jsonl": "", "later.jsonl": "" }),
+    )
+    .await;
+    let store = cx.update(|cx| crate::SessionStore::install_global_for_test(Vec::new(), cx));
+    store.update(cx, |store, cx| {
+        store.set_index_for_test(
+            ["gone", "failed", "nothing", "later"]
+                .into_iter()
+                .map(|id| session(id, "/home/u/p", id, 1))
+                .collect(),
+            cx,
+        )
+    });
+    let target = |id: &str, deletion: Deletion| super::DeleteTarget {
         id: Arc::from(id),
         agent: AgentKind::Claude,
-        deletion: Deletion::Trash(vec![PathBuf::from(format!("/logs/{id}.jsonl"))]),
+        deletion: deletion.into(),
     };
+    let trash = |id: &str| Deletion::Trash(vec![PathBuf::from(format!("/logs/{id}.jsonl"))]);
+    let asked: Arc<std::sync::Mutex<Vec<(AgentKind, String)>>> = Arc::default();
 
     cx.update(|cx| {
-        super::actions::sweep_session_deletion(
-            fs.clone(),
-            agent_store.clone(),
-            false,
-            vec![target("one")],
+        let asked = asked.clone();
+        super::actions::sweep_on_remote_host(
+            store.clone(),
+            vec![
+                target("gone", trash("gone")),
+                target("failed", trash("failed")),
+                target("nothing", Deletion::Nothing),
+                target("later", trash("later")),
+            ],
+            move |agent, id, _| {
+                if let Ok(mut asked) = asked.lock() {
+                    asked.push((agent, id.to_string()));
+                }
+                gpui::Task::ready(Ok(if id.as_ref() == "failed" {
+                    agent_sessions::wire::WireDeleteOutcome::Failed {
+                        message: "no trash on this host".to_string(),
+                    }
+                } else {
+                    agent_sessions::wire::WireDeleteOutcome::Gone
+                }))
+            },
             cx,
         )
     })
     .await;
     cx.run_until_parked();
-    assert!(
-        fs.trash_entries().is_empty(),
-        "a remote project's delete must not reach this machine's trash"
+
+    let asked = asked.lock().map(|asked| asked.clone()).unwrap_or_default();
+    assert_eq!(
+        asked,
+        vec![
+            (AgentKind::Claude, "gone".to_string()),
+            (AgentKind::Claude, "failed".to_string()),
+            (AgentKind::Claude, "later".to_string()),
+        ]
     );
-    assert!(fs::Fs::is_file(fs.as_ref(), std::path::Path::new("/logs/one.jsonl")).await);
-
-    cx.update(|cx| {
-        super::actions::sweep_session_deletion(
-            fs.clone(),
-            agent_store,
-            true,
-            vec![target("two")],
-            cx,
-        )
-    })
-    .await;
-    cx.run_until_parked();
-    assert_eq!(trashed_names(&fs), vec!["two.jsonl".to_string()]);
+    assert_eq!(
+        fs.trash_entries().len(),
+        0,
+        "nothing on this machine may be trashed for a remote project"
+    );
+    let mut remaining: Vec<String> = store.read_with(cx, |store, _| {
+        store
+            .index()
+            .sessions()
+            .iter()
+            .map(|session| session.id.to_string())
+            .collect()
+    });
+    remaining.sort();
+    assert_eq!(remaining, vec!["failed".to_string(), "nothing".to_string()]);
 }
 
-/// Turns the panel's project into one whose files are not on this machine.
-/// A collaboration guest stands in for a remote server here: both answer
-/// `is_local() == false`, which is all the guards read, and this crate has no
-/// mock remote connection to build the other with.
+/// Turns the panel's project into a collaboration guest's, whose sessions are
+/// on a collaborator's machine that nothing here can ask.
 fn make_project_not_local(
     panel: &Entity<AgentHistoryPanel>,
     cx: &mut VisualTestContext,
@@ -1700,10 +1734,10 @@ fn make_project_not_local(
     workspace
 }
 
-/// "Delete all" in a project whose files are elsewhere must refuse before it
-/// builds a plan or asks anything: the paths it would plan are this machine's.
+/// "Delete all" in a shared project must refuse before it builds a plan or
+/// asks anything: the paths it would plan are this machine's.
 #[gpui::test]
-async fn deleting_all_in_a_remote_project_refuses_before_asking(cx: &mut TestAppContext) {
+async fn deleting_all_in_a_shared_project_refuses_before_asking(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree("/logs", json!({ "one.jsonl": "" })).await;
@@ -1722,16 +1756,24 @@ async fn deleting_all_in_a_remote_project_refuses_before_asking(cx: &mut TestApp
 
     assert!(
         !cx.has_pending_prompt(),
-        "a remote project's delete-all must not offer to trash this machine's files"
+        "a shared project's delete-all must not offer to trash this machine's files"
+    );
+    assert!(
+        has_message(
+            &panel_workspace(&panel, &mut cx),
+            super::actions::SHARED_DELETE_REFUSAL,
+            &mut cx
+        ),
+        "the refusal is said, not swallowed"
     );
     assert!(trashed_names(&fs).is_empty());
     assert_eq!(remaining_ids(&panel, &mut cx), vec!["one".to_string()]);
 }
 
-/// Both public entry points refuse in a remote project, whoever calls them --
+/// Both public entry points refuse in a shared project, whoever calls them --
 /// the git panel's checkout removal reaches `execute_session_deletion` too.
 #[gpui::test]
-async fn a_remote_projects_deletes_never_reach_the_trash(cx: &mut TestAppContext) {
+async fn a_shared_projects_deletes_never_reach_the_trash(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree("/logs", json!({ "one.jsonl": "", "two.jsonl": "" }))
@@ -1752,6 +1794,11 @@ async fn a_remote_projects_deletes_never_reach_the_trash(cx: &mut TestAppContext
         !cx.has_pending_prompt(),
         "a single delete must refuse rather than ask"
     );
+    assert!(has_message(
+        &workspace,
+        super::actions::SHARED_DELETE_REFUSAL,
+        &mut cx
+    ));
 
     let sweep = cx.update(|_, cx| {
         super::actions::execute_session_deletion(
@@ -1759,7 +1806,7 @@ async fn a_remote_projects_deletes_never_reach_the_trash(cx: &mut TestAppContext
             vec![super::DeleteTarget {
                 id: Arc::from("two"),
                 agent: AgentKind::Claude,
-                deletion: Deletion::Trash(vec![PathBuf::from("/logs/two.jsonl")]),
+                deletion: Deletion::Trash(vec![PathBuf::from("/logs/two.jsonl")]).into(),
             }],
             cx,
         )
@@ -1769,7 +1816,266 @@ async fn a_remote_projects_deletes_never_reach_the_trash(cx: &mut TestAppContext
 
     assert!(
         trashed_names(&fs).is_empty(),
-        "nothing on this machine may be trashed for a remote project, got {:?}",
+        "nothing on this machine may be trashed for a shared project, got {:?}",
         trashed_names(&fs)
     );
+}
+
+/// Whether `workspace` shows the notification a message of exactly `text`
+/// raises.
+fn has_message(
+    workspace: &Entity<workspace::Workspace>,
+    text: &'static str,
+    cx: &mut VisualTestContext,
+) -> bool {
+    let id = workspace::notifications::NotificationId::named(text.into());
+    workspace.read_with(cx, |workspace, _| {
+        workspace.notification_ids().contains(&id)
+    })
+}
+
+fn trash_target(id: &str) -> super::DeleteTarget {
+    super::DeleteTarget {
+        id: Arc::from(id),
+        agent: AgentKind::Claude,
+        deletion: Deletion::Trash(vec![PathBuf::from(format!("/logs/{id}.jsonl"))]).into(),
+    }
+}
+
+fn index_ids(store: &Entity<crate::SessionStore>, cx: &mut TestAppContext) -> Vec<String> {
+    let mut ids: Vec<String> = store.read_with(cx, |store, _| {
+        store
+            .index()
+            .sessions()
+            .iter()
+            .map(|session| session.id.to_string())
+            .collect()
+    });
+    ids.sort();
+    ids
+}
+
+/// A host that answers about one session but not another is still there, and
+/// the batch goes on. A host that does not answer at all is not: every request
+/// after it would wait out the same deadline, so the batch ends at the first
+/// one and says how far it got.
+#[gpui::test]
+async fn a_remote_sweep_stops_at_the_first_request_the_host_does_not_answer(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let ids = ["gone", "failed", "nothing", "dead", "after"];
+    let store = cx.update(|cx| crate::SessionStore::install_global_for_test(Vec::new(), cx));
+    store.update(cx, |store, cx| {
+        store.set_index_for_test(
+            ids.into_iter()
+                .map(|id| session(id, "/home/u/p", id, 1))
+                .collect(),
+            cx,
+        )
+    });
+    let asked: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+
+    let report = cx
+        .update(|cx| {
+            let asked = asked.clone();
+            super::actions::sweep_on_remote_host(
+                store.clone(),
+                ids.into_iter().map(trash_target).collect(),
+                move |_, id, _| {
+                    if let Ok(mut asked) = asked.lock() {
+                        asked.push(id.to_string());
+                    }
+                    use agent_sessions::wire::WireDeleteOutcome;
+                    gpui::Task::ready(match id.as_ref() {
+                        "gone" => Ok(WireDeleteOutcome::Gone),
+                        "failed" => Ok(WireDeleteOutcome::Failed {
+                            message: "busy".to_string(),
+                        }),
+                        "nothing" => Ok(WireDeleteOutcome::NothingToDelete),
+                        _ => Err(anyhow::anyhow!("link down")),
+                    })
+                },
+                cx,
+            )
+        })
+        .await;
+    cx.run_until_parked();
+
+    let asked = asked.lock().map(|asked| asked.clone()).unwrap_or_default();
+    assert_eq!(asked, vec!["gone", "failed", "nothing", "dead"]);
+    assert_eq!(
+        report.stopped_message().as_deref(),
+        Some("Deleted 1 of 5 sessions; the remote host stopped answering: link down")
+    );
+    assert_eq!(
+        index_ids(&store, cx),
+        vec!["after", "dead", "failed", "nothing"],
+        "only what the host said is gone leaves the list"
+    );
+}
+
+/// The local sweep takes what this machine's provider named. Kept beside the
+/// remote tests so that a change routing deletes elsewhere cannot quietly stop
+/// a local project's sweep from trashing anything.
+#[gpui::test]
+async fn a_local_sweep_trashes_what_it_was_given(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/logs", json!({ "one.jsonl": "", "two.jsonl": "" }))
+        .await;
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let project = Project::test(fs.clone(), [std::path::Path::new("/root")], cx).await;
+    let agent_store = project.read_with(cx, |project, _| project.agent_server_store().clone());
+    let store = cx.update(|cx| crate::SessionStore::install_global_for_test(Vec::new(), cx));
+    store.update(cx, |store, cx| {
+        store.set_index_for_test(
+            vec![
+                session("one", "/root", "One", 1),
+                session("host", "/root", "Host", 1),
+            ],
+            cx,
+        )
+    });
+
+    cx.update(|cx| {
+        super::actions::sweep_session_deletion(
+            fs.clone(),
+            agent_store,
+            vec![
+                trash_target("one"),
+                super::DeleteTarget {
+                    id: Arc::from("host"),
+                    agent: AgentKind::Claude,
+                    deletion: super::actions::TargetDeletion::OnHost(
+                        super::actions::HostDeletion::Trash,
+                    ),
+                },
+            ],
+            cx,
+        )
+    })
+    .await;
+    cx.run_until_parked();
+
+    assert_eq!(trashed_names(&fs), vec!["one.jsonl".to_string()]);
+    assert_eq!(
+        index_ids(&store, cx),
+        vec!["host"],
+        "a remote host's target is neither acted on nor forgotten here"
+    );
+}
+
+/// The host still lists the session but owns nothing to take. Forgetting it
+/// on the spot would bring it back on the next sweep, so the reader is asked,
+/// as a local session with nothing on disk is.
+#[gpui::test]
+async fn a_remote_delete_with_nothing_left_asks_before_dropping_the_row(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let target = session("one", "/root", "First", 300);
+    let (panel, mut cx) =
+        panel_with(&["/root"], vec![target.clone()], Vec::new(), fs.clone(), cx).await;
+    let workspace = panel_workspace(&panel, &mut cx);
+    let store = panel.read_with(&cx, |panel, _| panel.store.clone());
+
+    cx.update(|window, cx| {
+        super::actions::delete_on_remote_host(
+            &workspace,
+            store,
+            &target,
+            |_, _, _| {
+                gpui::Task::ready(Ok(agent_sessions::wire::WireDeleteOutcome::NothingToDelete))
+            },
+            window,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Move to Trash");
+    cx.run_until_parked();
+
+    let follow_up = cx
+        .pending_prompt()
+        .expect("nothing left to take is asked about, not forgotten");
+    assert_eq!(follow_up.0, "Nothing left to delete");
+    assert!(
+        follow_up.1.contains("on the remote host"),
+        "{}",
+        follow_up.1
+    );
+    assert_eq!(remaining_ids(&panel, &mut cx), vec!["one".to_string()]);
+
+    cx.simulate_prompt_answer("Remove From List");
+    cx.run_until_parked();
+    assert!(remaining_ids(&panel, &mut cx).is_empty());
+}
+
+/// Nothing here can run a remote host's agent yet. A resume from a remote
+/// panel refuses and says so before any local check runs: this session's
+/// directory exists on this machine, so a local check would open a tab that
+/// starts fresh while looking resumed.
+#[gpui::test]
+async fn resuming_in_a_remote_panel_refuses_and_says_why(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let here = std::env::temp_dir();
+    let target = session("one", &here.to_string_lossy(), "First", 300);
+    let (panel, mut cx) =
+        panel_with(&["/root"], vec![target.clone()], Vec::new(), fs.clone(), cx).await;
+    let workspace = panel_workspace(&panel, &mut cx);
+    panel.update(&mut cx, |panel, _| panel.remote = true);
+    let before = active_item_of(&workspace, &mut cx);
+
+    for fork in [agent_sessions::Fork::Continue, agent_sessions::Fork::New] {
+        panel.update_in(&mut cx, |panel, window, cx| {
+            panel.resume(&target, fork, window, cx)
+        });
+        cx.run_until_parked();
+    }
+
+    assert!(has_message(
+        &workspace,
+        super::actions::REMOTE_RESUME_UNSUPPORTED,
+        &mut cx
+    ));
+    assert_eq!(active_item_of(&workspace, &mut cx), before, "no tab opened");
+}
+
+#[test]
+fn a_remote_rows_resume_controls_are_off_and_say_why() {
+    let remote = super::row::resume_controls(true, true, true);
+    assert!(!remote.resume && !remote.fork);
+    assert_eq!(
+        remote.resume_tooltip,
+        super::actions::REMOTE_RESUME_UNSUPPORTED
+    );
+    assert_eq!(
+        remote.fork_tooltip,
+        super::actions::REMOTE_RESUME_UNSUPPORTED
+    );
+
+    let local = super::row::resume_controls(true, true, false);
+    assert!(local.resume && local.fork);
+    let codex = super::row::resume_controls(true, false, false);
+    assert!(codex.resume && !codex.fork);
+    let gone = super::row::resume_controls(false, true, false);
+    assert!(!gone.resume && !gone.fork);
+    assert_eq!(
+        gone.fork_tooltip,
+        "Continue in New Session — the directory is gone"
+    );
+}
+
+/// The file manager here can show a local project's paths and a WSL distro's,
+/// through its share. An SSH host's paths name nothing on this machine -- or
+/// worse, something else.
+#[test]
+fn only_paths_this_machine_can_reach_are_revealed() {
+    use super::panel::reveal_reaches_the_path;
+    assert!(reveal_reaches_the_path(false, false));
+    assert!(reveal_reaches_the_path(true, true));
+    assert!(!reveal_reaches_the_path(true, false));
 }

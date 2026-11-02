@@ -16,6 +16,7 @@ use project::{
     LspStore, LspStoreEvent, ManifestTree, PrettierStore, ProjectEnvironment, ProjectPath,
     ToolchainStore, WorktreeId,
     agent_server_store::AgentServerStore,
+    agent_session_host::{AgentSessionHost, AgentSessionService},
     buffer_store::{BufferStore, BufferStoreEvent},
     context_server_store::ContextServerStore,
     debugger::{breakpoint_store::BreakpointStore, dap_store::DapStore},
@@ -60,6 +61,7 @@ pub struct HeadlessProject {
     pub dap_store: Entity<DapStore>,
     pub breakpoint_store: Entity<BreakpointStore>,
     pub agent_server_store: Entity<AgentServerStore>,
+    pub agent_sessions: Entity<AgentSessionService>,
     pub context_server_store: Entity<ContextServerStore>,
     pub settings_observer: Entity<SettingsObserver>,
     pub next_entry_id: Arc<AtomicUsize>,
@@ -239,6 +241,9 @@ impl HeadlessProject {
             agent_server_store
         });
 
+        let agent_sessions =
+            cx.new(|_| AgentSessionService::for_this_host(fs.clone(), agent_server_store.clone()));
+
         let context_server_store = cx.new(|cx| {
             let mut context_server_store =
                 ContextServerStore::local(worktree_store.clone(), None, true, cx);
@@ -281,6 +286,7 @@ impl HeadlessProject {
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &settings_observer);
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &git_store);
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &agent_server_store);
+        session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &agent_sessions);
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &context_server_store);
 
         session.add_request_handler(cx.weak_entity(), Self::handle_list_remote_directory);
@@ -335,6 +341,7 @@ impl HeadlessProject {
         BreakpointStore::init(&session);
         GitStore::init(&session);
         AgentServerStore::init_headless(&session);
+        AgentSessionHost::init_headless(&session);
         ContextServerStore::init_headless(&session);
 
         HeadlessProject {
@@ -349,6 +356,7 @@ impl HeadlessProject {
             dap_store,
             breakpoint_store,
             agent_server_store,
+            agent_sessions,
             context_server_store,
             languages,
             extensions,
