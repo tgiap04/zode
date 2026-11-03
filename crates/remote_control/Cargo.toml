@@ -33,6 +33,7 @@ remote_relay_protocol.workspace = true
 rpc.workspace = true
 serde_json.workspace = true
 settings.workspace = true
+sha2.workspace = true
 smol.workspace = true
 sysinfo.workspace = true
 terminal.workspace = true

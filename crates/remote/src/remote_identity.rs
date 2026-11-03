@@ -57,6 +57,34 @@ impl From<&RemoteConnectionOptions> for RemoteConnectionIdentity {
     }
 }
 
+impl RemoteConnectionIdentity {
+    /// The spelling this host is recorded and recognised under, the same on
+    /// every run and every machine.
+    ///
+    /// Written out field by field rather than derived: it keys persisted
+    /// records, so a renamed field must not quietly re-key them.
+    pub fn stable_key(&self) -> String {
+        let parts = match self {
+            Self::Ssh {
+                host,
+                username,
+                port,
+            } => serde_json::json!(["ssh", host, username, port]),
+            Self::Wsl { distro_name, user } => serde_json::json!(["wsl", distro_name, user]),
+            Self::Docker {
+                container_id,
+                name,
+                remote_user,
+            } => serde_json::json!(["docker", container_id, name, remote_user]),
+            Self::Relay { host_device_id } => serde_json::json!(["relay", host_device_id]),
+            // The spelling records were made under before this lived here.
+            #[cfg(any(test, feature = "test-support"))]
+            Self::Mock { .. } => serde_json::json!([format!("{self:?}")]),
+        };
+        parts.to_string()
+    }
+}
+
 pub fn remote_connection_identity(options: &RemoteConnectionOptions) -> RemoteConnectionIdentity {
     options.into()
 }
@@ -161,6 +189,63 @@ mod tests {
         });
 
         assert!(same_remote_connection_identity(Some(&left), Some(&right),));
+    }
+
+    /// Persisted records are keyed by these spellings: a change to any of them
+    /// silently forgets everything recorded for that host.
+    #[test]
+    fn stable_keys_are_spelled_as_recorded() {
+        use RemoteConnectionIdentity as Identity;
+        let cases = [
+            (
+                Identity::Wsl {
+                    distro_name: "Ubuntu".into(),
+                    user: None,
+                },
+                r#"["wsl","Ubuntu",null]"#,
+            ),
+            (
+                Identity::Wsl {
+                    distro_name: "Ubuntu".into(),
+                    user: Some("me".into()),
+                },
+                r#"["wsl","Ubuntu","me"]"#,
+            ),
+            (
+                Identity::Ssh {
+                    host: "box".into(),
+                    username: Some("me".into()),
+                    port: Some(2222),
+                },
+                r#"["ssh","box","me",2222]"#,
+            ),
+            (
+                Identity::Ssh {
+                    host: "box".into(),
+                    username: None,
+                    port: None,
+                },
+                r#"["ssh","box",null,null]"#,
+            ),
+            (
+                Identity::Docker {
+                    container_id: "c0ffee".into(),
+                    name: "dev".into(),
+                    remote_user: "root".into(),
+                },
+                r#"["docker","c0ffee","dev","root"]"#,
+            ),
+            (
+                Identity::Relay {
+                    host_device_id: "device-1".into(),
+                },
+                r#"["relay","device-1"]"#,
+            ),
+            (Identity::Mock { id: 7 }, r#"["Mock { id: 7 }"]"#),
+        ];
+        for (identity, spelling) in cases {
+            assert_eq!(identity.stable_key(), spelling, "{identity:?}");
+        }
     }
 
     #[test]

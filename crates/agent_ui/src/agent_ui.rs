@@ -35,7 +35,9 @@ pub use session_history::{
     resume_session, sessions_in_project,
 };
 pub use session_names::SessionNames;
-pub use session_store::SessionStore;
+#[cfg(any(test, feature = "test-support"))]
+pub use session_store::assign_remote_host_for_test;
+pub use session_store::{ProjectSessionSource, SessionStore, project_session_source};
 pub use turn_tracker::TurnEvent;
 
 use gpui::App;

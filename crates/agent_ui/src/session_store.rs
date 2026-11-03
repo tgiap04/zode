@@ -28,6 +28,7 @@ use project::{
     Project,
     agent_session_host::{AgentSessionHost, SessionListing},
 };
+use util::paths::PathStyle;
 use workspace::RemoteConnectionIdentity;
 
 /// Handle to the process-wide store.
@@ -50,6 +51,103 @@ impl Global for GlobalSessionStore {}
 struct RemoteSessionStores(HashMap<RemoteConnectionIdentity, Entity<SessionStore>>);
 
 impl Global for RemoteSessionStores {}
+
+/// The machine a project's agent sessions are on, as something listing the
+/// sessions of every open window tells machines apart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProjectSessionSource {
+    /// This machine.
+    Here,
+    /// A WSL distro, an SSH host or a dev container.
+    Remote {
+        identity: RemoteConnectionIdentity,
+        /// What the host is shown as: an SSH nickname or host name, a distro, a
+        /// container's name. Never a user name or a port.
+        label: String,
+        path_style: PathStyle,
+    },
+}
+
+/// Where `project`'s sessions are kept, without creating or sweeping a store.
+///
+/// `None` for a collaboration guest, whose sessions are on a collaborator's
+/// machine, and for a project reached through the relay, whose host is a
+/// device of its own and lists its own sessions.
+pub fn project_session_source(project: &Entity<Project>, cx: &App) -> Option<ProjectSessionSource> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(assigned) = assigned_remote_host(project, cx) {
+        return Some(ProjectSessionSource::Remote {
+            identity: assigned.identity.clone(),
+            label: assigned.label.clone(),
+            path_style: assigned.host.path_style(),
+        });
+    }
+    let project = project.read(cx);
+    if project.is_local() {
+        return Some(ProjectSessionSource::Here);
+    }
+    if !project.is_via_remote_server() {
+        return None;
+    }
+    let options = project.remote_connection_options(cx)?;
+    let identity = workspace::remote_connection_identity(&options);
+    if matches!(identity, RemoteConnectionIdentity::Relay { .. }) {
+        return None;
+    }
+    Some(ProjectSessionSource::Remote {
+        identity,
+        label: options.display_name(),
+        path_style: project.path_style(cx),
+    })
+}
+
+/// A project a test has said is on a remote host, and the host its sessions
+/// are swept from.
+#[cfg(any(test, feature = "test-support"))]
+struct AssignedRemoteHost {
+    identity: RemoteConnectionIdentity,
+    label: String,
+    host: AgentSessionHost,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Default)]
+struct AssignedRemoteHosts(HashMap<EntityId, AssignedRemoteHost>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl Global for AssignedRemoteHosts {}
+
+#[cfg(any(test, feature = "test-support"))]
+fn assigned_remote_host<'a>(
+    project: &Entity<Project>,
+    cx: &'a App,
+) -> Option<&'a AssignedRemoteHost> {
+    cx.try_global::<AssignedRemoteHosts>()?
+        .0
+        .get(&project.entity_id())
+}
+
+/// Has `project`, a project on this machine's disk, read as one on the remote
+/// host `identity` names, shown as `label`, whose sessions are swept from
+/// `host`. Only the session store and [`project_session_source`] see it: the
+/// connection is the one thing a test cannot stand up.
+#[cfg(any(test, feature = "test-support"))]
+pub fn assign_remote_host_for_test(
+    project: &Entity<Project>,
+    identity: RemoteConnectionIdentity,
+    label: &str,
+    host: AgentSessionHost,
+    cx: &mut App,
+) {
+    cx.default_global::<AssignedRemoteHosts>().0.insert(
+        project.entity_id(),
+        AssignedRemoteHost {
+            identity,
+            label: label.to_string(),
+            host,
+        },
+    );
+}
 
 /// What a sweep asks.
 enum SweepHosts {
@@ -130,6 +228,12 @@ impl SessionStore {
     /// A collaboration guest gets the process-wide one, as it always has: there
     /// is no host it could ask instead, and its deletes refuse on their own.
     pub fn for_project(project: &Entity<Project>, cx: &mut App) -> Entity<Self> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(assigned) = assigned_remote_host(project, cx) {
+            let identity = assigned.identity.clone();
+            let host = assigned.host.clone();
+            return Self::for_remote_host(identity, project, host, cx);
+        }
         let remote = {
             let project = project.read(cx);
             project
@@ -154,6 +258,14 @@ impl SessionStore {
     /// `None` for a collaboration guest: no store here holds its sessions,
     /// and the process-wide one would answer with this machine's.
     pub fn try_for_project(project: &Entity<Project>, cx: &App) -> Option<Entity<Self>> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(assigned) = assigned_remote_host(project, cx) {
+            return cx
+                .try_global::<RemoteSessionStores>()?
+                .0
+                .get(&assigned.identity)
+                .cloned();
+        }
         let project = project.read(cx);
         if project.is_local() {
             return Self::try_global(cx);
@@ -416,6 +528,19 @@ impl SessionStore {
         self.generation += 1;
         cx.notify();
         forget_names(ids.iter().cloned(), cx);
+    }
+
+    /// Starts a sweep that never lands, as one through a connection that has
+    /// stopped answering does until its timeout.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn begin_endless_sweep_for_test(&mut self, cx: &mut Context<Self>) {
+        self.scanning = Some(cx.spawn(async move |_, _| std::future::pending::<()>().await));
+    }
+
+    /// Lands a sweep that could not ask its host, with `error` as the reason.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_sweep_for_test(&mut self, error: &str, cx: &mut Context<Self>) {
+        self.install_listing(Err(anyhow::anyhow!(error.to_string())), cx);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -942,6 +1067,52 @@ mod tests {
             cx.try_global::<RemoteSessionStores>()
                 .is_none_or(|stores| stores.0.is_empty())
         }));
+    }
+
+    /// What a list of every window's sessions is told about each project: this
+    /// machine for a local one, nothing for a guest, and the host -- by its
+    /// shown name, with its store -- for one on a remote host.
+    #[gpui::test]
+    async fn a_project_names_the_machine_its_sessions_are_on(cx: &mut TestAppContext) {
+        let local = test_project(cx).await;
+        let guest = test_project(cx).await;
+        guest.update(cx, |project, _| project.mark_as_collab_for_testing());
+        let remote = test_project(cx).await;
+        let (host, list_calls) = counting_host(vec![session("a", "/home/u/p")]);
+        let identity = RemoteConnectionIdentity::Mock { id: 12 };
+        cx.update(|cx| assign_remote_host_for_test(&remote, identity.clone(), "Ubuntu", host, cx));
+
+        let source = |project: &Entity<Project>, cx: &mut TestAppContext| {
+            cx.update(|cx| project_session_source(project, cx))
+        };
+        assert_eq!(source(&local, cx), Some(ProjectSessionSource::Here));
+        assert_eq!(source(&guest, cx), None);
+        assert_eq!(
+            source(&remote, cx),
+            Some(ProjectSessionSource::Remote {
+                identity,
+                label: "Ubuntu".into(),
+                path_style: PathStyle::local(),
+            })
+        );
+        assert_eq!(
+            list_calls.load(Ordering::SeqCst),
+            0,
+            "naming the host sweeps nothing"
+        );
+        assert!(cx.update(|cx| SessionStore::try_for_project(&remote, cx).is_none()));
+
+        let store = cx.update(|cx| SessionStore::for_project(&remote, cx));
+        let global = cx.update(|cx| SessionStore::global(cx));
+        assert_ne!(store.entity_id(), global.entity_id());
+        store.update(cx, |store, cx| store.refresh(cx));
+        cx.run_until_parked();
+        assert_eq!(list_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            cx.update(|cx| SessionStore::try_for_project(&remote, cx))
+                .map(|found| found.entity_id()),
+            Some(store.entity_id())
+        );
     }
 
     /// A sweep that could not ask the host shows nothing and says why, and

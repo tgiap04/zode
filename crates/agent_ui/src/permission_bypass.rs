@@ -72,33 +72,10 @@ impl BypassHost {
     }
 }
 
-/// The spelling a remote host is recorded under.
-///
-/// Written out rather than derived, since it is the key of a persisted record:
-/// a renamed field must not quietly re-key it. Should a spelling ever change,
-/// recorded toggles stop matching and read as off -- the safe direction.
+/// The spelling a remote host is recorded under. Shared with everything else
+/// that keys a record by host, so it is spelled in one place.
 fn host_key(identity: &workspace::RemoteConnectionIdentity) -> String {
-    use workspace::RemoteConnectionIdentity as Identity;
-    let parts = match identity {
-        Identity::Ssh {
-            host,
-            username,
-            port,
-        } => serde_json::json!(["ssh", host, username, port]),
-        Identity::Wsl { distro_name, user } => serde_json::json!(["wsl", distro_name, user]),
-        Identity::Docker {
-            container_id,
-            name,
-            remote_user,
-        } => serde_json::json!(["docker", container_id, name, remote_user]),
-        Identity::Relay { host_device_id } => serde_json::json!(["relay", host_device_id]),
-        // The test-only mock connection, which exists whenever `remote`'s
-        // test support is on -- a feature of another crate, so it cannot be
-        // named under this crate's `cfg`.
-        #[allow(unreachable_patterns)]
-        other => serde_json::json!([format!("{other:?}")]),
-    };
-    parts.to_string()
+    identity.stable_key()
 }
 
 /// The wire shape. A map rather than a list of pairs, so writing the same
@@ -728,6 +705,41 @@ mod tests {
             let checkout = Path::new("/home/me/repo/wt");
             assert!(store.is_enabled(&BypassHost::Local, checkout));
             assert!(!store.is_enabled(&wsl(), checkout));
+        });
+    }
+
+    /// A record on disk names its hosts by the spelling of the build that
+    /// wrote it; the host it was written for must still find it.
+    #[gpui::test]
+    async fn a_remote_record_written_earlier_still_matches_its_host(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| db::kvp::KeyValueStore::global(cx))
+            .write_kvp(
+                BYPASS_KEY.to_string(),
+                r#"{"enabled":{},"remote":{"[\"wsl\",\"Ubuntu\",null]":{"/home/me/repo/wt":"/home/me/repo"},"[\"ssh\",\"box\",\"me\",2222]":{"/srv/app":"/srv/app"}}}"#
+                    .to_string(),
+            )
+            .await
+            .expect("seeding the record must succeed");
+
+        let store = cx.new(|_| PermissionBypassStore::new());
+        store.update(cx, |store, cx| store.load(cx)).await;
+
+        let wsl = workspace::RemoteConnectionIdentity::Wsl {
+            distro_name: "Ubuntu".into(),
+            user: None,
+        };
+        let ssh = workspace::RemoteConnectionIdentity::Ssh {
+            host: "box".into(),
+            username: Some("me".into()),
+            port: Some(2222),
+        };
+        let host_of =
+            |identity| BypassHost::for_connection(false, Some(identity)).expect("a remote host");
+        store.read_with(cx, |store, _| {
+            assert!(store.is_enabled(&host_of(&wsl), Path::new("/home/me/repo/wt")));
+            assert!(store.is_enabled(&host_of(&ssh), Path::new("/srv/app")));
+            assert!(!store.is_enabled(&host_of(&wsl), Path::new("/srv/app")));
         });
     }
 
