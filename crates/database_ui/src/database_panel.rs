@@ -8,7 +8,6 @@ use crate::query::QueryState;
 use crate::session::Session;
 use collections::HashMap;
 use database::protocol::{ColumnDef, SchemaRef, TableRef};
-use database::registry::DriverRegistry;
 use editor::Editor;
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Point, SharedString, Task,
@@ -71,10 +70,10 @@ pub struct DatabasePanel {
     pub(crate) measured_width: Option<Pixels>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) workspace: WeakEntity<Workspace>,
-    /// Shared with every other window: extensions add drivers to it after
-    /// startup, and a panel holding its own copy would keep answering from the
-    /// list it was built with.
-    pub(crate) registry: Entity<DriverRegistry>,
+    /// Whose drivers this panel's connections run on: this machine's, or the
+    /// remote host's the project lives on. Found on first use, because the
+    /// panel is built while its workspace is being updated and cannot read it.
+    pub(crate) drivers: Option<driver_registry::DriverHost>,
     pub(crate) connections: Vec<ConnectionNode>,
     pub(crate) open_table: Option<OpenTable>,
     pub(crate) pinned: PinnedConnections,
@@ -164,7 +163,7 @@ impl DatabasePanel {
             measured_width: None,
             focus_handle: cx.focus_handle(),
             workspace,
-            registry: driver_registry::global(cx),
+            drivers: None,
             connections: Vec::new(),
             open_table: None,
             pinned: PinnedConnections::default(),

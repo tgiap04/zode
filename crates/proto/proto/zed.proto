@@ -504,7 +504,10 @@ message Envelope {
 
     LoadPrivateFile load_private_file = 462;
     LoadPrivateFileResponse load_private_file_response = 463;
-    WritePrivateFile write_private_file = 464; // current max
+    WritePrivateFile write_private_file = 464;
+
+    EnsureDatabaseDriver ensure_database_driver = 465;
+    EnsureDatabaseDriverResponse ensure_database_driver_response = 466; // current max
   }
 
   reserved 87 to 88;

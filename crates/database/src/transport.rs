@@ -48,7 +48,23 @@ pub struct StdioTransport {
     outbound: channel::Sender<String>,
     inbound: channel::Receiver<String>,
     errors: channel::Receiver<String>,
-    child: Child,
+    child: DriverProcess,
+}
+
+/// The two kinds of child a driver runs as. One type on Linux and Windows,
+/// where `util::command::Child` is smol's; two on macOS, where it is not.
+enum DriverProcess {
+    Shell(Child),
+    Prepared(util::command::Child),
+}
+
+impl DriverProcess {
+    fn kill(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Shell(child) => child.kill(),
+            Self::Prepared(child) => child.kill(),
+        }
+    }
 }
 
 impl StdioTransport {
@@ -83,7 +99,55 @@ impl StdioTransport {
             child.stdout.take().context("driver stdout was not piped")?,
             child.stderr.take().context("driver stderr was not piped")?,
         );
+        Ok(Self::speak_through(
+            DriverProcess::Shell(child),
+            stdin,
+            stdout,
+            stderr,
+            cx,
+        ))
+    }
 
+    /// A driver started by a command someone else built.
+    ///
+    /// What a remote project's driver runs through: the command is the local
+    /// wrapper (`wsl.exe`, `ssh`) that reaches the host, and only its stdio is
+    /// this transport's business. Spawned as given, with no shell in between,
+    /// since the wrapper has already been told exactly what to run.
+    pub fn from_command(mut command: util::command::Command, cx: &AsyncApp) -> Result<Self> {
+        command
+            .stdin(util::command::Stdio::piped())
+            .stdout(util::command::Stdio::piped())
+            .stderr(util::command::Stdio::piped())
+            // Ending the wrapper is the only way left to end a driver on a
+            // remote host, and one left running holds the database open there.
+            .kill_on_drop(true);
+
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to spawn database driver {command:?}"))?;
+
+        let (stdin, stdout, stderr) = (
+            child.stdin.take().context("driver stdin was not piped")?,
+            child.stdout.take().context("driver stdout was not piped")?,
+            child.stderr.take().context("driver stderr was not piped")?,
+        );
+        Ok(Self::speak_through(
+            DriverProcess::Prepared(child),
+            stdin,
+            stdout,
+            stderr,
+            cx,
+        ))
+    }
+
+    fn speak_through(
+        child: DriverProcess,
+        stdin: impl AsyncWrite + Unpin + Send + 'static,
+        stdout: impl AsyncRead + Unpin + Send + 'static,
+        stderr: impl AsyncRead + Unpin + Send + 'static,
+        cx: &AsyncApp,
+    ) -> Self {
         let (inbound_tx, inbound) = channel::unbounded::<String>();
         let (outbound, outbound_rx) = channel::unbounded::<String>();
         let (errors_tx, errors) = channel::unbounded::<String>();
@@ -95,12 +159,12 @@ impl StdioTransport {
         cx.spawn(async move |_| read_lines(stderr, errors_tx).await)
             .detach();
 
-        Ok(Self {
+        Self {
             outbound,
             inbound,
             errors,
             child,
-        })
+        }
     }
 }
 
@@ -157,5 +221,62 @@ impl Drop for StdioTransport {
         if let Err(error) = self.child.kill() {
             log::warn!("could not kill database driver: {error}");
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    async fn next_line(
+        lines: &mut Pin<Box<dyn Stream<Item = String> + Send>>,
+        cx: &gpui::TestAppContext,
+    ) -> Option<String> {
+        let timer = cx.background_executor.timer(Duration::from_secs(10));
+        match futures::future::select(lines.next(), timer).await {
+            futures::future::Either::Left((line, _)) => line,
+            futures::future::Either::Right(_) => panic!("the driver said nothing for 10s"),
+        }
+    }
+
+    #[gpui::test]
+    async fn a_prepared_command_speaks_line_json(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let mut command = util::command::Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "while IFS= read -r line; do printf '%s\\n' \"$line\"; done",
+        ]);
+        let transport = StdioTransport::from_command(command, &cx.to_async()).expect("sh starts");
+
+        let mut lines = transport.receive();
+        transport
+            .send(r#"{"jsonrpc":"2.0","id":1}"#.to_string())
+            .await
+            .expect("the driver's stdin is open");
+        assert_eq!(
+            next_line(&mut lines, cx).await.as_deref(),
+            Some("{\"jsonrpc\":\"2.0\",\"id\":1}\n")
+        );
+    }
+
+    /// Dropping the transport must end the process even when the process
+    /// ignores its stdin closing: a remote wrapper is exactly such a process.
+    #[gpui::test]
+    async fn dropping_a_prepared_driver_ends_its_process(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let mut command = util::command::Command::new("/bin/sh");
+        command.args(["-c", "echo ready; exec sleep 600"]);
+        let transport = StdioTransport::from_command(command, &cx.to_async()).expect("sh starts");
+
+        let mut lines = transport.receive();
+        assert_eq!(next_line(&mut lines, cx).await.as_deref(), Some("ready\n"));
+        drop(transport);
+        assert_eq!(
+            next_line(&mut lines, cx).await,
+            None,
+            "stdout closes only once the process holding it has ended"
+        );
     }
 }

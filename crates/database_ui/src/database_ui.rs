@@ -77,8 +77,9 @@ pub fn init(cx: &mut App) {
         workspace.register_action(
             |workspace, _: &zed_actions::database::AddConnection, window, cx| {
                 let handle = cx.weak_entity();
+                let drivers = driver_registry::for_project(workspace.project(), cx);
                 workspace.toggle_modal(window, cx, move |window, cx| {
-                    ConnectionModal::new(handle, window, cx)
+                    ConnectionModal::new(handle, drivers, window, cx)
                 });
             },
         );

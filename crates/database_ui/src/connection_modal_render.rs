@@ -140,11 +140,23 @@ impl ConnectionModal {
                 .into_any_element()
         };
 
+        // Said in a remote window because everything below is about that host:
+        // which drivers it has, and where a download lands.
+        let (headline, description) = match self.drivers.host_name() {
+            Some(host_name) => (
+                format!("Choose a Database on {host_name}"),
+                format!("Drivers run on {host_name}, so localhost, sockets and files are its own."),
+            ),
+            None => (
+                "Choose a Database".to_string(),
+                "Pick the type of database you want to connect to.".to_string(),
+            ),
+        };
         Modal::new("database-picker", None)
             .header(
                 ModalHeader::new()
-                    .child(Headline::new("Choose a Database").size(HeadlineSize::Small))
-                    .description("Pick the type of database you want to connect to."),
+                    .child(Headline::new(headline).size(HeadlineSize::Small))
+                    .description(description),
             )
             .section(Section::new().child(self.search_editor.clone()))
             .section(Section::new().padded(false).child(results))
@@ -387,14 +399,27 @@ impl ConnectionModal {
                     .into_any_element(),
             ],
             Step::Downloading { engine, progress } => {
-                let (status, fraction) = ConnectionModal::download_status(progress);
+                // A remote host reports no progress, only the outcome: a bar
+                // that moved would be one this machine made up.
+                let (heading, status, fraction) = match self.drivers.host_name() {
+                    Some(host_name) => (
+                        format!("Getting the {} driver on {host_name}", engine.name),
+                        format!("Downloading and checking it on {host_name}…").into(),
+                        None,
+                    ),
+                    None => {
+                        let (status, fraction) = ConnectionModal::download_status(progress);
+                        (
+                            format!("Getting the {} driver", engine.name),
+                            status,
+                            fraction,
+                        )
+                    }
+                };
                 vec![
                     v_flex()
                         .gap_2()
-                        .child(
-                            Label::new(format!("Getting the {} driver", engine.name))
-                                .size(LabelSize::Small),
-                        )
+                        .child(Label::new(heading).size(LabelSize::Small))
                         .children(Self::render_progress_bar(fraction, cx))
                         .child(
                             h_flex()

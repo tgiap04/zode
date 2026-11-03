@@ -4168,3 +4168,319 @@ async fn test_remote_private_file_absent_when_read_is_not_overwritten_once_it_ap
     assert_private_file_refused(written.await, "changed on the remote since it was read");
     assert_eq!(std::fs::read(&target).unwrap(), b"CREATED=meanwhile");
 }
+
+const DRIVER_RELEASE_VERSION: &str = "0.9.0";
+
+/// A release serving the `postgres` driver, signed with the test key.
+fn driver_release_serving(
+    manifest: Vec<u8>,
+    signed_manifest: Vec<u8>,
+    archive: Vec<u8>,
+) -> Arc<dyn http_client::HttpClient> {
+    use database::install::test_support::archive_asset_for;
+    use database::signature::SIGNED_MANIFEST_ASSET;
+    FakeHttpClient::create(move |request| {
+        let manifest = manifest.clone();
+        let signed_manifest = signed_manifest.clone();
+        let archive = archive.clone();
+        async move {
+            let path = request.uri().path().to_string();
+            let body = if path.ends_with("zode-db-drivers-manifest.json") {
+                manifest
+            } else if path.ends_with(SIGNED_MANIFEST_ASSET) {
+                signed_manifest
+            } else if path.ends_with(&archive_asset_for("postgres")) {
+                archive
+            } else {
+                return Ok(http_client::Response::builder()
+                    .status(404)
+                    .body(Default::default())?);
+            };
+            Ok(http_client::Response::builder()
+                .status(200)
+                .body(body.into())?)
+        }
+    })
+}
+
+/// Gives the server a driver store of its own and an installer reading
+/// `http`, trusting the test signing key when `trusting_test_key` is set.
+fn give_server_driver_store(
+    headless: &Entity<HeadlessProject>,
+    root: &Path,
+    http: Arc<dyn http_client::HttpClient>,
+    trusting_test_key: bool,
+    server_cx: &mut TestAppContext,
+) {
+    use database::install::{DriverEndpoint, DriverInstaller};
+    let mut installer = DriverInstaller::with_root(
+        http,
+        DriverEndpoint::new("https://api.test.invalid/api"),
+        root.to_path_buf(),
+    )
+    .accepting_versions_from("0.0.0");
+    if trusting_test_key {
+        installer = installer.trusting(database::signature::testing::public_key());
+    }
+    headless.update(server_cx, |headless, _| {
+        headless.database_drivers = Arc::new(
+            crate::headless_project::HostDatabaseDrivers::with_installer(
+                root.to_path_buf(),
+                Arc::new(installer),
+            ),
+        );
+    });
+}
+
+async fn ensure_driver_on_server(
+    project: &Entity<Project>,
+    driver_id: &str,
+    install: bool,
+    cx: &mut TestAppContext,
+) -> proto::ensure_database_driver_response::State {
+    let client = project.read_with(cx, |project, cx| {
+        project.remote_client().unwrap().read(cx).proto_client()
+    });
+    let response = client.request(proto::EnsureDatabaseDriver {
+        project_id: proto::REMOTE_SERVER_PROJECT_ID,
+        driver_id: driver_id.to_string(),
+        install,
+        api_url: "https://api.test.invalid/api".to_string(),
+    });
+    let response = cx.spawn(async move |_| response.await);
+    cx.run_until_parked();
+    response
+        .await
+        .expect("the server answers")
+        .state
+        .expect("the server says what it found")
+}
+
+#[gpui::test]
+async fn test_remote_database_driver_resolves_in_the_server_store(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    use proto::ensure_database_driver_response::State;
+    // The server reads its store on a blocking thread.
+    cx.executor().allow_parking();
+    let fs = FakeFs::new(server_cx.executor());
+    let (project, headless) = init_test(&fs, cx, server_cx).await;
+    let server_store = tempfile::tempdir().unwrap();
+    let planted = database::install::test_support::plant_driver(
+        server_store.path(),
+        "postgres",
+        DRIVER_RELEASE_VERSION,
+        true,
+    );
+    give_server_driver_store(
+        &headless,
+        server_store.path(),
+        FakeHttpClient::with_404_response(),
+        true,
+        server_cx,
+    );
+
+    match ensure_driver_on_server(&project, "postgres", false, cx).await {
+        State::Installed(installed) => {
+            assert_eq!(PathBuf::from(&installed.executable), planted);
+            assert_eq!(installed.origin, proto::DatabaseDriverOrigin::Store as i32);
+        }
+        other => panic!("expected the driver in the server's store, got {other:?}"),
+    }
+    assert!(matches!(
+        ensure_driver_on_server(&project, "mysql", false, cx).await,
+        State::NotInstalled(_)
+    ));
+    match ensure_driver_on_server(&project, "../postgres", false, cx).await {
+        State::Failed(failed) => assert!(failed.reason.contains("not a database driver")),
+        other => panic!("an id outside the published set must be refused, got {other:?}"),
+    }
+}
+
+#[gpui::test]
+async fn test_remote_database_driver_install_verifies_on_the_server(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    use database::install::test_support::{
+        directory_entries, driver_archive, manifest_for, sha256_of, signed_manifest_for,
+    };
+    use proto::ensure_database_driver_response::State;
+    cx.executor().allow_parking();
+    let fs = FakeFs::new(server_cx.executor());
+    let (project, headless) = init_test(&fs, cx, server_cx).await;
+    let archive = driver_archive("postgres").await;
+
+    let release = |published: String| {
+        driver_release_serving(
+            manifest_for(
+                "postgres",
+                &archive,
+                published.clone(),
+                DRIVER_RELEASE_VERSION,
+            ),
+            signed_manifest_for("postgres", &archive, published, DRIVER_RELEASE_VERSION),
+            archive.clone(),
+        )
+    };
+
+    let tampered_store = tempfile::tempdir().unwrap();
+    give_server_driver_store(
+        &headless,
+        tampered_store.path(),
+        release("a".repeat(64)),
+        true,
+        server_cx,
+    );
+    match ensure_driver_on_server(&project, "postgres", true, cx).await {
+        State::Failed(failed) => assert!(
+            failed.reason.contains("does not match the checksum"),
+            "{}",
+            failed.reason
+        ),
+        other => panic!("a tampered archive must be refused, got {other:?}"),
+    }
+    assert!(
+        directory_entries(tampered_store.path(), "postgres")
+            .iter()
+            .all(|entry| entry.starts_with('.')),
+        "nothing from a tampered archive may be installed: {:?}",
+        directory_entries(tampered_store.path(), "postgres")
+    );
+
+    let unsigned_store = tempfile::tempdir().unwrap();
+    give_server_driver_store(
+        &headless,
+        unsigned_store.path(),
+        release(sha256_of(&archive)),
+        false,
+        server_cx,
+    );
+    match ensure_driver_on_server(&project, "postgres", true, cx).await {
+        State::Failed(failed) => assert!(
+            failed
+                .reason
+                .contains("does not match Zode's driver signing key"),
+            "{}",
+            failed.reason
+        ),
+        other => panic!(
+            "a manifest not signed with the key built into the server must be refused, got {other:?}"
+        ),
+    }
+    assert!(directory_entries(unsigned_store.path(), "postgres").is_empty());
+
+    let store = tempfile::tempdir().unwrap();
+    give_server_driver_store(
+        &headless,
+        store.path(),
+        release(sha256_of(&archive)),
+        true,
+        server_cx,
+    );
+    match ensure_driver_on_server(&project, "postgres", true, cx).await {
+        State::Installed(installed) => {
+            assert!(
+                PathBuf::from(&installed.executable).starts_with(store.path()),
+                "installed into the server's store: {}",
+                installed.executable
+            );
+            assert_eq!(installed.origin, proto::DatabaseDriverOrigin::Store as i32);
+        }
+        other => panic!("a verified driver must be installed, got {other:?}"),
+    }
+}
+
+/// What the server answers when asked to install `postgres` from `api_url`.
+async fn install_from(
+    drivers: &crate::headless_project::HostDatabaseDrivers,
+    api_url: &str,
+) -> proto::ensure_database_driver_response::State {
+    drivers.ensure("postgres".to_string(), true, api_url).await
+}
+
+fn failure_reason(state: proto::ensure_database_driver_response::State) -> String {
+    match state {
+        proto::ensure_database_driver_response::State::Failed(failed) => failed.reason,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// One installer for the life of the server: a second, for another API,
+/// would run a second download of the same driver beside the first.
+#[test]
+fn test_remote_database_driver_installs_from_the_first_api_only() {
+    let store = tempfile::tempdir().unwrap();
+    let drivers = crate::headless_project::HostDatabaseDrivers::new(
+        store.path().to_path_buf(),
+        FakeHttpClient::with_404_response(),
+    );
+    smol::block_on(async {
+        install_from(&drivers, "https://api.one.invalid/api").await;
+        let reason = failure_reason(install_from(&drivers, "https://api.two.invalid/api").await);
+        assert!(
+            reason.contains("already downloads drivers from https://api.one.invalid/api"),
+            "{reason}"
+        );
+    });
+}
+
+/// `localhost` on the server is the server's own machine, never the client's,
+/// so a plain-http API the client names is refused there.
+#[test]
+fn test_remote_database_driver_refuses_plain_http_by_default() {
+    let store = tempfile::tempdir().unwrap();
+    let drivers = crate::headless_project::HostDatabaseDrivers::new(
+        store.path().to_path_buf(),
+        FakeHttpClient::with_404_response(),
+    );
+    let reason = failure_reason(smol::block_on(install_from(
+        &drivers,
+        "http://localhost:8000/api",
+    )));
+    assert!(reason.contains("is not https"), "{reason}");
+    assert!(
+        database::install::test_support::directory_entries(store.path(), "postgres").is_empty(),
+        "nothing was fetched into the store"
+    );
+}
+
+#[test]
+fn test_remote_database_driver_takes_plain_http_the_server_was_started_with() {
+    let store = tempfile::tempdir().unwrap();
+    let drivers = crate::headless_project::HostDatabaseDrivers::new(
+        store.path().to_path_buf(),
+        FakeHttpClient::with_404_response(),
+    )
+    .with_own_api_url("http://localhost:8000/api");
+    let reason = failure_reason(smol::block_on(install_from(
+        &drivers,
+        "http://localhost:8000/api",
+    )));
+    assert!(
+        reason.contains("http://localhost:8000/api/drivers/latest"),
+        "the server's own API is asked, and answers 404 here: {reason}"
+    );
+    let reason = failure_reason(smol::block_on(install_from(
+        &drivers,
+        "http://localhost:9000/api",
+    )));
+    assert!(reason.contains("is not https"), "{reason}");
+}
+
+/// A driver path that is not UTF-8 is said to be one, not mangled into the
+/// name of a file that does not exist.
+#[cfg(unix)]
+#[test]
+fn test_remote_database_driver_at_a_path_that_is_not_utf8_is_refused() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let executable = PathBuf::from(std::ffi::OsStr::from_bytes(
+        b"/opt/drivers/zode-db-\xffpostgres",
+    ));
+    let reason = failure_reason(crate::headless_project::installed_answer(
+        executable,
+        database::install::store::DriverLocation::Override,
+    ));
+    assert!(reason.contains("not UTF-8"), "{reason}");
+}
