@@ -115,8 +115,7 @@ Claude Code cannot resume a transcript it did not name that way.
 In a WSL, SSH or dev container window the agent CLI runs on the host, and so do
 its transcripts. The history panel lists, resumes, forks and deletes the
 sessions stored on that host, and a restored tab resumes on it. Nothing is
-copied to your local machine, and a host that cannot be reached is reported by
-name instead of being replaced by your local sessions. If the host's Zode server
+copied to your local machine, and a host that cannot be reached is reported instead of being replaced by your local sessions. If the host's Zode server
 is older than this Zode, the panel says so; reconnect the window, then refresh.
 
 ## Where it is stored

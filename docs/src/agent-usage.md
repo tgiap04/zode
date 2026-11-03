@@ -17,7 +17,7 @@ Each `·`-separated group is one quota window — a percentage, and either a cou
 
 ## Remote windows
 
-In a WSL, SSH or dev container window the indicator shows the usage of the account signed in **on the host**, because that is the account its agents spend. It never falls back to the account on this machine. When the host's account cannot be read, the indicator shows a muted mark, and its panel names the reason and the host. A window opened on a collaborator's shared project keeps this machine's account.
+In a WSL, SSH or dev container window the indicator shows the usage of the account signed in **on the host**, because that is the account its agents spend. It never falls back to the account on this machine. When the host's account cannot be read, the indicator shows a muted mark, and its panel says why: for example that no one is signed in on that host, that its `codex` CLI is missing, or that the connection is unavailable. A window opened on a collaborator's shared project keeps this machine's account.
 
 ## Usage panel
 

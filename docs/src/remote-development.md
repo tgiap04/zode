@@ -131,7 +131,7 @@ In a WSL, SSH or dev container window, a project's tools run on the machine the 
 | Database drivers                                                                                      | Downloaded, installed and started on the host. See [Database drivers on a host](#database-drivers-on-a-host).     |
 | [Agent usage](./agent-usage.md#remote-windows)                                                        | The usage of the account signed in on the host.                                                                   |
 
-If the host cannot be reached, the feature says so and names the host; it does not fall back to your local machine.
+If the host cannot be reached, the feature says so; it does not fall back to your local machine.
 
 ### .env files in remote windows
 
