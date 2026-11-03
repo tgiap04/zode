@@ -205,6 +205,7 @@ members = [
     "crates/zode_env_sync",
     "crates/zode_env_sync_ui",
     "crates/zode_sync",
+    "crates/zode_team_vault",
     "crates/zed_env_vars",
     "crates/zlog",
     "crates/zlog_settings",
@@ -440,6 +441,7 @@ zode_account_ui = { path = "crates/zode_account_ui" }
 zode_env_sync = { path = "crates/zode_env_sync" }
 zode_env_sync_ui = { path = "crates/zode_env_sync_ui" }
 zode_sync = { path = "crates/zode_sync" }
+zode_team_vault = { path = "crates/zode_team_vault" }
 zed_env_vars = { path = "crates/zed_env_vars" }
 zlog = { path = "crates/zlog" }
 zlog_settings = { path = "crates/zlog_settings" }

@@ -12,6 +12,7 @@
 //! | [`tokens`] | expiry arithmetic | nothing |
 //! | [`device_flow`] | RFC 8628 conversation | HTTP |
 //! | [`storage`] | the keychain entry | OS keychain |
+//! | [`plan`] | what the plan covers, as the server says | nothing |
 //! | [`account`] | the state machine | both, via the above |
 //!
 //! `device_flow` and `tokens` take their dependencies as arguments precisely so
@@ -19,6 +20,7 @@
 
 mod account;
 mod device_flow;
+pub mod plan;
 mod storage;
 mod tokens;
 
@@ -29,6 +31,10 @@ use zed_env_vars::{EnvVar, env_var};
 
 pub use account::{Account, AccountStatus, AccountStatusChanged, AccountUser, ApiCredential};
 pub use device_flow::DeviceFlowError;
+pub use plan::{
+    PlanLimit, PlanLimitReason, PlanLimits, PlanSource, PlanStatus, PlanSummary, PlanTier,
+    SyncDeviceUsage, TeamSummary,
+};
 pub use tokens::StoredTokens;
 
 /// Where the account service lives.
@@ -94,6 +100,23 @@ pub fn web_url() -> String {
     }
 }
 
+/// Where "Upgrade…" goes. Always built here, never taken from a response.
+pub fn pricing_url() -> String {
+    web_page(&web_url(), PRICING_PATH)
+}
+
+/// Where "Manage plan…" goes.
+pub fn billing_url() -> String {
+    web_page(&web_url(), BILLING_PATH)
+}
+
+pub(crate) const PRICING_PATH: &str = "/pricing";
+pub(crate) const BILLING_PATH: &str = "/account/billing";
+
+pub(crate) fn web_page(web_url: &str, path: &str) -> String {
+    format!("{}{path}", web_url.trim_end_matches('/'))
+}
+
 /// Turns an API base into the origin that serves pages.
 ///
 /// Two steps, both conventions rather than rules: drop a trailing `/api`
@@ -153,6 +176,19 @@ mod tests {
         assert_eq!(
             derive_web_url("https://api.zodekit.site/api/"),
             "https://zodekit.site"
+        );
+    }
+
+    #[test]
+    fn plan_pages_sit_on_the_web_origin_whatever_its_trailing_slash() {
+        use super::{BILLING_PATH, PRICING_PATH, web_page};
+        assert_eq!(
+            web_page("https://zodekit.site", PRICING_PATH),
+            "https://zodekit.site/pricing"
+        );
+        assert_eq!(
+            web_page("https://zodekit.site/", BILLING_PATH),
+            "https://zodekit.site/account/billing"
         );
     }
 

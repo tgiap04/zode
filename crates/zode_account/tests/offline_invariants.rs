@@ -550,6 +550,8 @@ struct RotatingServer {
     revoked_tokens: Mutex<Vec<String>>,
     /// Records a logout and then never answers it.
     revokes_hang: AtomicBool,
+    /// Every `GET /account/plan`, as the full URL and the bearer it carried.
+    plan_requests: Mutex<Vec<(String, String)>>,
 }
 
 impl RotatingServer {
@@ -565,7 +567,12 @@ impl RotatingServer {
             refresh_response_gate: Mutex::new(None),
             revoked_tokens: Mutex::new(Vec::new()),
             revokes_hang: AtomicBool::new(false),
+            plan_requests: Mutex::new(Vec::new()),
         })
+    }
+
+    fn plan_requests(&self) -> Vec<(String, String)> {
+        self.plan_requests.lock().unwrap().clone()
     }
 
     fn hang_revokes(&self) {
@@ -714,6 +721,39 @@ impl RotatingServer {
                     "access_token": "at-signed-in",
                     "refresh_token": "rt-signed-in",
                     "expires_in": 3_600,
+                }),
+            ));
+        }
+
+        if path.ends_with("/account/plan") {
+            let authorization = request
+                .headers()
+                .get("Authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            self.plan_requests
+                .lock()
+                .unwrap()
+                .push((request.uri().to_string(), authorization));
+            return Ok(json_response(
+                200,
+                serde_json::json!({
+                    "tier": "pro",
+                    "source": "subscription",
+                    "status": "active",
+                    "renewsAt": "2026-12-03T00:00:00.000Z",
+                    "endsAt": null,
+                    "limits": {
+                        "syncDevices": { "used": 1, "max": null },
+                        "envSync": true,
+                        "relayDailyBytes": 21474836480u64,
+                        "teamVault": false,
+                    },
+                    "team": null,
+                    "grandfather": null,
+                    "upgradeUrl": "https://zodekit.site/pricing",
+                    "manageUrl": "https://zodekit.site/account/billing",
                 }),
             ));
         }
@@ -1595,4 +1635,147 @@ async fn a_legacy_restore_that_cannot_be_saved_leaves_no_entry(cx: &mut TestAppC
         "the entry still holds the token the server spent: {:?}",
         credentials.held()
     );
+}
+
+/// Invariant 12 -- the plan is read only when the user did something.
+///
+/// The plan request is the one call the account makes that is not about the
+/// session itself, so it is the easiest to "helpfully" add to startup or to a
+/// timer. Each of the three moments it is allowed -- sign-in, the account menu
+/// or a sync window opening, a refusal from the plan -- is a user action; these
+/// tests pin the moments it is not.
+#[gpui::test]
+async fn a_signed_out_account_never_asks_for_its_plan(cx: &mut TestAppContext) {
+    let (http_client, requests) = counting_client();
+    let account = cx.update(|cx| {
+        cx.new(|_| {
+            Account::new(
+                http_client,
+                StubCredentials::empty(),
+                "https://zodekit.site/api".into(),
+            )
+        })
+    });
+
+    account.update(cx, |account: &mut Account, cx| account.refresh_plan(cx));
+    cx.run_until_parked();
+
+    assert_eq!(requests.load(Ordering::SeqCst), 0);
+    account.read_with(cx, |account: &Account, _| assert!(account.plan().is_none()));
+}
+
+#[gpui::test]
+async fn restoring_a_session_does_not_ask_for_the_plan(cx: &mut TestAppContext) {
+    let server = RotatingServer::new("stored-refresh");
+    let credentials = StubCredentials::holding("1", saved_session(true));
+
+    let account = restored_account(cx, server.client(), &credentials);
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(3_600));
+    cx.run_until_parked();
+
+    account.read_with(cx, |account: &Account, _| {
+        assert!(account.status().is_signed_in(), "the restore itself worked");
+        assert!(account.plan().is_none());
+    });
+    assert_eq!(
+        server.plan_requests(),
+        Vec::new(),
+        "starting the editor must not read the plan"
+    );
+}
+
+#[gpui::test]
+async fn signing_in_reads_the_plan_once_and_never_again_on_its_own(cx: &mut TestAppContext) {
+    let server = RotatingServer::new("rt-signed-in");
+    let account = cx.update(|cx| {
+        cx.new(|_| {
+            Account::new(
+                server.client(),
+                StubCredentials::empty(),
+                "https://zodekit.site/api".into(),
+            )
+        })
+    });
+
+    account.update(cx, |account: &mut Account, cx| account.sign_in(cx));
+    cx.run_until_parked();
+
+    assert_eq!(
+        server.plan_requests(),
+        vec![(
+            "https://zodekit.site/api/account/plan".to_string(),
+            "Bearer at-signed-in".to_string()
+        )],
+        "one plan read, to the API, as the user who just signed in"
+    );
+    account.read_with(cx, |account: &Account, _| {
+        let plan = account.plan().expect("the plan was read");
+        assert_eq!(plan.tier, zode_account::PlanTier::Pro);
+    });
+
+    cx.executor().advance_clock(Duration::from_secs(3_600));
+    cx.run_until_parked();
+    assert_eq!(
+        server.plan_requests().len(),
+        1,
+        "an idle hour must not read the plan again"
+    );
+}
+
+#[gpui::test]
+async fn two_triggers_at_once_read_the_plan_once(cx: &mut TestAppContext) {
+    let server = RotatingServer::new("test-refresh");
+    let account = cx.update(|cx| {
+        cx.new(|_| {
+            let mut account = Account::for_test_with(
+                AccountStatus::SignedIn(ada()),
+                server.client(),
+                StubCredentials::empty(),
+            );
+            account.set_tokens_for_test();
+            account
+        })
+    });
+
+    // The sync and env sessions can both be refused by the plan in the same
+    // moment, and each asks for a refresh.
+    account.update(cx, |account: &mut Account, cx| {
+        account.refresh_plan(cx);
+        account.refresh_plan(cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(server.plan_requests().len(), 1);
+    account.read_with(cx, |account: &Account, _| assert!(account.plan().is_some()));
+}
+
+#[gpui::test]
+async fn signing_out_forgets_the_plan(cx: &mut TestAppContext) {
+    let server = RotatingServer::new("test-refresh");
+    let account = cx.update(|cx| {
+        cx.new(|_| {
+            let mut account = Account::for_test_with(
+                AccountStatus::SignedIn(ada()),
+                server.client(),
+                StubCredentials::empty(),
+            );
+            account.set_tokens_for_test();
+            account
+        })
+    });
+    account.update(cx, |account: &mut Account, cx| account.refresh_plan(cx));
+    cx.run_until_parked();
+    account.read_with(cx, |account: &Account, _| assert!(account.plan().is_some()));
+
+    account
+        .update(cx, |account: &mut Account, cx| account.sign_out(cx))
+        .await;
+
+    account.read_with(cx, |account: &Account, _| {
+        assert!(
+            account.plan().is_none(),
+            "the next person to sign in must not see this one's plan"
+        );
+    });
 }

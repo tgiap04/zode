@@ -11,10 +11,10 @@ mod recovery_key_modal;
 mod sign_in_modal;
 mod sync_modal;
 
-use gpui::{App, Window};
+use gpui::{App, Window, actions};
 use ui::prelude::*;
 use workspace::Workspace;
-use zode_account::{Account, AccountStatus};
+use zode_account::{Account, AccountStatus, PlanSource, PlanStatus, PlanSummary, PlanTier};
 use zode_sync::{SyncSession, SyncStatus};
 
 pub use diff_modal::DiffModal;
@@ -28,6 +28,17 @@ pub use sync_modal::SyncModal;
 /// someone opens this from the editor is to see, rename, or remove a machine.
 const ACCOUNT_WEB_PATH: &str = "/account/devices";
 
+actions!(
+    zode_account,
+    [
+        /// Opens the plans page on the web. Paying happens there, never in the
+        /// editor.
+        UpgradePlan,
+        /// Opens the billing page on the web.
+        ManagePlan
+    ]
+);
+
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace
@@ -37,9 +48,23 @@ pub fn init(cx: &mut App) {
             .register_action(sync_settings)
             .register_action(show_recovery_key)
             .register_action(enter_recovery_key)
-            .register_action(rotate_recovery_key);
+            .register_action(rotate_recovery_key)
+            .register_action(|_, _: &UpgradePlan, _window, cx| {
+                cx.open_url(&zode_account::pricing_url())
+            })
+            .register_action(|_, _: &ManagePlan, _window, cx| {
+                cx.open_url(&zode_account::billing_url())
+            });
     })
     .detach();
+}
+
+/// Reads the plan, if someone is signed in. For the moments the README names:
+/// the account menu or a sync window opening.
+pub fn refresh_plan(cx: &mut App) {
+    if let Some(account) = Account::global(cx) {
+        account.update(cx, |account, cx| account.refresh_plan(cx));
+    }
 }
 
 fn sign_in(
@@ -103,6 +128,7 @@ fn sync_settings(
     let Some(session) = SyncSession::global(cx) else {
         return;
     };
+    refresh_plan(cx);
     // Opens the diff window the moment there is something to decide. Attached
     // here rather than globally so a user who never opens sync never gets an
     // observer either.
@@ -208,7 +234,85 @@ pub fn sync_summary(status: &SyncStatus) -> Option<SharedString> {
         SyncStatus::Done(text) => Some(text.clone()),
         SyncStatus::NeedsKey => Some("No recovery key on this machine".into()),
         SyncStatus::KeyMismatch => Some("Stored data needs a different recovery key".into()),
+        SyncStatus::PlanLimited(limit) => Some(limit.sentence().into()),
         SyncStatus::Failed(text) => Some(text.clone()),
+    }
+}
+
+/// One line naming the plan, for the account menu.
+pub fn plan_summary(plan: &PlanSummary) -> SharedString {
+    match plan.tier {
+        PlanTier::Free => match plan.limits.sync_devices.max {
+            Some(max) => format!(
+                "Plan: Free · {} of {max} synced devices",
+                plan.limits.sync_devices.used
+            )
+            .into(),
+            None => "Plan: Free".into(),
+        },
+        PlanTier::Pro => {
+            let when = if plan.source == PlanSource::Lifetime {
+                Some("lifetime".to_string())
+            } else if plan.status == PlanStatus::Canceling {
+                plan.ends_at
+                    .as_ref()
+                    .and_then(|at| short_date(at))
+                    .map(|date| format!("ends {date}"))
+            } else {
+                plan.renews_at
+                    .as_ref()
+                    .and_then(|at| short_date(at))
+                    .map(|date| format!("renews {date}"))
+            };
+            match when {
+                Some(when) => format!("Plan: Pro ({when})").into(),
+                None => "Plan: Pro".into(),
+            }
+        }
+        PlanTier::Team => match &plan.team {
+            Some(team) => format!("Plan: Team \u{2014} {}", team.name).into(),
+            None => "Plan: Team".into(),
+        },
+    }
+}
+
+/// "3 Dec" from an ISO-8601 timestamp, read from its date part only. Anything
+/// that is not one gives `None` rather than a wrong date.
+fn short_date(iso: &str) -> Option<String> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let date = iso.get(..10)?;
+    let mut parts = date.split('-');
+    let (_year, month, day) = (parts.next()?, parts.next()?, parts.next()?);
+    let month: usize = month.parse().ok()?;
+    let day: u8 = day.parse().ok()?;
+    let name = MONTHS.get(month.checked_sub(1)?)?;
+    (1..=31).contains(&day).then(|| format!("{day} {name}"))
+}
+
+/// What the account menu offers about the plan.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PlanMenu {
+    pub line: Option<SharedString>,
+    pub upgrade: bool,
+    pub manage: bool,
+}
+
+/// Free is offered an upgrade, a paid plan its billing page, and an account
+/// whose plan has not been read yet both, rather than a guess.
+pub fn plan_menu(plan: Option<&PlanSummary>) -> PlanMenu {
+    match plan {
+        None => PlanMenu {
+            line: None,
+            upgrade: true,
+            manage: true,
+        },
+        Some(plan) => PlanMenu {
+            line: Some(plan_summary(plan)),
+            upgrade: plan.tier == PlanTier::Free,
+            manage: plan.tier != PlanTier::Free,
+        },
     }
 }
 
@@ -221,5 +325,107 @@ pub fn status_summary(status: &AccountStatus) -> SharedString {
         }
         AccountStatus::SignedIn(user) => user.email.clone(),
         AccountStatus::Offline(user) => format!("{} (offline)", user.email).into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zode_account::{PlanLimits, SyncDeviceUsage, TeamSummary};
+
+    fn plan(tier: PlanTier, source: PlanSource) -> PlanSummary {
+        PlanSummary {
+            tier,
+            source,
+            status: PlanStatus::Active,
+            renews_at: None,
+            ends_at: None,
+            limits: PlanLimits {
+                sync_devices: SyncDeviceUsage {
+                    used: 2,
+                    max: Some(2),
+                },
+                env_sync: false,
+                relay_daily_bytes: 2_147_483_648,
+                team_vault: false,
+            },
+            team: None,
+            grandfather_env_until: None,
+            upgrade_url: "https://zodekit.site/pricing".into(),
+            manage_url: "https://zodekit.site/account/billing".into(),
+        }
+    }
+
+    #[test]
+    fn free_counts_the_synced_devices() {
+        assert_eq!(
+            plan_summary(&plan(PlanTier::Free, PlanSource::Free)),
+            "Plan: Free · 2 of 2 synced devices"
+        );
+    }
+
+    #[test]
+    fn pro_says_when_it_renews_or_ends() {
+        let mut pro = plan(PlanTier::Pro, PlanSource::Subscription);
+        pro.limits.sync_devices.max = None;
+        pro.renews_at = Some("2026-12-03T10:00:00.000Z".into());
+        assert_eq!(plan_summary(&pro), "Plan: Pro (renews 3 Dec)");
+
+        pro.status = PlanStatus::Canceling;
+        pro.renews_at = None;
+        pro.ends_at = Some("2027-01-15T00:00:00.000Z".into());
+        assert_eq!(plan_summary(&pro), "Plan: Pro (ends 15 Jan)");
+
+        let lifetime = plan(PlanTier::Pro, PlanSource::Lifetime);
+        assert_eq!(plan_summary(&lifetime), "Plan: Pro (lifetime)");
+
+        // A date the server wrote some other way is left out, not misread.
+        let mut odd = plan(PlanTier::Pro, PlanSource::Subscription);
+        odd.renews_at = Some("next month".into());
+        assert_eq!(plan_summary(&odd), "Plan: Pro");
+    }
+
+    #[test]
+    fn team_names_the_team() {
+        let mut team = plan(PlanTier::Team, PlanSource::TeamSeat);
+        team.team = Some(TeamSummary {
+            id: "t1".into(),
+            name: "Acme".into(),
+            role: "member".into(),
+            key_version: 1,
+        });
+        assert_eq!(plan_summary(&team), "Plan: Team — Acme");
+    }
+
+    #[test]
+    fn the_menu_offers_what_fits_the_plan() {
+        assert_eq!(
+            plan_menu(None),
+            PlanMenu {
+                line: None,
+                upgrade: true,
+                manage: true,
+            }
+        );
+        let free = plan_menu(Some(&plan(PlanTier::Free, PlanSource::Free)));
+        assert_eq!(
+            free.line.as_ref().map(|line| line.as_ref()),
+            Some("Plan: Free · 2 of 2 synced devices")
+        );
+        assert!(free.upgrade && !free.manage);
+        let pro = plan_menu(Some(&plan(PlanTier::Pro, PlanSource::Subscription)));
+        assert!(!pro.upgrade && pro.manage);
+    }
+
+    #[test]
+    fn a_plan_refusal_is_summarised_by_its_sentence() {
+        let limit = zode_account::PlanLimit::from_body(
+            r#"{"error":"sync_device_limit","limit":2}"#,
+            &zode_account::web_url(),
+        );
+        assert_eq!(
+            sync_summary(&SyncStatus::PlanLimited(limit.clone())),
+            Some(limit.sentence().into())
+        );
     }
 }

@@ -66,8 +66,32 @@ impl Sidebar {
                             .tooltip(move |_window, cx| Tooltip::simple(tooltip.clone(), cx)),
                     )
                     .menu(move |window, cx| {
+                        // Opening the menu is one of the moments the plan is
+                        // read. The answer lands after the menu is built, so
+                        // it shows the plan from sign-in or the last opening.
+                        zode_account_ui::refresh_plan(cx);
+                        let plan = zode_account_ui::plan_menu(
+                            Account::global(cx)
+                                .as_ref()
+                                .and_then(|account| account.read(cx).plan()),
+                        );
                         Some(ContextMenu::build(window, cx, move |menu, _window, cx| {
                             let remote_control_on = RemoteControlSettings::is_enabled(cx);
+                            let menu = menu
+                                .when_some(plan.line.clone(), |menu, line| menu.label(line))
+                                .when(plan.upgrade, |menu| {
+                                    menu.action(
+                                        "Upgrade\u{2026}",
+                                        Box::new(zode_account_ui::UpgradePlan),
+                                    )
+                                })
+                                .when(plan.manage, |menu| {
+                                    menu.action(
+                                        "Manage Plan\u{2026}",
+                                        Box::new(zode_account_ui::ManagePlan),
+                                    )
+                                })
+                                .separator();
                             menu.action(
                                 "Sync Settings\u{2026}",
                                 Box::new(zed_actions::account::SyncSettings),

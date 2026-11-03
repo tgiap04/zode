@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use gpui::{App, Context, Entity, EventEmitter, Global, SharedString, Task};
-use zode_account::Account;
+use zode_account::{Account, PlanLimit};
 
 use crate::artifact::Artifact;
 use crate::dek::Dek;
@@ -37,10 +37,29 @@ pub enum SyncStatus {
     NeedsKey,
     /// Data on the server was written with a key this machine does not have.
     KeyMismatch,
+    /// The account's plan does not cover this (HTTP 402). Never a reason to
+    /// sign in again; the window offers the plan pages instead.
+    PlanLimited(PlanLimit),
     Failed(SharedString),
 }
 
 pub struct SyncStatusChanged;
+
+/// How a recovery-key replacement ended. Both carry the new recovery key.
+#[derive(Debug)]
+pub enum KeyRotation {
+    /// Everything stored is under the new key, and it is this machine's key.
+    Complete { phrase: String },
+    /// Stopped before the end; running it again continues with this same
+    /// key. When `adopted`, the new key is already this machine's key (every
+    /// key slot moved), so the phrase must be written down now. When not, the
+    /// old recovery key still opens everything.
+    Interrupted {
+        phrase: String,
+        adopted: bool,
+        reason: String,
+    },
+}
 
 struct GlobalSyncSession(Entity<SyncSession>);
 impl Global for GlobalSyncSession {}
@@ -198,10 +217,15 @@ impl SyncSession {
     /// synced data. Revoking a device on the web ends its server session but
     /// leaves it holding a key that opens anything it already downloaded.
     ///
-    /// Returns the new recovery key. Every other machine will report
-    /// `KeyRotated` on its next pull until it is given this string.
-    pub fn rotate_key(&mut self, cx: &mut Context<Self>) -> Task<anyhow::Result<String>> {
-        let Some(old) = self.dek.clone() else {
+    /// Both keys are kept in the keychain (`keystore::write_rotation`) before
+    /// the first server write and until everything is under the new one. A
+    /// second call after an interruption continues with that same new key, so
+    /// nothing is ever stranded under a key nobody holds.
+    ///
+    /// Every other machine will report `KeyRotated` on its next pull until it
+    /// is given the new recovery key.
+    pub fn rotate_key(&mut self, cx: &mut Context<Self>) -> Task<anyhow::Result<KeyRotation>> {
+        let Some(current) = self.dek.clone() else {
             return Task::ready(Err(anyhow::anyhow!(
                 "this machine has no recovery key to replace"
             )));
@@ -217,12 +241,29 @@ impl SyncSession {
 
         cx.spawn(async move |this, cx| {
             let user_id = user_id.ok_or_else(|| anyhow::anyhow!("no account is signed in"))?;
-            let new = Arc::new(Dek::generate()?);
-            let phrase = recovery_key::encode(&new);
-
             let Some(context) = build_context(&account, cx).await else {
                 anyhow::bail!("this session could not be used — sign in again");
             };
+
+            // An unfinished rotation of this key is continued, never restarted:
+            // its new key may already seal something.
+            let (old, new) = match keystore::read_rotation(&credentials, cx).await {
+                Some((old, new)) if old.kid() == current.kid() || new.kid() == current.kid() => {
+                    (Arc::new(old), Arc::new(new))
+                }
+                _ => {
+                    let new = Dek::generate()?;
+                    keystore::write_rotation(&credentials, &user_id, &current, &new, cx)
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "nothing was changed: the new key could not be kept in the keychain ({error})"
+                            )
+                        })?;
+                    (current, Arc::new(new))
+                }
+            };
+            let phrase = recovery_key::encode(&new);
             let state_path = paths::sync_state_file().clone();
 
             let outcome = rotate::rotate(&context, &old, &new, &state_path, || {
@@ -238,18 +279,34 @@ impl SyncSession {
                     _ = this.update(&mut cx, |this, _| this.dek = Some(new));
                 }
             })
-            .await
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+            .await;
 
-            if let rotate::RotationOutcome::Interrupted { remaining } = outcome {
-                anyhow::bail!(
-                    "another machine wrote while the key was being replaced; {} item(s) still use the old key — run it again",
+            let adopted = this
+                .read_with(cx, |this, _| {
+                    this.dek.as_ref().is_some_and(|dek| dek.kid() == new.kid())
+                })
+                .unwrap_or(false);
+            let reason = match outcome {
+                Ok(rotate::RotationOutcome::Complete) => {
+                    if let Err(error) = keystore::delete_rotation(&credentials, cx).await {
+                        log::warn!("could not forget the finished key rotation: {error}");
+                    }
+                    _ = this.update(cx, |this, cx| {
+                        this.set_status(SyncStatus::Done("recovery key replaced".into()), cx)
+                    });
+                    return Ok(KeyRotation::Complete { phrase });
+                }
+                Ok(rotate::RotationOutcome::Interrupted { remaining }) => format!(
+                    "another machine wrote while the key was being replaced; {} item(s) still use the old key",
                     remaining.len()
-                );
-            }
-
-            _ = this.update(cx, |this, cx| this.set_status(SyncStatus::Done("recovery key replaced".into()), cx));
-            Ok(phrase)
+                ),
+                Err(error) => error.to_string(),
+            };
+            Ok(KeyRotation::Interrupted {
+                phrase,
+                adopted,
+                reason,
+            })
         })
     }
 
@@ -259,7 +316,10 @@ impl SyncSession {
         self.dek = None;
         let credentials = self.account.read(cx).credentials_provider();
         self.set_status(SyncStatus::NeedsKey, cx);
-        cx.spawn(async move |_, cx| keystore::delete(&credentials, cx).await)
+        cx.spawn(async move |_, cx| {
+            keystore::delete_rotation(&credentials, cx).await?;
+            keystore::delete(&credentials, cx).await
+        })
     }
 
     pub fn pull(&mut self, kind: Kind, cx: &mut Context<Self>) {
@@ -496,7 +556,7 @@ impl SyncSession {
                 self.set_status(SyncStatus::Idle, cx);
             }
             Ok(PullOutcome::KeyMismatch(_)) => self.set_status(SyncStatus::KeyMismatch, cx),
-            Err(error) => self.set_status(SyncStatus::Failed(error.to_string().into()), cx),
+            Err(error) => self.fail(error, cx),
         }
     }
 
@@ -528,7 +588,21 @@ impl SyncSession {
                 self.set_status(SyncStatus::Idle, cx);
             }
             Err(SyncError::Crypto(_)) => self.set_status(SyncStatus::KeyMismatch, cx),
-            Err(error) => self.set_status(SyncStatus::Failed(error.to_string().into()), cx),
+            Err(error) => self.fail(error, cx),
+        }
+    }
+
+    /// Records why a transfer did not happen. A plan refusal gets its own
+    /// status and a fresh read of the plan, so the window can say which plan
+    /// refused it; there is no retry, because the answer would be the same.
+    fn fail(&mut self, error: SyncError, cx: &mut Context<Self>) {
+        match error {
+            SyncError::Client(crate::client::ClientError::PlanLimit(limit)) => {
+                self.set_status(SyncStatus::PlanLimited(limit), cx);
+                self.account
+                    .update(cx, |account, cx| account.refresh_plan(cx));
+            }
+            error => self.set_status(SyncStatus::Failed(error.to_string().into()), cx),
         }
     }
 
@@ -579,4 +653,169 @@ async fn build_context(account: &Entity<Account>, cx: &mut gpui::AsyncApp) -> Op
         api_url,
         credential,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use credentials_provider::CredentialsProvider;
+    use gpui::{AppContext as _, AsyncApp, TestAppContext};
+    use http_client::{FakeHttpClient, HttpClient, Response};
+    use zode_account::{AccountStatus, AccountUser, PlanLimitReason};
+
+    use super::*;
+    use crate::client::ClientError;
+
+    struct NoKeychain;
+
+    impl CredentialsProvider for NoKeychain {
+        fn read_credentials<'a>(
+            &'a self,
+            _url: &'a str,
+            _cx: &'a AsyncApp,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<(String, Vec<u8>)>>> + 'a>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn write_credentials<'a>(
+            &'a self,
+            _url: &'a str,
+            _username: &'a str,
+            _password: &'a [u8],
+            _cx: &'a AsyncApp,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn delete_credentials<'a>(
+            &'a self,
+            _url: &'a str,
+            _cx: &'a AsyncApp,
+        ) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// A signed-in session whose account counts the plan reads it is asked for.
+    fn signed_in_session(cx: &mut TestAppContext) -> (Entity<SyncSession>, Arc<AtomicUsize>) {
+        let plan_reads = Arc::new(AtomicUsize::new(0));
+        let counter = plan_reads.clone();
+        let http_client: Arc<dyn HttpClient> = FakeHttpClient::create(move |request| {
+            let counter = counter.clone();
+            async move {
+                if request.uri().path().ends_with("/account/plan") {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(Response::builder()
+                    .status(500)
+                    .body(Default::default())
+                    .expect("a well-formed response"))
+            }
+        });
+        let account = cx.update(|cx| {
+            cx.new(|_| {
+                let mut account = Account::for_test_with(
+                    AccountStatus::SignedIn(AccountUser {
+                        id: "1".into(),
+                        email: "ada@example.com".into(),
+                        name: None,
+                        avatar_url: None,
+                    }),
+                    http_client,
+                    Arc::new(NoKeychain),
+                );
+                account.set_tokens_for_test();
+                account
+            })
+        });
+        let session = cx.update(|cx| cx.new(|_| SyncSession::new(account)));
+        (session, plan_reads)
+    }
+
+    fn device_limit() -> PlanLimit {
+        PlanLimit {
+            reason: PlanLimitReason::SyncDeviceLimit,
+            limit: Some(2),
+            used: Some(3),
+            upgrade_url: zode_account::pricing_url(),
+        }
+    }
+
+    fn refused() -> SyncError {
+        SyncError::Client(ClientError::PlanLimit(device_limit()))
+    }
+
+    #[gpui::test]
+    fn a_push_the_plan_refuses_says_so_and_reads_the_plan(cx: &mut TestAppContext) {
+        let (session, plan_reads) = signed_in_session(cx);
+        session.update(cx, |session, cx| {
+            session.absorb_push(Kind::Settings, Err(refused()), cx)
+        });
+        cx.run_until_parked();
+
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.status(), &SyncStatus::PlanLimited(device_limit()));
+        });
+        assert_eq!(plan_reads.load(Ordering::SeqCst), 1);
+    }
+
+    #[gpui::test]
+    fn a_pull_the_plan_refuses_says_so_and_reads_the_plan(cx: &mut TestAppContext) {
+        let (session, plan_reads) = signed_in_session(cx);
+        session.update(cx, |session, cx| {
+            session.absorb_pull(Kind::Keymap, Err(refused()), cx)
+        });
+        cx.run_until_parked();
+
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.status(), &SyncStatus::PlanLimited(device_limit()));
+        });
+        assert_eq!(plan_reads.load(Ordering::SeqCst), 1);
+    }
+
+    /// A refused session is still "sign in again", and is not a plan question.
+    #[gpui::test]
+    fn an_unauthorized_answer_is_not_a_plan_refusal(cx: &mut TestAppContext) {
+        let (session, plan_reads) = signed_in_session(cx);
+        session.update(cx, |session, cx| {
+            session.absorb_push(
+                Kind::Settings,
+                Err(SyncError::Client(ClientError::Unauthorized)),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        session.read_with(cx, |session, _| {
+            assert!(
+                matches!(session.status(), SyncStatus::Failed(_)),
+                "{:?}",
+                session.status()
+            );
+        });
+        assert_eq!(plan_reads.load(Ordering::SeqCst), 0);
+    }
+
+    #[gpui::test]
+    fn a_later_success_clears_the_refusal(cx: &mut TestAppContext) {
+        let (session, _plan_reads) = signed_in_session(cx);
+        session.update(cx, |session, cx| {
+            session.absorb_push(Kind::Settings, Err(refused()), cx);
+            session.absorb_push(
+                Kind::Settings,
+                Ok(PushOutcome::Stored {
+                    revision: "r2".into(),
+                }),
+                cx,
+            );
+            assert!(
+                matches!(session.status(), SyncStatus::Done(_)),
+                "{:?}",
+                session.status()
+            );
+        });
+    }
 }

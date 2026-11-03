@@ -11,8 +11,10 @@ use ui::{
 use ui_input::{ErasedEditorEvent, InputField};
 use util::ResultExt as _;
 use workspace::{ModalView, Workspace};
+use zode_account::{Account, PlanSummary};
 use zode_env_sync::{EntryId, EnvSession, EnvStatus, ProjectId};
 
+use crate::team_vault_section::{self, TeamVaultSection};
 use crate::{ActiveEnvFile, EnvDiffModal, WirePanel};
 
 /// Why the window is open, and therefore what a project row does when clicked.
@@ -52,6 +54,10 @@ pub struct VaultModal {
     /// at once, and one field holding two answers would show the wrong one.
     rename_input: Entity<InputField>,
     renaming: Option<EntryId>,
+    /// The Team tab, made the first time it is chosen: choosing it is what
+    /// reads the team, so the window opening alone does not.
+    team: Option<Entity<TeamVaultSection>>,
+    showing_team: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -133,10 +139,16 @@ impl VaultModal {
             window,
             cx,
         );
-        let subscriptions = vec![
+        let mut subscriptions = vec![
             cx.observe(&session, |_this, _session, cx| cx.notify()),
             name_edited,
         ];
+        // Opening this window is one of the moments the plan is read, and the
+        // banner below follows it when the answer arrives.
+        if let Some(account) = Account::global(cx) {
+            subscriptions.push(cx.observe(&account, |_this, _account, cx| cx.notify()));
+            account.update(cx, |account, cx| account.refresh_plan(cx));
+        }
 
         // Unlock first, THEN load. Both were kicked off together before, and
         // because unlocking is asynchronous the load always ran without a key
@@ -165,8 +177,22 @@ impl VaultModal {
             naming: false,
             rename_input,
             renaming: None,
+            team: None,
+            showing_team: false,
             _subscriptions: subscriptions,
         }
+    }
+
+    fn select_tab(&mut self, team: bool, cx: &mut Context<Self>) {
+        if team
+            && self.team.is_none()
+            && let Some(session) = zode_team_vault::TeamVaultSession::global(cx)
+        {
+            let workspace = self.workspace.clone();
+            self.team = Some(cx.new(|cx| TeamVaultSection::new(session, workspace, cx)));
+        }
+        self.showing_team = team && self.team.is_some();
+        cx.notify();
     }
 
     /// Acts on the project the user just picked, according to why the window
@@ -507,6 +533,7 @@ impl VaultModal {
                 .into(),
                 Color::Error,
             )),
+            EnvStatus::PlanLimited(limit) => Some((limit.sentence().into(), Color::Warning)),
             EnvStatus::Failed(message) => Some((message.clone(), Color::Error)),
         }
     }
@@ -546,14 +573,42 @@ impl Render for VaultModal {
         };
         let picking = !matches!(self.purpose, Purpose::Browse);
         let renaming = self.renaming;
+        let team_tab = !picking && team_vault_section::team_tab_available(cx);
+        let team_section = self.team.clone().filter(|_| team_tab && self.showing_team);
+        let showing_team = team_section.is_some();
 
+        let read_only = shows_read_only_banner(
+            Account::global(cx)
+                .as_ref()
+                .and_then(|account| account.read(cx).plan()),
+        );
         let session = self.session.read(cx);
         let unlocked = session.is_unlocked();
         let working = matches!(session.status(), EnvStatus::Working);
+        let plan_limited = matches!(session.status(), EnvStatus::PlanLimited(_));
         let manifest = session.manifest();
         let deleted_elsewhere: Vec<EntryId> = session.reconciliation().deleted_elsewhere.clone();
 
         let mut rows = v_flex().w_full().gap_1();
+
+        if unlocked && read_only {
+            // Said, not enforced: the server decides, and a plan read a minute
+            // ago must not stop someone who has just upgraded.
+            rows = rows.child(
+                h_flex()
+                    .gap_2()
+                    .p_2()
+                    .justify_between()
+                    .child(
+                        Label::new(
+                            "Your files stay readable and removable here; Pro keeps them in sync.",
+                        )
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                    )
+                    .child(upgrade_button("env-vault-banner-upgrade")),
+            );
+        }
 
         if !unlocked {
             // Not a list, and not an empty one either: this account has no
@@ -810,7 +865,8 @@ impl Render for VaultModal {
             );
         }
 
-        let status = self.status_line(cx);
+        let status = self.status_line(cx).filter(|_| !showing_team);
+        let this = cx.weak_entity();
 
         div()
             .key_context("EnvVaultModal")
@@ -853,17 +909,29 @@ impl Render for VaultModal {
                         Section::new().padded(false).child(
                             v_flex()
                                 .w_full()
+                                .when(team_tab, |container| {
+                                    container.child(team_vault_section::tab_bar(
+                                        showing_team,
+                                        move |team, _window, cx| {
+                                            this.update(cx, |modal, cx| modal.select_tab(team, cx))
+                                                .log_err();
+                                        },
+                                    ))
+                                })
                                 .child(ListSeparator)
-                                .child(
-                                    div()
-                                        .id("env-vault-body")
-                                        .w_full()
-                                        .max_h(rems(22.))
-                                        .p_1()
-                                        .overflow_y_scroll()
-                                        .child(rows),
-                                )
-                                .when(unlocked && self.naming, |this| {
+                                .map(|container| match team_section {
+                                    Some(section) => container.child(section),
+                                    None => container.child(
+                                        div()
+                                            .id("env-vault-body")
+                                            .w_full()
+                                            .max_h(rems(22.))
+                                            .p_1()
+                                            .overflow_y_scroll()
+                                            .child(rows),
+                                    ),
+                                })
+                                .when(unlocked && self.naming && !showing_team, |this| {
                                     this.child(ListSeparator).child(
                                         v_flex()
                                             .w_full()
@@ -933,7 +1001,25 @@ impl Render for VaultModal {
                                                 Label::new(message)
                                                     .size(LabelSize::Small)
                                                     .color(color),
-                                            ),
+                                            )
+                                            .when(plan_limited, |this| {
+                                                this.child(div().flex_1())
+                                                    .child(upgrade_button("env-vault-upgrade"))
+                                                    .child(
+                                                        Button::new(
+                                                            "env-vault-manage-plan",
+                                                            "Manage Plan\u{2026}",
+                                                        )
+                                                        .tooltip(Tooltip::text(
+                                                            "Opens your billing page in your browser",
+                                                        ))
+                                                        .on_click(|_, _window, cx| {
+                                                            cx.open_url(
+                                                                &zode_account::billing_url(),
+                                                            )
+                                                        }),
+                                                    )
+                                            }),
                                     )
                                 }),
                         ),
@@ -941,7 +1027,9 @@ impl Render for VaultModal {
                     .footer(
                         ModalFooter::new()
                             .start_slot(
-                                div().when(unlocked && !manifest.projects.is_empty(), |this| {
+                                div().when(
+                                    unlocked && !manifest.projects.is_empty() && !showing_team,
+                                    |this| {
                                     this.child(
                                         Button::new("env-vault-new-project", "New Project\u{2026}")
                                             .start_icon(
@@ -971,6 +1059,21 @@ impl Render for VaultModal {
                     ),
             )
     }
+}
+
+/// Whether the vault says its files no longer sync on this plan.
+///
+/// Only once the plan has been read and says `.env` sync is not in it -- Free,
+/// after any grandfathered window has ended. An unknown plan says nothing.
+fn shows_read_only_banner(plan: Option<&PlanSummary>) -> bool {
+    plan.is_some_and(|plan| !plan.limits.env_sync)
+}
+
+fn upgrade_button(id: &'static str) -> Button {
+    Button::new(id, "Upgrade\u{2026}")
+        .style(ButtonStyle::Filled)
+        .tooltip(Tooltip::text("Opens the plans page in your browser"))
+        .on_click(|_, _window, cx| cx.open_url(&zode_account::pricing_url()))
 }
 
 #[cfg(test)]
@@ -1035,6 +1138,58 @@ mod tests {
             worktree_root: PathBuf::from("/checkout"),
             absolute: PathBuf::from("/checkout/services/api/.env"),
         }
+    }
+
+    fn a_plan(env_sync: bool) -> PlanSummary {
+        let tier = if env_sync { "pro" } else { "free" };
+        PlanSummary::parse(
+            &format!(
+                r#"{{"tier":"{tier}","source":"free","status":"active","limits":{{"syncDevices":{{"used":1,"max":2}},"envSync":{env_sync},"relayDailyBytes":2147483648,"teamVault":false}}}}"#
+            ),
+            &zode_account::web_url(),
+        )
+        .expect("a valid plan")
+    }
+
+    #[test]
+    fn the_read_only_banner_follows_the_plan_and_says_nothing_without_one() {
+        assert!(
+            !shows_read_only_banner(None),
+            "an unknown plan says nothing"
+        );
+        assert!(!shows_read_only_banner(Some(&a_plan(true))));
+        assert!(shows_read_only_banner(Some(&a_plan(false))));
+    }
+
+    #[gpui::test]
+    fn the_window_draws_a_plan_refusal(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let session = session(Some(populated()), cx);
+        let (modal, cx) = cx.add_window_view(|window, cx| {
+            VaultModal::new(session.clone(), WeakEntity::new_invalid(), window, cx)
+        });
+        // Opening the window unlocks first, which settles on its own status;
+        // the refusal is what a later request answered.
+        cx.run_until_parked();
+        session.update(cx, |session, cx| {
+            session.set_status_for_test(
+                EnvStatus::PlanLimited(zode_account::PlanLimit::from_body(
+                    r#"{"error":"env_sync_not_in_plan"}"#,
+                    &zode_account::web_url(),
+                )),
+                cx,
+            )
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        modal.update(cx, |modal, cx| {
+            let (message, color) = modal.status_line(cx).expect("the refusal is said");
+            assert_eq!(
+                message,
+                ".env sync is part of Pro. Nothing was uploaded; your synced files are still readable."
+            );
+            assert_eq!(color, Color::Warning);
+        });
     }
 
     #[gpui::test]
@@ -1393,5 +1548,34 @@ mod tests {
         });
         cx.run_until_parked();
         modal.update(cx, |modal, cx| assert!(modal.status_line(cx).is_none()));
+    }
+
+    #[gpui::test]
+    fn choosing_the_team_tab_makes_the_team_section_once(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let team = crate::team_vault_section::tests::team_session(cx);
+        cx.update(|cx| zode_team_vault::TeamVaultSession::set_global(team, cx));
+        let session = session(Some(populated()), cx);
+        let (modal, cx) = cx.add_window_view(|window, cx| {
+            VaultModal::new(session, WeakEntity::new_invalid(), window, cx)
+        });
+        cx.run_until_parked();
+
+        modal.update(cx, |modal, cx| {
+            assert!(modal.team.is_none(), "opening the window reads no team");
+            modal.select_tab(true, cx);
+            assert!(modal.showing_team);
+            let first = modal.team.clone().expect("the tab made its section");
+            modal.select_tab(false, cx);
+            assert!(!modal.showing_team);
+            modal.select_tab(true, cx);
+            assert_eq!(
+                modal.team.as_ref().map(Entity::entity_id),
+                Some(first.entity_id()),
+                "going back to the tab keeps the section rather than reading again"
+            );
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
     }
 }
