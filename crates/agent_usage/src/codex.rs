@@ -296,6 +296,9 @@ async fn read_windows(binary: std::path::PathBuf) -> Result<Vec<UsageWindow>, Un
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        // `fetch` drops this future when its deadline wins, and every `?` below
+        // returns early; either way the server must not outlive the read.
+        .kill_on_drop(true)
         .spawn()
         .map_err(|error| {
             Unavailable::Failed(format!("codex app-server would not start: {error}").into())
@@ -348,8 +351,14 @@ async fn read_windows(binary: std::path::PathBuf) -> Result<Vec<UsageWindow>, Un
     let reply = reply
         .ok_or_else(|| Unavailable::Failed("codex app-server closed without answering".into()))?;
 
-    // The child is short-lived by design; nothing is gained by waiting on it.
-    let _ = child.kill();
+    // The server lingers after answering, so it is stopped here; waiting on it
+    // reaps it, or one zombie would be left behind per poll.
+    if let Err(error) = child.kill() {
+        log::debug!("could not stop codex app-server: {error}");
+    }
+    if let Err(error) = child.status().await {
+        log::warn!("could not reap codex app-server: {error}");
+    }
 
     parse_windows(&reply)
 }
@@ -357,6 +366,122 @@ async fn read_windows(binary: std::path::PathBuf) -> Result<Vec<UsageWindow>, Un
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in `codex` that records its pid, optionally answers, then lingers
+    /// the way a real app-server does after replying.
+    #[cfg(unix)]
+    struct FakeCodex {
+        directory: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl FakeCodex {
+        fn new(name: &str, reply: Option<&str>) -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let directory =
+                std::env::temp_dir().join(format!("agent-usage-{name}-{}", std::process::id()));
+            std::fs::create_dir_all(&directory).expect("create the fake codex directory");
+            let pid_file = directory.join("pid");
+            // A file left by an earlier run would hand the test a stale pid.
+            if let Err(error) = std::fs::remove_file(&pid_file)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                panic!("could not clear {}: {error}", pid_file.display());
+            }
+            let reply_line = reply
+                .map(|reply| format!("echo '{reply}'\n"))
+                .unwrap_or_default();
+            let script = format!(
+                "#!/bin/sh\necho $$ > '{}'\n{reply_line}exec sleep 60\n",
+                pid_file.display()
+            );
+            let binary = directory.join("codex");
+            std::fs::write(&binary, script).expect("write the fake codex");
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
+                .expect("make the fake codex executable");
+            Self { directory }
+        }
+
+        fn binary(&self) -> std::path::PathBuf {
+            self.directory.join("codex")
+        }
+
+        fn pid(&self) -> Option<u32> {
+            std::fs::read_to_string(self.directory.join("pid"))
+                .ok()?
+                .trim()
+                .parse()
+                .ok()
+        }
+
+        /// `kill -0` still succeeds on a zombie, so this passes only once the
+        /// process has been both stopped and reaped.
+        fn assert_reaped(&self) {
+            let pid = self.pid().expect("the fake codex wrote its pid");
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                let still_there = smol::block_on(
+                    new_command("/bin/sh")
+                        .args(["-c", &format!("kill -0 {pid} 2>/dev/null")])
+                        .status(),
+                )
+                .expect("run kill -0")
+                .success();
+                if !still_there {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "codex app-server {pid} was left running or as a zombie"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for FakeCodex {
+        fn drop(&mut self) {
+            if let Err(error) = std::fs::remove_dir_all(&self.directory) {
+                eprintln!("could not remove {}: {error}", self.directory.display());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_finished_read_reaps_the_app_server() {
+        let codex = FakeCodex::new(
+            "answers",
+            Some(
+                r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":5,"windowDurationMins":300,"resetsAt":1789913696}}}}"#,
+            ),
+        );
+        let windows = smol::block_on(read_windows(codex.binary()));
+        assert!(windows.is_ok(), "the fake reply must parse: {windows:?}");
+        codex.assert_reaped();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_abandoned_read_kills_and_reaps_the_app_server() {
+        let codex = FakeCodex::new("silent", None);
+        let finished = smol::block_on(smol::future::or(
+            async { Some(read_windows(codex.binary()).await) },
+            async {
+                while codex.pid().is_none() {
+                    smol::unblock(|| std::thread::sleep(Duration::from_millis(5))).await;
+                }
+                None
+            },
+        ));
+        assert!(
+            finished.is_none(),
+            "a server that never answers cannot finish the read: {finished:?}"
+        );
+        codex.assert_reaped();
+    }
 
     /// The whole path against the real `codex` on this machine.
     ///
