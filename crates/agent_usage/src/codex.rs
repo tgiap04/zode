@@ -23,13 +23,14 @@
 //! the JSON *key names* it could not make sense of — never their values, since
 //! this payload comes from a process holding an authenticated session.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{TimeZone as _, Utc};
 use futures::{AsyncBufReadExt as _, AsyncWriteExt as _, StreamExt as _, io::BufReader};
 use gpui::{BackgroundExecutor, SharedString};
 use serde::Deserialize;
-use util::command::{Stdio, new_command};
+use util::command::{Command, CommandHost, Stdio, new_command};
 
 use crate::{UsageWindow, WindowKind};
 
@@ -53,6 +54,23 @@ const INITIALIZE_METHOD: &str = "initialize";
 /// initialize reply and from the notifications that arrive between them.
 const RATE_LIMITS_ID: u32 = 2;
 
+/// What `env` and a POSIX shell exit with when the program is not on `PATH`,
+/// which is how a command reaching a remote host reports a missing `codex`.
+const COMMAND_NOT_FOUND_EXIT: i32 = 127;
+
+/// What `ssh` exits with when it could not reach the host at all.
+const HOST_UNREACHABLE_EXIT: i32 = 255;
+
+/// Who started the app-server, which decides what its exit code means.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Launched {
+    /// This machine's `codex`, found on `PATH` before it was started.
+    Directly,
+    /// A command reaching a remote host, whose wrapper exits with codes of its
+    /// own.
+    ThroughHost,
+}
+
 /// Why there is nothing to show for Codex.
 ///
 /// The three variants exist to be told apart. "Nothing shown" for a missing CLI,
@@ -63,6 +81,8 @@ const RATE_LIMITS_ID: u32 = 2;
 pub enum Unavailable {
     /// No `codex` on `PATH`.
     NotInstalled,
+    /// The remote host a project lives on could not be asked.
+    HostUnavailable,
     /// The server answered, but this build could not find the windows in it.
     /// The payload is logged when this is produced.
     Unreadable(SharedString),
@@ -274,6 +294,32 @@ pub async fn fetch(executor: BackgroundExecutor) -> Result<Vec<UsageWindow>, Una
         .await
         .ok_or(Unavailable::NotInstalled)?;
 
+    let mut command = new_command(&binary);
+    command.arg("app-server");
+    within_deadline(&executor, read_windows(command, Launched::Directly)).await
+}
+
+/// [`fetch`] from the `codex` on `host`, which holds the session the agents
+/// there spend.
+pub async fn fetch_on_host(
+    executor: BackgroundExecutor,
+    host: Arc<dyn CommandHost>,
+) -> Result<Vec<UsageWindow>, Unavailable> {
+    let command = host
+        .command("codex", &["app-server"], &[], None)
+        .map_err(|error| {
+            log::warn!(
+                "codex usage: the app-server on the project's host could not be started: {error:#}"
+            );
+            Unavailable::HostUnavailable
+        })?;
+    within_deadline(&executor, read_windows(command, Launched::ThroughHost)).await
+}
+
+async fn within_deadline(
+    executor: &BackgroundExecutor,
+    read: impl std::future::Future<Output = Result<Vec<UsageWindow>, Unavailable>>,
+) -> Result<Vec<UsageWindow>, Unavailable> {
     let timeout = async {
         executor.timer(RPC_TIMEOUT).await;
         Err(Unavailable::Failed(
@@ -281,7 +327,7 @@ pub async fn fetch(executor: BackgroundExecutor) -> Result<Vec<UsageWindow>, Una
         ))
     };
 
-    smol::future::or(read_windows(binary), timeout).await
+    smol::future::or(read, timeout).await
 }
 
 /// The read itself, with no deadline of its own.
@@ -290,9 +336,11 @@ pub async fn fetch(executor: BackgroundExecutor) -> Result<Vec<UsageWindow>, Una
 /// makes the work reachable from a test: under gpui's test executor the timer runs
 /// on a virtual clock and fires immediately, so anything racing one can never
 /// observe the other side win.
-async fn read_windows(binary: std::path::PathBuf) -> Result<Vec<UsageWindow>, Unavailable> {
-    let mut child = new_command(&binary)
-        .arg("app-server")
+async fn read_windows(
+    mut command: Command,
+    launched: Launched,
+) -> Result<Vec<UsageWindow>, Unavailable> {
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -304,15 +352,65 @@ async fn read_windows(binary: std::path::PathBuf) -> Result<Vec<UsageWindow>, Un
             Unavailable::Failed(format!("codex app-server would not start: {error}").into())
         })?;
 
-    let mut stdin = child
+    let stdin = child
         .stdin
         .take()
-        .ok_or_else(|| Unavailable::Failed("codex app-server has no stdin".into()))?;
+        .ok_or_else(|| Unavailable::Failed("codex app-server has no stdin".into()));
     let stdout = child
         .stdout
         .take()
-        .ok_or_else(|| Unavailable::Failed("codex app-server has no stdout".into()))?;
+        .ok_or_else(|| Unavailable::Failed("codex app-server has no stdout".into()));
+    let (reply, stop) = match (stdin, stdout) {
+        (Ok(stdin), Ok(stdout)) => {
+            let reply = exchange(stdin, stdout).await;
+            // Only a server that answered is known to linger. One that closed
+            // its output is on its way out, and a wrapper (`ssh`, `wsl.exe`)
+            // closes it before exiting with the host's verdict: stopping it
+            // here would replace that verdict with a signal. The deadline in
+            // `within_deadline` and `kill_on_drop` bound a wrapper that hangs.
+            let answered = matches!(reply, Ok(Some(_)));
+            (reply, answered)
+        }
+        (Err(error), _) | (_, Err(error)) => (Err(error), true),
+    };
 
+    if stop && let Err(error) = child.kill() {
+        log::debug!("could not stop codex app-server: {error}");
+    }
+    // Waited on whichever way the read went, or one zombie would be left
+    // behind per poll.
+    let status = match child.status().await {
+        Ok(status) => Some(status),
+        Err(error) => {
+            log::warn!("could not reap codex app-server: {error}");
+            None
+        }
+    };
+
+    let exit_code = status.and_then(|status| status.code());
+    match reply {
+        Ok(Some(reply)) => parse_windows(&reply),
+        // The write or the read above can fail before the wrapper exits, so
+        // its exit code is consulted on either path.
+        _ if launched == Launched::ThroughHost && exit_code == Some(COMMAND_NOT_FOUND_EXIT) => {
+            Err(Unavailable::NotInstalled)
+        }
+        _ if launched == Launched::ThroughHost && exit_code == Some(HOST_UNREACHABLE_EXIT) => {
+            Err(Unavailable::HostUnavailable)
+        }
+        Ok(None) => Err(Unavailable::Failed(
+            "codex app-server closed without answering".into(),
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+/// Sends the handshake and the request, then waits for the request's reply.
+/// `None` when the server closed its output without one.
+async fn exchange(
+    mut stdin: impl futures::AsyncWrite + Unpin,
+    stdout: impl futures::AsyncRead + Unpin,
+) -> Result<Option<String>, Unavailable> {
     // The handshake first: everything else is met with `-32600 "Not initialized"`
     // until it has been answered. Nothing in the documentation says so -- it was
     // found by probing a live server.
@@ -329,38 +427,24 @@ async fn read_windows(binary: std::path::PathBuf) -> Result<Vec<UsageWindow>, Un
             Unavailable::Failed(format!("could not talk to codex: {error}").into())
         })?;
     }
-    stdin.flush().await.ok();
+    if let Err(error) = stdin.flush().await {
+        log::debug!("could not flush the request to codex: {error}");
+    }
 
     // Both requests go out before either reply is read, so the one that matters has
     // to be found by its id. Between them the server also emits unsolicited
     // notifications -- `remoteControl/status/changed` was observed -- which carry
     // no id at all.
     let mut lines = BufReader::new(stdout).lines();
-    let mut reply = None;
     while let Some(line) = lines.next().await {
         let line = line.map_err(|error| {
             Unavailable::Failed(format!("could not read codex's reply: {error}").into())
         })?;
-        if !is_reply_to(&line, RATE_LIMITS_ID) {
-            continue;
+        if is_reply_to(&line, RATE_LIMITS_ID) {
+            return Ok(Some(line));
         }
-        reply = Some(line);
-        break;
     }
-
-    let reply = reply
-        .ok_or_else(|| Unavailable::Failed("codex app-server closed without answering".into()))?;
-
-    // The server lingers after answering, so it is stopped here; waiting on it
-    // reaps it, or one zombie would be left behind per poll.
-    if let Err(error) = child.kill() {
-        log::debug!("could not stop codex app-server: {error}");
-    }
-    if let Err(error) = child.status().await {
-        log::warn!("could not reap codex app-server: {error}");
-    }
-
-    parse_windows(&reply)
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -405,6 +489,12 @@ mod tests {
 
         fn binary(&self) -> std::path::PathBuf {
             self.directory.join("codex")
+        }
+
+        fn command(&self) -> Command {
+            let mut command = new_command(self.binary());
+            command.arg("app-server");
+            command
         }
 
         fn pid(&self) -> Option<u32> {
@@ -458,7 +548,7 @@ mod tests {
                 r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":5,"windowDurationMins":300,"resetsAt":1789913696}}}}"#,
             ),
         );
-        let windows = smol::block_on(read_windows(codex.binary()));
+        let windows = smol::block_on(read_windows(codex.command(), Launched::Directly));
         assert!(windows.is_ok(), "the fake reply must parse: {windows:?}");
         codex.assert_reaped();
     }
@@ -468,7 +558,7 @@ mod tests {
     fn an_abandoned_read_kills_and_reaps_the_app_server() {
         let codex = FakeCodex::new("silent", None);
         let finished = smol::block_on(smol::future::or(
-            async { Some(read_windows(codex.binary()).await) },
+            async { Some(read_windows(codex.command(), Launched::Directly).await) },
             async {
                 while codex.pid().is_none() {
                     smol::unblock(|| std::thread::sleep(Duration::from_millis(5))).await;
@@ -505,7 +595,9 @@ mod tests {
             eprintln!("skipped: no codex on PATH");
             return;
         };
-        match smol::block_on(read_windows(binary)) {
+        let mut command = new_command(&binary);
+        command.arg("app-server");
+        match smol::block_on(read_windows(command, Launched::Directly)) {
             Ok(windows) => {
                 assert!(
                     !windows.is_empty(),
@@ -793,5 +885,92 @@ mod tests {
             windows[0].resets_at, None,
             "a zero timestamp is absent data, not 1970"
         );
+    }
+
+    #[cfg(unix)]
+    const ONE_WINDOW_REPLY: &str = r#"{"id":2,"result":{"rateLimits":{"primary":{"usedPercent":5,"windowDurationMins":300,"resetsAt":1789913696}}}}"#;
+
+    /// The app-server a remote project's quota comes from is the one on its
+    /// host, reached through the host's command, and it is reaped there too.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_remote_project_s_app_server_runs_through_its_host(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let codex = FakeCodex::new("on-host", Some(ONE_WINDOW_REPLY));
+        let host = Arc::new(crate::test_support::RecordingHost::running(&format!(
+            "exec '{}' app-server",
+            codex.binary().display()
+        )));
+
+        let windows = fetch_on_host(cx.executor(), host.clone()).await;
+
+        assert_eq!(windows.map(|windows| windows.len()), Ok(1));
+        let asked = host.asked();
+        assert_eq!(asked.len(), 1, "one app-server per read: {asked:?}");
+        assert_eq!(asked[0].program, "codex");
+        assert_eq!(asked[0].args, vec!["app-server"]);
+        codex.assert_reaped();
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_host_without_codex_reports_it_not_installed(cx: &mut gpui::TestAppContext) {
+        cx.executor().allow_parking();
+        let host = Arc::new(crate::test_support::RecordingHost::running(
+            "exec 0<&-; exit 127",
+        ));
+
+        assert_eq!(
+            fetch_on_host(cx.executor(), host).await,
+            Err(Unavailable::NotInstalled)
+        );
+    }
+
+    /// Driven without the deadline: under gpui's test executor its virtual
+    /// timer can win against a host that takes real time to exit.
+    #[cfg(unix)]
+    fn read_through(
+        host: &crate::test_support::RecordingHost,
+    ) -> Result<Vec<UsageWindow>, Unavailable> {
+        let command = host
+            .command("codex", &["app-server"], &[], None)
+            .expect("a connected host builds the command");
+        smol::block_on(read_windows(command, Launched::ThroughHost))
+    }
+
+    /// `ssh` and `wsl.exe` close the server's output before they exit with the
+    /// host's verdict, so that verdict must be waited for rather than cut off.
+    #[cfg(unix)]
+    #[test]
+    fn a_wrapper_that_closes_its_output_before_exiting_is_heard_out() {
+        let codex = FakeCodex::new("wrapper-exits-late", None);
+        let host = crate::test_support::RecordingHost::running(&format!(
+            "echo $$ > '{}'; exec 1>&-; sleep 0.2; exit 127",
+            codex.directory.join("pid").display()
+        ));
+
+        assert_eq!(read_through(&host), Err(Unavailable::NotInstalled));
+        codex.assert_reaped();
+    }
+
+    /// `ssh` exits 255 when it could not reach the host at all, which says
+    /// nothing about whether `codex` is there.
+    #[cfg(unix)]
+    #[test]
+    fn a_host_the_wrapper_cannot_reach_is_unavailable() {
+        let host = crate::test_support::RecordingHost::running("exec 1>&-; sleep 0.2; exit 255");
+
+        assert_eq!(read_through(&host), Err(Unavailable::HostUnavailable));
+    }
+
+    #[gpui::test]
+    async fn a_host_that_cannot_be_reached_is_unavailable(cx: &mut gpui::TestAppContext) {
+        let host = Arc::new(crate::test_support::RecordingHost::disconnected());
+
+        assert_eq!(
+            fetch_on_host(cx.executor(), host.clone()).await,
+            Err(Unavailable::HostUnavailable)
+        );
+        assert_eq!(host.asked().len(), 1);
     }
 }

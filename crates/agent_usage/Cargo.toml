@@ -25,6 +25,7 @@ doctest = false
 # what they are called -- `project` carries that -- but nothing about the agent
 # views themselves. Depending on `agent_ui` would tie a status-bar indicator to
 # the whole conversation stack.
+anyhow.workspace = true
 chrono.workspace = true
 fs.workspace = true
 futures.workspace = true
@@ -40,7 +41,14 @@ ui.workspace = true
 util.workspace = true
 which.workspace = true
 workspace.workspace = true
+zeroize = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
+# `workspace/test-support` because `project/test-support` brings
+# `RemoteConnectionIdentity::Mock` into being, and the arm handling it lives
+# behind that feature.
+fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 http_client = { workspace = true, features = ["test-support"] }
+project = { workspace = true, features = ["test-support"] }
+workspace = { workspace = true, features = ["test-support"] }
