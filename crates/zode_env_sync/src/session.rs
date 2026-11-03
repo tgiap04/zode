@@ -1,16 +1,17 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui::{App, Context, Entity, EventEmitter, Global, SharedString, Task};
+use util::ResultExt as _;
 use zode_account::Account;
 use zode_sync::sync::SyncContext;
 use zode_sync::{Dek, Resource, client, from_blob, to_blob};
 
 use crate::env_dek::{self, EnvDek};
-use crate::env_sync::{self, PullOutcome, PushOutcome};
+use crate::env_sync::{self, EnvFile, LocalEnvFile, PullOutcome, PushOutcome};
 use crate::ids::EntryId;
 use crate::manifest::Manifest;
-use crate::{Bindings, EnvCryptoError, keystore, seal};
+use crate::{Bindings, Checkout, EnvCryptoError, keystore, seal};
 
 /// A difference waiting on the user.
 ///
@@ -18,6 +19,9 @@ use crate::{Bindings, EnvCryptoError, keystore, seal};
 /// credentials, and that is not a decision this crate gets to make.
 pub struct PendingEnvDivergence {
     pub entry: EntryId,
+    /// The file's path where it lives, which for a remote project is a path on
+    /// that host. Shown, never opened on this machine: the write goes through
+    /// the file the difference was read from.
     pub local_path: PathBuf,
     pub diff: zode_sync::TextDiff,
     pub remote: String,
@@ -26,6 +30,10 @@ pub struct PendingEnvDivergence {
     /// True when the local file has not been touched since the last sync, so
     /// taking the remote costs nothing. The modal says so; it does not decide.
     pub safe_to_apply: bool,
+    /// The hash of the local content `diff` was worked out against, `None`
+    /// when there was no file. Applying refuses once the file holds anything
+    /// else, because that is content the user was never shown.
+    pub local_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,9 +106,79 @@ pub struct EnvSession {
     bindings: Bindings,
     status: EnvStatus,
     pending: Option<PendingEnvDivergence>,
+    /// Where `pending` would be written. Kept beside it rather than inside it
+    /// so the difference stays plain data the windows can build and show.
+    pending_file: Option<Arc<dyn EnvFile>>,
     /// A push that has been built and shown, waiting to be sent.
-    prepared: Option<(crate::env_sync::PreparedPush, PathBuf)>,
+    prepared: Option<(crate::env_sync::PreparedPush, Target)>,
     task: Option<Task<()>>,
+    /// A write of `pending` to a remote host, on its way.
+    ///
+    /// A slot of its own: anything that replaced `task` would cancel the
+    /// write mid-flight, and with it the step that clears `pending` and
+    /// records the sync once the host has answered.
+    applying: Option<Task<()>>,
+    files: SessionFiles,
+}
+
+/// What every operation refused during a remote write says.
+const APPLYING: &str = "a write to the host is still running";
+
+/// Where the session keeps what it records on this machine.
+#[derive(Clone)]
+struct SessionFiles {
+    bindings: PathBuf,
+    state: PathBuf,
+    backups: PathBuf,
+}
+
+impl SessionFiles {
+    fn configured() -> Self {
+        Self {
+            bindings: paths::env_bindings_file().clone(),
+            state: paths::env_state_file().clone(),
+            backups: paths::env_backups_dir().clone(),
+        }
+    }
+}
+
+/// A file a difference was read from, and the path it is shown under.
+#[derive(Clone)]
+struct Target {
+    file: Arc<dyn EnvFile>,
+    shown_as: PathBuf,
+}
+
+impl Target {
+    fn local(path: PathBuf) -> Self {
+        Self {
+            file: Arc::new(LocalEnvFile::new(path.clone())),
+            shown_as: path,
+        }
+    }
+}
+
+/// Which held difference a write was started for, so its answer clears that
+/// one and not a difference held since.
+#[derive(PartialEq)]
+struct DifferenceIdentity {
+    entry: EntryId,
+    local_path: PathBuf,
+    revision: String,
+    seq: u64,
+    local_hash: Option<String>,
+}
+
+impl DifferenceIdentity {
+    fn of(pending: &PendingEnvDivergence) -> Self {
+        Self {
+            entry: pending.entry,
+            local_path: pending.local_path.clone(),
+            revision: pending.revision.clone(),
+            seq: pending.seq,
+            local_hash: pending.local_hash.clone(),
+        }
+    }
 }
 
 impl EventEmitter<EnvStatusChanged> for EnvSession {}
@@ -113,10 +191,13 @@ impl EnvSession {
             manifest: Manifest::new(),
             reconciliation: crate::Reconciliation::default(),
             bindings: Bindings::load(paths::env_bindings_file()),
+            files: SessionFiles::configured(),
             status: EnvStatus::Idle,
             pending: None,
+            pending_file: None,
             prepared: None,
             task: None,
+            applying: None,
         }
     }
 
@@ -135,6 +216,25 @@ impl EnvSession {
 
     pub fn pending(&self) -> Option<&PendingEnvDivergence> {
         self.pending.as_ref()
+    }
+
+    /// Whether the held difference is being written to a remote host.
+    pub fn is_applying(&self) -> bool {
+        self.applying.is_some()
+    }
+
+    /// Refuses, saying why, while a remote write is on its way.
+    ///
+    /// Once sent, that write cannot be called back. Dropping its difference
+    /// would hide a write that still lands, holding another in its place would
+    /// have the first one's answer clear it, and starting other work would
+    /// report over the one outcome the user is waiting for.
+    fn refuse_while_applying(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.applying.is_none() {
+            return false;
+        }
+        self.set_status(EnvStatus::Failed(APPLYING.into()), cx);
+        true
     }
 
     pub fn manifest(&self) -> &Manifest {
@@ -159,8 +259,18 @@ impl EnvSession {
         project: crate::ProjectId,
         cx: &mut Context<Self>,
     ) {
-        self.bindings.bind(&worktree_root, project);
-        if let Err(error) = self.bindings.save(paths::env_bindings_file()) {
+        self.bind_checkout(&Checkout::local(worktree_root), project, cx);
+    }
+
+    /// [`Self::bind`], for a checkout on this machine or on a remote host.
+    pub fn bind_checkout(
+        &mut self,
+        checkout: &Checkout,
+        project: crate::ProjectId,
+        cx: &mut Context<Self>,
+    ) {
+        self.bindings.bind_checkout(checkout, project);
+        if let Err(error) = self.bindings.save(&self.files.bindings) {
             self.set_status(EnvStatus::Failed(format!("{error}").into()), cx);
             return;
         }
@@ -291,6 +401,9 @@ impl EnvSession {
     /// differ — the nonce is fresh each time — so a panel that re-encrypted
     /// would be showing something the server never sees.
     pub fn prepare(&mut self, entry: EntryId, local_path: PathBuf, cx: &mut Context<Self>) {
+        if self.refuse_while_applying(cx) {
+            return;
+        }
         let Some(env_dek) = self.env_dek.clone() else {
             self.set_status(EnvStatus::NeedsRecoveryKey, cx);
             return;
@@ -306,15 +419,74 @@ impl EnvSession {
             return;
         };
 
-        match crate::env_sync::prepare_push(
+        let prepared = crate::env_sync::prepare_push(
             &env_dek,
             &user_id,
             &entry,
             &local_path,
-            paths::env_state_file(),
-        ) {
+            &self.files.state,
+        );
+        self.hold_prepared(prepared, Target::local(local_path), cx);
+    }
+
+    /// [`Self::prepare`], for a file that may live on another host.
+    ///
+    /// Reading it may take a round-trip, so the push is held once the returned
+    /// task finishes; [`Self::prepared`] is empty until then.
+    pub fn prepare_file(
+        &mut self,
+        entry: EntryId,
+        file: Arc<dyn EnvFile>,
+        shown_as: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        if self.refuse_while_applying(cx) {
+            return Task::ready(());
+        }
+        self.drop_stale_difference();
+        let Some(env_dek) = self.env_dek.clone() else {
+            self.set_status(EnvStatus::NeedsRecoveryKey, cx);
+            return Task::ready(());
+        };
+        let Some(user_id) = self
+            .account
+            .read(cx)
+            .status()
+            .user()
+            .map(|user| user.id.to_string())
+        else {
+            self.set_status(unavailable(), cx);
+            return Task::ready(());
+        };
+        self.prepared = None;
+        self.set_status(EnvStatus::Working, cx);
+        let state_path = self.files.state.clone();
+
+        cx.spawn(async move |this, cx| {
+            let prepared = crate::env_sync::prepare_push_from(
+                &env_dek,
+                &user_id,
+                &entry,
+                file.as_ref(),
+                &state_path,
+            )
+            .await;
+            this.update(cx, |this, cx| {
+                this.hold_prepared(prepared, Target { file, shown_as }, cx)
+            })
+            .log_err();
+        })
+    }
+
+    fn hold_prepared(
+        &mut self,
+        prepared: Result<Option<crate::env_sync::PreparedPush>, crate::EnvSyncError>,
+        target: Target,
+        cx: &mut Context<Self>,
+    ) {
+        match prepared {
             Ok(Some(prepared)) => {
-                self.prepared = Some((prepared, local_path));
+                self.prepared = Some((prepared, target));
                 self.set_status(EnvStatus::Idle, cx);
             }
             Ok(None) => {
@@ -329,8 +501,33 @@ impl EnvSession {
     }
 
     /// Sends exactly what [`Self::prepare`] built and the panel displayed.
-    pub fn send_prepared(&mut self, cx: &mut Context<Self>) {
-        let Some((prepared, local_path)) = self.prepared.take() else {
+    ///
+    /// `shown_entry` and `shown` are what the panel displayed. A push built
+    /// since then -- another file, or this one edited and prepared again --
+    /// is not what the user agreed to send, so nothing is sent.
+    pub fn send_prepared(
+        &mut self,
+        shown_entry: EntryId,
+        shown: &crate::WireBytes,
+        cx: &mut Context<Self>,
+    ) {
+        if self.refuse_while_applying(cx) {
+            return;
+        }
+        let Some((held, _)) = self.prepared.as_ref() else {
+            return;
+        };
+        if held.entry != shown_entry || held.wire != *shown {
+            self.set_status(
+                EnvStatus::Failed(
+                    "what the window showed is no longer what would be sent; nothing was sent"
+                        .into(),
+                ),
+                cx,
+            );
+            return;
+        }
+        let Some((prepared, target)) = self.prepared.take() else {
             return;
         };
         let Some(env_dek) = self.env_dek.clone() else {
@@ -339,6 +536,7 @@ impl EnvSession {
         };
         let account = self.account.clone();
         let entry = prepared.entry;
+        let state_path = self.files.state.clone();
         self.set_status(EnvStatus::Working, cx);
 
         self.task = Some(cx.spawn(async move |this, cx| {
@@ -346,13 +544,8 @@ impl EnvSession {
                 _ = this.update(cx, |this, cx| this.set_status(unavailable(), cx));
                 return;
             };
-            let outcome = crate::env_sync::send_prepared(
-                &context,
-                &env_dek,
-                prepared,
-                paths::env_state_file(),
-            )
-            .await;
+            let outcome =
+                crate::env_sync::send_prepared(&context, &env_dek, prepared, &state_path).await;
 
             _ = this.update(cx, |this, cx| match outcome {
                 Ok(PushOutcome::Stored { .. }) => {
@@ -365,7 +558,7 @@ impl EnvSession {
                     this.set_status(EnvStatus::Done("there was nothing to send".into()), cx);
                 }
                 Ok(PushOutcome::Conflict(divergence)) => {
-                    this.hold(entry, local_path, divergence, false, cx);
+                    this.hold(entry, target, divergence, false, cx);
                 }
                 Err(error) => {
                     this.set_status(EnvStatus::Failed(format!("{error}").into()), cx);
@@ -377,16 +570,22 @@ impl EnvSession {
     /// Throws away a built push without sending it.
     pub fn discard_prepared(&mut self, cx: &mut Context<Self>) {
         self.prepared = None;
-        self.set_status(EnvStatus::Idle, cx);
+        if self.applying.is_none() {
+            self.set_status(EnvStatus::Idle, cx);
+        }
     }
 
     /// Sends one file.
     pub fn push(&mut self, entry: EntryId, local_path: PathBuf, cx: &mut Context<Self>) {
+        if self.refuse_while_applying(cx) {
+            return;
+        }
         let Some(env_dek) = self.env_dek.clone() else {
             self.set_status(EnvStatus::NeedsRecoveryKey, cx);
             return;
         };
         let account = self.account.clone();
+        let state_path = self.files.state.clone();
         self.set_status(EnvStatus::Working, cx);
 
         self.task = Some(cx.spawn(async move |this, cx| {
@@ -394,14 +593,8 @@ impl EnvSession {
                 _ = this.update(cx, |this, cx| this.set_status(unavailable(), cx));
                 return;
             };
-            let outcome = env_sync::push(
-                &context,
-                &env_dek,
-                &entry,
-                &local_path,
-                paths::env_state_file(),
-            )
-            .await;
+            let outcome =
+                env_sync::push(&context, &env_dek, &entry, &local_path, &state_path).await;
 
             _ = this.update(cx, |this, cx| match outcome {
                 Ok(PushOutcome::Stored { .. }) => {
@@ -414,7 +607,7 @@ impl EnvSession {
                     this.set_status(EnvStatus::Done("there is no file to send".into()), cx);
                 }
                 Ok(PushOutcome::Conflict(divergence)) => {
-                    this.hold(entry, local_path, divergence, false, cx);
+                    this.hold(entry, Target::local(local_path), divergence, false, cx);
                 }
                 Err(error) => {
                     this.set_status(EnvStatus::Failed(format!("{error}").into()), cx);
@@ -425,6 +618,26 @@ impl EnvSession {
 
     /// Reads one file from the server and works out what it would change.
     pub fn pull(&mut self, entry: EntryId, local_path: PathBuf, cx: &mut Context<Self>) {
+        self.pull_file(
+            entry,
+            Arc::new(LocalEnvFile::new(local_path.clone())),
+            local_path,
+            cx,
+        );
+    }
+
+    /// [`Self::pull`], for a file that may live on another host.
+    pub fn pull_file(
+        &mut self,
+        entry: EntryId,
+        file: Arc<dyn EnvFile>,
+        shown_as: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        if self.refuse_while_applying(cx) {
+            return;
+        }
+        self.drop_stale_difference();
         let Some(env_dek) = self.env_dek.clone() else {
             self.set_status(EnvStatus::NeedsRecoveryKey, cx);
             return;
@@ -433,10 +646,11 @@ impl EnvSession {
         // Named before the path moves, so the answer can say which file it is
         // about. "already up to date" on its own reads as a refusal to
         // download rather than as the answer it is.
-        let name = local_path
+        let name = shown_as
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| "that file".into());
+        let state_path = self.files.state.clone();
         self.set_status(EnvStatus::Working, cx);
 
         self.task = Some(cx.spawn(async move |this, cx| {
@@ -444,14 +658,9 @@ impl EnvSession {
                 _ = this.update(cx, |this, cx| this.set_status(unavailable(), cx));
                 return;
             };
-            let outcome = env_sync::pull(
-                &context,
-                &env_dek,
-                &entry,
-                &local_path,
-                paths::env_state_file(),
-            )
-            .await;
+            let outcome =
+                env_sync::pull_file(&context, &env_dek, &entry, file.as_ref(), &state_path).await;
+            let target = Target { file, shown_as };
 
             _ = this.update(cx, |this, cx| match outcome {
                 Ok(PullOutcome::UpToDate) => {
@@ -469,10 +678,10 @@ impl EnvSession {
                     );
                 }
                 Ok(PullOutcome::RemoteNewer(divergence)) => {
-                    this.hold(entry, local_path, divergence, true, cx);
+                    this.hold(entry, target, divergence, true, cx);
                 }
                 Ok(PullOutcome::Conflict(divergence)) => {
-                    this.hold(entry, local_path, divergence, false, cx);
+                    this.hold(entry, target, divergence, false, cx);
                 }
                 Ok(PullOutcome::KeyMismatch(_)) => {
                     this.set_status(EnvStatus::KeyMismatch, cx);
@@ -494,23 +703,86 @@ impl EnvSession {
     /// like a successful one: the window closed because nothing was pending
     /// any more, and the reason went to a status line nobody was looking at
     /// while the file sat unchanged.
+    ///
+    /// A file on another host cannot be written before this returns, so for
+    /// one the answer is always `false`: the write runs in the background, and
+    /// on success the difference is cleared and the status says so. Until it
+    /// answers, [`Self::is_applying`] holds and every other operation waits.
+    ///
+    /// Other work in flight does not stop a local write: it touches neither
+    /// the held difference nor the file.
     pub fn apply_pending(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.refuse_while_applying(cx) {
+            return false;
+        }
         let Some(pending) = self.pending.as_ref() else {
             return false;
         };
-        let applied = env_sync::apply_remote(
-            &pending.entry,
-            &pending.local_path,
-            paths::env_backups_dir(),
-            &pending.remote,
-            pending.revision.clone(),
-            pending.seq,
-            paths::env_state_file(),
-        );
+        let Some(file) = self.pending_file.clone() else {
+            self.set_status(
+                EnvStatus::Failed("nothing says where this difference would be written".into()),
+                cx,
+            );
+            return false;
+        };
+        let identity = DifferenceIdentity::of(pending);
 
+        if let Some(local_path) = file.local_path() {
+            let applied = env_sync::apply_remote_if_unchanged(
+                &pending.entry,
+                local_path,
+                pending.local_hash.as_deref(),
+                &self.files.backups,
+                &pending.remote,
+                pending.revision.clone(),
+                pending.seq,
+                &self.files.state,
+            );
+            return self.finish_apply(applied, identity, cx);
+        }
+
+        let entry = pending.entry;
+        let seen_local_hash = pending.local_hash.clone();
+        let remote = pending.remote.clone();
+        let revision = pending.revision.clone();
+        let seq = pending.seq;
+        let files = self.files.clone();
+        self.set_status(EnvStatus::Working, cx);
+        self.applying = Some(cx.spawn(async move |this, cx| {
+            let applied = env_sync::apply_remote_to(
+                &entry,
+                file.as_ref(),
+                seen_local_hash.as_deref(),
+                &files.backups,
+                &remote,
+                revision,
+                seq,
+                &files.state,
+            )
+            .await;
+            this.update(cx, |this, cx| this.finish_apply(applied, identity, cx))
+                .log_err();
+        }));
+        false
+    }
+
+    fn finish_apply(
+        &mut self,
+        applied: Result<(), crate::EnvSyncError>,
+        identity: DifferenceIdentity,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.applying = None;
         match applied {
             Ok(()) => {
-                self.pending = None;
+                if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| DifferenceIdentity::of(pending) == identity)
+                {
+                    self.pending = None;
+                    self.pending_file = None;
+                }
                 self.set_status(EnvStatus::Done("written".into()), cx);
                 true
             }
@@ -526,35 +798,58 @@ impl EnvSession {
     /// Refuses while work is in flight: the message would come straight back
     /// on the next notification, and clearing it would only look broken.
     pub fn acknowledge(&mut self, cx: &mut Context<Self>) {
-        if !matches!(self.status, EnvStatus::Working) {
+        if self.applying.is_none() && !matches!(self.status, EnvStatus::Working) {
             self.set_status(EnvStatus::Idle, cx);
         }
     }
 
-    /// Discards the held difference without writing anything.
-    pub fn dismiss_pending(&mut self, cx: &mut Context<Self>) {
+    /// Discards the held difference without writing anything, answering
+    /// whether it did. Refused while that difference is being written.
+    pub fn dismiss_pending(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.refuse_while_applying(cx) {
+            return false;
+        }
         self.pending = None;
+        self.pending_file = None;
         self.set_status(EnvStatus::Idle, cx);
+        true
+    }
+
+    /// Forgets a difference nobody decided -- its window was closed by
+    /// clicking outside it -- before work that opens a window of its own,
+    /// titled for another file, which would otherwise show this one.
+    fn drop_stale_difference(&mut self) {
+        self.pending = None;
+        self.pending_file = None;
     }
 
     fn hold(
         &mut self,
         entry: EntryId,
-        local_path: PathBuf,
+        target: Target,
         divergence: crate::env_sync::Divergence,
         safe_to_apply: bool,
         cx: &mut Context<Self>,
     ) {
+        self.pending_file = Some(target.file);
         self.pending = Some(PendingEnvDivergence {
             entry,
-            local_path,
+            local_path: target.shown_as,
             diff: divergence.diff,
             remote: divergence.remote,
             revision: divergence.revision,
             seq: divergence.seq,
             safe_to_apply,
+            local_hash: divergence.local_hash,
         });
-        self.set_status(EnvStatus::Idle, cx);
+        // A pull or push already on its way when a remote write started can
+        // land here while that write runs; the status is the write's until
+        // it answers.
+        if self.applying.is_none() {
+            self.set_status(EnvStatus::Idle, cx);
+        } else {
+            cx.notify();
+        }
     }
 
     /// Fetches the catalogue and reconciles it against what the server holds.
@@ -563,6 +858,9 @@ impl EnvSession {
     /// their files, the listing says which of them still exist. Neither alone
     /// answers "was this deleted on my other machine".
     pub fn load_vault(&mut self, cx: &mut Context<Self>) {
+        if self.refuse_while_applying(cx) {
+            return;
+        }
         let Some(env_dek) = self.env_dek.clone() else {
             self.set_status(EnvStatus::NeedsRecoveryKey, cx);
             return;
@@ -596,23 +894,15 @@ impl EnvSession {
         }));
     }
 
-    /// Finds the catalogue entry for a file on disk, if there is one.
+    /// The catalogue entry recorded at `relative` (slash-separated) inside a
+    /// checkout on this machine or on a remote host.
     ///
     /// Answers `None` for three different situations the caller must tell
     /// apart — checkout not bound, project gone, file not in the catalogue —
-    /// so the caller asks [`Self::project_for`] first when it needs to say
-    /// which.
-    pub fn entry_for(
-        &self,
-        worktree_root: &std::path::Path,
-        absolute: &std::path::Path,
-    ) -> Option<EntryId> {
-        let project = self.bindings.project_for(worktree_root)?;
-        let relative = absolute
-            .strip_prefix(worktree_root)
-            .ok()?
-            .to_string_lossy()
-            .replace('\\', "/");
+    /// so the caller asks [`Self::project_for_checkout`] first when it needs
+    /// to say which.
+    pub fn entry_at(&self, checkout: &Checkout, relative: &str) -> Option<EntryId> {
+        let project = self.bindings.project_for_checkout(checkout)?;
         self.manifest
             .projects
             .get(&project)?
@@ -622,8 +912,12 @@ impl EnvSession {
             .map(|(id, _)| *id)
     }
 
-    pub fn project_for(&self, worktree_root: &std::path::Path) -> Option<crate::ProjectId> {
+    pub fn project_for(&self, worktree_root: &Path) -> Option<crate::ProjectId> {
         self.bindings.project_for(worktree_root)
+    }
+
+    pub fn project_for_checkout(&self, checkout: &Checkout) -> Option<crate::ProjectId> {
+        self.bindings.project_for_checkout(checkout)
     }
 
     /// The path recorded alongside a stored entry, relative to its checkout.
@@ -686,6 +980,37 @@ impl EnvSession {
                     .unwrap_or_else(|| ".env".into())
             });
 
+        self.insert_entry(project, relative, cx)
+    }
+
+    /// [`Self::add_file`], for a file in a known checkout, which may be on a
+    /// remote host. A remote file's path is recorded relative to its own
+    /// checkout: the bound roots `add_file` searches are this machine's.
+    pub fn add_file_in(
+        &mut self,
+        project: crate::ProjectId,
+        checkout: &Checkout,
+        absolute_path: PathBuf,
+        cx: &mut Context<Self>,
+    ) -> Option<EntryId> {
+        if checkout.is_local() {
+            return self.add_file(project, absolute_path, cx);
+        }
+        let relative = checkout.relative(&absolute_path).unwrap_or_else(|| {
+            absolute_path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| ".env".into())
+        });
+        self.insert_entry(project, relative, cx)
+    }
+
+    fn insert_entry(
+        &mut self,
+        project: crate::ProjectId,
+        relative: String,
+        cx: &mut Context<Self>,
+    ) -> Option<EntryId> {
         // Two files can honestly want the same name, and the vault would then
         // show two rows nobody can tell apart -- worse, both would pull onto
         // one file on disk.
@@ -856,6 +1181,19 @@ impl EnvSession {
 #[cfg(any(test, feature = "test-support"))]
 impl EnvSession {
     pub fn set_pending_for_test(&mut self, pending: PendingEnvDivergence, cx: &mut Context<Self>) {
+        self.pending_file = Some(Arc::new(LocalEnvFile::new(pending.local_path.clone())));
+        self.pending = Some(pending);
+        cx.notify();
+    }
+
+    /// Holds a difference that would be written through `file`.
+    pub fn set_pending_in_for_test(
+        &mut self,
+        pending: PendingEnvDivergence,
+        file: Arc<dyn EnvFile>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_file = Some(file);
         self.pending = Some(pending);
         cx.notify();
     }
@@ -873,6 +1211,22 @@ impl EnvSession {
     /// which in a test means writing into the real configuration directory.
     pub fn bind_for_test(&mut self, worktree_root: &std::path::Path, project: crate::ProjectId) {
         self.bindings.bind(worktree_root, project);
+    }
+
+    /// Keeps the bindings, the sync state and the backups in `directory`
+    /// rather than in this machine's real configuration.
+    pub fn keep_files_in_for_test(&mut self, directory: &Path) {
+        self.bindings = Bindings::load(&directory.join("env_bindings.json"));
+        self.files = SessionFiles {
+            bindings: directory.join("env_bindings.json"),
+            state: directory.join("env_state.json"),
+            backups: directory.join("env-backups"),
+        };
+    }
+
+    /// Unlocks with a key made up for the test.
+    pub fn unlock_for_test(&mut self, env_dek: EnvDek) {
+        self.env_dek = Some(Arc::new(env_dek));
     }
 }
 
@@ -1261,6 +1615,7 @@ mod tests {
                     revision: "rev-1".into(),
                     seq: 1,
                     safe_to_apply: true,
+                    local_hash: None,
                 },
                 cx,
             );
@@ -1281,6 +1636,401 @@ mod tests {
         });
 
         std::fs::remove_file(&blocker).ok();
+    }
+
+    /// A file on a host the connection to which drops on every write.
+    struct UnreachableFile;
+
+    impl EnvFile for UnreachableFile {
+        fn read(&self) -> crate::EnvFileFuture<'_, Option<Vec<u8>>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn write_atomic(&self, _contents: Vec<u8>) -> crate::EnvFileFuture<'_, ()> {
+            Box::pin(async {
+                Err(crate::EnvSyncError::Io(
+                    "Update the remote server to sync this file".into(),
+                ))
+            })
+        }
+    }
+
+    #[gpui::test]
+    fn a_remote_write_that_fails_keeps_the_difference(cx: &mut TestAppContext) {
+        let session = session(cx);
+        session.update(cx, |session, cx| {
+            session.set_pending_in_for_test(
+                PendingEnvDivergence {
+                    entry: EntryId::parse(&"a1".repeat(16)).expect("a valid id"),
+                    local_path: PathBuf::from("/home/me/acme/.env"),
+                    diff: zode_sync::diff::between("", "A=1\n"),
+                    remote: "A=1\n".into(),
+                    revision: "rev-1".into(),
+                    seq: 1,
+                    safe_to_apply: true,
+                    local_hash: None,
+                },
+                Arc::new(UnreachableFile),
+                cx,
+            );
+            assert!(
+                !session.apply_pending(cx),
+                "a remote write cannot have happened before it returns"
+            );
+            assert_eq!(*session.status(), EnvStatus::Working);
+            assert!(
+                !session.apply_pending(cx),
+                "a second press must not start a second write"
+            );
+        });
+        cx.run_until_parked();
+
+        session.read_with(cx, |session, _| {
+            assert!(
+                session.pending().is_some(),
+                "the difference must survive a failed remote write"
+            );
+            match session.status() {
+                EnvStatus::Failed(reason) => assert!(
+                    reason.contains("Update the remote server"),
+                    "the reason was lost: {reason}"
+                ),
+                other => panic!("expected a failure, got {other:?}"),
+            }
+        });
+    }
+
+    /// A file on a remote host whose write waits until the test lets it go.
+    struct SlowFile {
+        content: Option<Vec<u8>>,
+        released: std::sync::Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+        writes: std::sync::Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl SlowFile {
+        fn holding(content: &[u8]) -> (Arc<Self>, futures::channel::oneshot::Sender<()>) {
+            let (release, released) = futures::channel::oneshot::channel();
+            let file = Arc::new(Self {
+                content: Some(content.to_vec()),
+                released: std::sync::Mutex::new(Some(released)),
+                writes: std::sync::Mutex::default(),
+            });
+            (file, release)
+        }
+    }
+
+    impl EnvFile for SlowFile {
+        fn read(&self) -> crate::EnvFileFuture<'_, Option<Vec<u8>>> {
+            let content = self.content.clone();
+            Box::pin(async move { Ok(content) })
+        }
+
+        fn write_atomic(&self, contents: Vec<u8>) -> crate::EnvFileFuture<'_, ()> {
+            let released = self.released.lock().expect("not poisoned").take();
+            Box::pin(async move {
+                if let Some(released) = released {
+                    released
+                        .await
+                        .map_err(|_| crate::EnvSyncError::Io("the test went away".into()))?;
+                }
+                self.writes.lock().expect("not poisoned").push(contents);
+                Ok(())
+            })
+        }
+    }
+
+    struct Directory(PathBuf);
+
+    impl Directory {
+        fn new(name: &str) -> Self {
+            let directory = std::env::temp_dir()
+                .join(format!("zode-env-session-{name}-{}", std::process::id()));
+            std::fs::remove_dir_all(&directory).ok();
+            std::fs::create_dir_all(&directory).expect("the fixture directory");
+            Self(directory)
+        }
+    }
+
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    fn pending_over(local_path: PathBuf, local: &str) -> PendingEnvDivergence {
+        PendingEnvDivergence {
+            entry: EntryId::parse(&"a1".repeat(16)).expect("a valid id"),
+            local_path,
+            diff: zode_sync::diff::between(local, "NEW=1\n"),
+            remote: "NEW=1\n".into(),
+            revision: "rev-2".into(),
+            seq: 2,
+            safe_to_apply: true,
+            local_hash: Some(crate::env_state::hash(local.as_bytes())),
+        }
+    }
+
+    /// Starts a remote apply that stays in flight until `release` is sent.
+    fn start_slow_apply(
+        session: &Entity<EnvSession>,
+        directory: &Directory,
+        cx: &mut TestAppContext,
+    ) -> (Arc<SlowFile>, futures::channel::oneshot::Sender<()>) {
+        let (file, release) = SlowFile::holding(b"OLD=1\n");
+        session.update(cx, |session, cx| {
+            session.keep_files_in_for_test(&directory.0);
+            session.set_pending_in_for_test(
+                pending_over(PathBuf::from("/home/me/acme/.env"), "OLD=1\n"),
+                file.clone(),
+                cx,
+            );
+            assert!(!session.apply_pending(cx));
+        });
+        cx.run_until_parked();
+        (file, release)
+    }
+
+    fn assert_written_through(
+        session: &Entity<EnvSession>,
+        file: &SlowFile,
+        directory: &Directory,
+        cx: &mut TestAppContext,
+    ) {
+        assert_eq!(
+            *file.writes.lock().expect("not poisoned"),
+            vec![b"NEW=1\n".to_vec()]
+        );
+        session.read_with(cx, |session, _| {
+            assert!(
+                session.pending().is_none(),
+                "the written difference lingers"
+            );
+            assert_eq!(*session.status(), EnvStatus::Done("written".into()));
+        });
+        let entry = EntryId::parse(&"a1".repeat(16)).expect("a valid id");
+        assert!(
+            crate::EnvState::load(&directory.0.join("env_state.json"))
+                .get(&entry)
+                .is_some(),
+            "a write that landed must be recorded, or the next pull calls it a conflict"
+        );
+    }
+
+    #[gpui::test]
+    fn a_remote_write_in_flight_cannot_be_dismissed_and_still_lands(cx: &mut TestAppContext) {
+        let session = session(cx);
+        let directory = Directory::new("dismiss-in-flight");
+        let (file, release) = start_slow_apply(&session, &directory, cx);
+
+        session.update(cx, |session, cx| {
+            session.dismiss_pending(cx);
+            assert!(
+                session.pending().is_some(),
+                "the difference was dropped while its write was still on the way"
+            );
+            assert!(
+                session.status().sentence().contains("still running"),
+                "the refusal must say why, got {:?}",
+                session.status()
+            );
+        });
+
+        release.send(()).expect("the write is waiting");
+        cx.run_until_parked();
+        assert_written_through(&session, &file, &directory, cx);
+    }
+
+    #[gpui::test]
+    fn a_pull_during_a_remote_write_is_refused_and_the_write_survives(cx: &mut TestAppContext) {
+        let session = session(cx);
+        let directory = Directory::new("pull-in-flight");
+        let (file, release) = start_slow_apply(&session, &directory, cx);
+
+        session.update(cx, |session, cx| {
+            session.unlock_for_test(EnvDek::from_bytes([0x33; zode_sync::DEK_LEN]));
+            session.pull(
+                EntryId::parse(&"b2".repeat(16)).expect("a valid id"),
+                directory.0.join("other.env"),
+                cx,
+            );
+            assert!(
+                session.status().sentence().contains("still running"),
+                "the pull must be refused while the write runs, got {:?}",
+                session.status()
+            );
+        });
+
+        release.send(()).expect("the write is waiting");
+        cx.run_until_parked();
+        assert_written_through(&session, &file, &directory, cx);
+    }
+
+    #[gpui::test]
+    fn a_pull_that_lands_during_a_remote_write_keeps_its_difference(cx: &mut TestAppContext) {
+        // Started before the write and answering while it runs: the write's
+        // answer must neither drop this difference nor call it written.
+        let session = session(cx);
+        let directory = Directory::new("pull-lands-during-write");
+        let (file, release) = start_slow_apply(&session, &directory, cx);
+        let other = EntryId::parse(&"b2".repeat(16)).expect("a valid id");
+        let (other_file, _other_release) = SlowFile::holding(b"OTHER=1\n");
+
+        session.update(cx, |session, cx| {
+            session.hold(
+                other,
+                Target {
+                    file: other_file,
+                    shown_as: PathBuf::from("/home/me/acme/other.env"),
+                },
+                crate::env_sync::Divergence {
+                    diff: zode_sync::diff::between("OTHER=1\n", "OTHER=2\n"),
+                    remote: "OTHER=2\n".into(),
+                    revision: "rev-9".into(),
+                    seq: 9,
+                    local_hash: Some(crate::env_state::hash(b"OTHER=1\n")),
+                },
+                false,
+                cx,
+            );
+            assert!(session.is_applying());
+            assert_eq!(
+                *session.status(),
+                EnvStatus::Working,
+                "the write is still running"
+            );
+        });
+        release.send(()).expect("the write is waiting");
+        cx.run_until_parked();
+
+        assert_eq!(
+            *file.writes.lock().expect("not poisoned"),
+            vec![b"NEW=1\n".to_vec()]
+        );
+        session.read_with(cx, |session, _| {
+            let pending = session
+                .pending()
+                .expect("the write's answer dropped a difference it never wrote");
+            assert_eq!(pending.entry, other);
+            assert_eq!(pending.local_path, PathBuf::from("/home/me/acme/other.env"));
+            assert_eq!(*session.status(), EnvStatus::Done("written".into()));
+        });
+    }
+
+    #[gpui::test]
+    fn a_new_pull_or_push_never_shows_the_difference_left_from_before(cx: &mut TestAppContext) {
+        // A diff window closed by clicking outside it leaves its difference
+        // held. The next window is titled for its own file, and must not show
+        // the old file's difference while its own answer is on the way.
+        let session = session(cx);
+        let directory = Directory::new("stale-difference");
+        let other = EntryId::parse(&"b2".repeat(16)).expect("a valid id");
+        let (file, _release) = SlowFile::holding(b"OTHER=1\n");
+        let shown_as = PathBuf::from("/home/me/acme/other.env");
+
+        session.update(cx, |session, cx| {
+            session.keep_files_in_for_test(&directory.0);
+            session.unlock_for_test(EnvDek::from_bytes([0x33; zode_sync::DEK_LEN]));
+
+            session.set_pending_for_test(pending_over(directory.0.join(".env"), "OLD=1\n"), cx);
+            session.pull_file(other, file.clone(), shown_as.clone(), cx);
+            assert!(
+                session.pending().is_none(),
+                "a pull of another file shows the previous file's difference"
+            );
+
+            session.set_pending_for_test(pending_over(directory.0.join(".env"), "OLD=1\n"), cx);
+            session
+                .prepare_file(other, file.clone(), shown_as.clone(), cx)
+                .detach();
+            assert!(
+                session.pending().is_none(),
+                "a push of another file shows the previous file's difference"
+            );
+        });
+        cx.run_until_parked();
+
+        session.read_with(cx, |session, _| {
+            assert!(session.pending().is_none(), "the old difference came back");
+        });
+    }
+
+    #[gpui::test]
+    fn a_local_apply_while_other_work_runs_still_writes(cx: &mut TestAppContext) {
+        let session = session(cx);
+        let directory = Directory::new("local-while-working");
+        let target = directory.0.join(".env");
+        std::fs::write(&target, b"OLD=1\n").expect("the fixture");
+
+        session.update(cx, |session, cx| {
+            session.keep_files_in_for_test(&directory.0);
+            session.set_status_for_test(EnvStatus::Working, cx);
+            session.set_pending_for_test(pending_over(target.clone(), "OLD=1\n"), cx);
+            assert!(
+                session.apply_pending(cx),
+                "a local write has nothing in flight to wait for, got {:?}",
+                session.status()
+            );
+        });
+        assert_eq!(std::fs::read(&target).unwrap(), b"NEW=1\n");
+    }
+
+    #[gpui::test]
+    fn only_the_push_that_was_shown_is_sent(cx: &mut TestAppContext) {
+        let session = session(cx);
+        let directory = Directory::new("send-what-was-shown");
+        let entry = EntryId::parse(&"a1".repeat(16)).expect("a valid id");
+        let (file, _release) = SlowFile::holding(b"A=1\n");
+        let prepare = |session: &Entity<EnvSession>, cx: &mut TestAppContext| {
+            session
+                .update(cx, |session, cx| {
+                    session.prepare_file(
+                        entry,
+                        file.clone(),
+                        PathBuf::from("/home/me/acme/.env"),
+                        cx,
+                    )
+                })
+                .detach();
+            cx.run_until_parked();
+            session
+                .read_with(cx, |session, _| session.prepared().cloned())
+                .expect("a push is built")
+        };
+        session.update(cx, |session, _cx| {
+            session.keep_files_in_for_test(&directory.0);
+            session.unlock_for_test(EnvDek::from_bytes([0x33; zode_sync::DEK_LEN]));
+        });
+
+        let shown = prepare(&session, cx);
+        // Built again, so sealed under a fresh nonce: other bytes.
+        let current = prepare(&session, cx);
+        assert_ne!(shown, current);
+
+        for (claimed_entry, claimed_wire) in [
+            (entry, &shown),
+            (
+                EntryId::parse(&"b2".repeat(16)).expect("a valid id"),
+                &current,
+            ),
+        ] {
+            session.update(cx, |session, cx| {
+                session.send_prepared(claimed_entry, claimed_wire, cx);
+                assert!(
+                    session.prepared().is_some(),
+                    "a push nobody was shown was sent"
+                );
+                assert!(
+                    session.status().sentence().contains("nothing was sent"),
+                    "the refusal must say so, got {:?}",
+                    session.status()
+                );
+            });
+        }
+
+        session.update(cx, |session, cx| {
+            session.send_prepared(entry, &current, cx);
+            assert!(session.prepared().is_none(), "what was shown is sent");
+        });
     }
 
     #[gpui::test]

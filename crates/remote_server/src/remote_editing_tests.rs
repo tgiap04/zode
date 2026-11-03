@@ -3893,3 +3893,278 @@ mod agent_sessions_on_remote {
         );
     }
 }
+
+/// A real directory standing in for a checkout on the remote host. The
+/// server's private-file handlers read and write with `std::fs`, so the
+/// worktree is opened over a fake filesystem at the same path while the files
+/// themselves are real.
+struct PrivateFileSandbox(PathBuf);
+
+impl PrivateFileSandbox {
+    fn new(name: &str) -> Self {
+        let directory =
+            std::env::temp_dir().join(format!("zode-remote-private-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&directory).ok();
+        std::fs::create_dir_all(directory.join("project")).expect("a sandbox");
+        std::fs::create_dir_all(directory.join("outside")).expect("a sandbox");
+        Self(directory)
+    }
+
+    fn project(&self) -> PathBuf {
+        self.0.join("project")
+    }
+}
+
+impl Drop for PrivateFileSandbox {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+async fn private_file_project(
+    sandbox: &PrivateFileSandbox,
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) -> (
+    Entity<Project>,
+    Entity<HeadlessProject>,
+    project::WorktreeId,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(sandbox.project(), json!({})).await;
+    let (project, headless) = init_test(&fs, cx, server_cx).await;
+    let (worktree, _) = project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(sandbox.project(), true, cx)
+        })
+        .await
+        .unwrap();
+    let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
+    cx.run_until_parked();
+    server_cx.run_until_parked();
+    (project, headless, worktree_id)
+}
+
+fn remote_private_file(
+    project: &Entity<Project>,
+    worktree_id: project::WorktreeId,
+    path: &str,
+    cx: &mut TestAppContext,
+) -> project::worktree_store::RemotePrivateFile {
+    project.read_with(cx, |project, cx| {
+        project
+            .worktree_store()
+            .read(cx)
+            .remote_private_file(
+                worktree_id,
+                util::rel_path::RelPath::from_proto(path).unwrap(),
+                cx,
+            )
+            .expect("a remote project reaches its host's private files")
+    })
+}
+
+fn assert_private_file_refused<T>(result: anyhow::Result<T>, expected: &str) {
+    let Err(error) = result else {
+        panic!("the request must be refused");
+    };
+    assert!(
+        format!("{error:#}").contains(expected),
+        "expected {expected:?}, got {error:#}"
+    );
+}
+
+#[gpui::test]
+async fn test_remote_private_file_round_trip(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let sandbox = PrivateFileSandbox::new("round-trip");
+    let target = sandbox.project().join(".env");
+    std::fs::write(&target, b"OLD=1\n").unwrap();
+    let (project, _headless, worktree_id) = private_file_project(&sandbox, cx, server_cx).await;
+    let file = remote_private_file(&project, worktree_id, ".env", cx);
+
+    let loaded = cx.spawn({
+        let file = file.clone();
+        async move |_| file.load().await
+    });
+    cx.run_until_parked();
+    assert_eq!(loaded.await.unwrap(), Some(b"OLD=1\n".to_vec()));
+
+    let written = cx.spawn({
+        let file = file.clone();
+        async move |_| file.write(b"NEW=1\n".to_vec()).await
+    });
+    cx.run_until_parked();
+    written.await.unwrap();
+
+    assert_eq!(std::fs::read(&target).unwrap(), b"NEW=1\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the remote .env must be owner-only");
+    }
+}
+
+#[gpui::test]
+async fn test_remote_private_file_refuses_a_file_the_server_does_not_call_private(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let sandbox = PrivateFileSandbox::new("not-private");
+    let source = sandbox.project().join("src/main.rs");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, b"fn main() {}").unwrap();
+    let (project, _headless, worktree_id) = private_file_project(&sandbox, cx, server_cx).await;
+    let file = remote_private_file(&project, worktree_id, "src/main.rs", cx);
+
+    let loaded = cx.spawn({
+        let file = file.clone();
+        async move |_| file.load().await
+    });
+    cx.run_until_parked();
+    assert_private_file_refused(loaded.await, "not a private file");
+
+    // Sent raw, past the client's own read-before-write rule, so the server
+    // is the one that has to refuse.
+    let client = project.read_with(cx, |project, cx| {
+        project.remote_client().unwrap().read(cx).proto_client()
+    });
+    let written = client.request(proto::WritePrivateFile {
+        project_id: proto::REMOTE_SERVER_PROJECT_ID,
+        worktree_id: worktree_id.to_proto(),
+        path: "src/main.rs".into(),
+        content: b"overwritten".to_vec(),
+        replaces_sha256: None,
+    });
+    cx.run_until_parked();
+    assert_private_file_refused(written.await, "not a private file");
+    assert_eq!(std::fs::read(&source).unwrap(), b"fn main() {}");
+}
+
+#[gpui::test]
+async fn test_remote_private_file_follows_the_server_settings(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let sandbox = PrivateFileSandbox::new("server-settings");
+    std::fs::write(sandbox.project().join("secrets.txt"), b"TOKEN=1").unwrap();
+    let (project, _headless, worktree_id) = private_file_project(&sandbox, cx, server_cx).await;
+    server_cx.update_global::<SettingsStore, _>(|settings_store, cx| {
+        settings_store
+            .set_server_settings(
+                &json!({ "private_files": ["**/secrets.txt"] }).to_string(),
+                cx,
+            )
+            .unwrap();
+    });
+    server_cx.run_until_parked();
+    cx.run_until_parked();
+
+    let file = remote_private_file(&project, worktree_id, "secrets.txt", cx);
+    let loaded = cx.spawn(async move |_| file.load().await);
+    cx.run_until_parked();
+    assert_eq!(loaded.await.unwrap(), Some(b"TOKEN=1".to_vec()));
+}
+
+#[gpui::test]
+async fn test_remote_private_file_refuses_paths_that_leave_the_project(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let sandbox = PrivateFileSandbox::new("escape");
+    let outside = sandbox.0.join("outside/.env");
+    std::fs::write(&outside, b"OUTSIDE=1").unwrap();
+    let (project, _headless, worktree_id) = private_file_project(&sandbox, cx, server_cx).await;
+    let client = project.read_with(cx, |project, cx| {
+        project.remote_client().unwrap().read(cx).proto_client()
+    });
+
+    for path in ["../outside/.env", "/etc/passwd", "a/../../outside/.env", ""] {
+        let loaded = client.request(proto::LoadPrivateFile {
+            project_id: proto::REMOTE_SERVER_PROJECT_ID,
+            worktree_id: worktree_id.to_proto(),
+            path: path.into(),
+        });
+        cx.run_until_parked();
+        assert_private_file_refused(loaded.await, "does not name a file inside this project");
+
+        let written = client.request(proto::WritePrivateFile {
+            project_id: proto::REMOTE_SERVER_PROJECT_ID,
+            worktree_id: worktree_id.to_proto(),
+            path: path.into(),
+            content: b"ESCAPED=1".to_vec(),
+            replaces_sha256: None,
+        });
+        cx.run_until_parked();
+        assert_private_file_refused(written.await, "does not name a file inside this project");
+    }
+    assert_eq!(std::fs::read(&outside).unwrap(), b"OUTSIDE=1");
+
+    #[cfg(unix)]
+    {
+        let shadow = sandbox.0.join("outside/shadow");
+        std::fs::write(&shadow, b"root:x").unwrap();
+        std::os::unix::fs::symlink(&shadow, sandbox.project().join(".env")).unwrap();
+        let file = remote_private_file(&project, worktree_id, ".env", cx);
+        let loaded = cx.spawn(async move |_| file.load().await);
+        cx.run_until_parked();
+        assert_private_file_refused(loaded.await, "is a symbolic link");
+        assert_eq!(std::fs::read(&shadow).unwrap(), b"root:x");
+    }
+}
+
+#[gpui::test]
+async fn test_remote_private_file_on_a_server_that_predates_it(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(cx.executor());
+    let (project, _server) = Project::test_remote(fs, cx, server_cx).await;
+    let file = remote_private_file(&project, project::WorktreeId::from_usize(1), ".env", cx);
+
+    let loaded = cx.spawn({
+        let file = file.clone();
+        async move |_| file.load().await
+    });
+    cx.run_until_parked();
+    let Err(error) = loaded.await else {
+        panic!("an old server cannot answer");
+    };
+    assert_eq!(
+        format!("{error:#}"),
+        project::worktree_store::PRIVATE_FILE_SERVER_OUT_OF_DATE
+    );
+
+    // The read failed, so nothing was backed up; a write must not be sent.
+    let written = cx.spawn(async move |_| file.write(b"A=1".to_vec()).await);
+    cx.run_until_parked();
+    assert_private_file_refused(written.await, "must be read");
+}
+
+#[gpui::test]
+async fn test_remote_private_file_absent_when_read_is_not_overwritten_once_it_appears(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let sandbox = PrivateFileSandbox::new("stale-absent");
+    let target = sandbox.project().join(".env");
+    let (project, _headless, worktree_id) = private_file_project(&sandbox, cx, server_cx).await;
+    let file = remote_private_file(&project, worktree_id, ".env", cx);
+
+    let loaded = cx.spawn({
+        let file = file.clone();
+        async move |_| file.load().await
+    });
+    cx.run_until_parked();
+    assert_eq!(loaded.await.unwrap(), None);
+
+    // Created on the host after the read: nothing backed it up on this side.
+    std::fs::write(&target, b"CREATED=meanwhile").unwrap();
+    let written = cx.spawn(async move |_| file.write(b"PULLED=1".to_vec()).await);
+    cx.run_until_parked();
+    assert_private_file_refused(written.await, "changed on the remote since it was read");
+    assert_eq!(std::fs::read(&target).unwrap(), b"CREATED=meanwhile");
+}

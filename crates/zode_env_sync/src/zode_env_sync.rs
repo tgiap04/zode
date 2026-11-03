@@ -48,10 +48,13 @@ pub mod session;
 pub mod vault;
 pub mod wire;
 
-pub use bindings::Bindings;
+pub use bindings::{Bindings, Checkout};
 pub use env_dek::{EnvDek, unwrap_key, wrap_key};
 pub use env_state::{EnvState, SyncedEntry};
-pub use env_sync::{Divergence, EnvSyncError, PullOutcome, PushOutcome, apply_remote, pull, push};
+pub use env_sync::{
+    Divergence, EnvFile, EnvFileFuture, EnvSyncError, LocalEnvFile, PullOutcome, PushOutcome,
+    apply_remote, apply_remote_if_unchanged, apply_remote_to, pull, pull_file, push, push_file,
+};
 pub use ids::{EntryId, ProjectId};
 pub use manifest::{Manifest, ManifestEntry, ManifestProject};
 pub use padding::{MAX_PAYLOAD_BYTES, PAD_BLOCK};

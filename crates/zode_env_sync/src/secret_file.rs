@@ -10,75 +10,9 @@ use crate::ids::EntryId;
 /// been revoked and forgotten.
 pub const BACKUPS_KEPT: usize = 10;
 
-/// Writes a secret so that a crash cannot leave a half-written file, and so
-/// that no moment exists in which it is readable by anyone else.
-///
-/// Two differences from `zode_sync::artifact::write_atomic`, and neither is
-/// cosmetic:
-///
-/// - `std::fs::write` creates at `0644` minus the umask. For `settings.json`
-///   that is correct. For a file holding a production database password it is
-///   not.
-/// - The permission is set **as the temporary file is created**, not after.
-///   Creating at `0644` and calling `chmod` afterwards leaves a window — short,
-///   but real, and on a shared machine that is the whole attack.
-///
-/// On Windows there is no mode to set; the file inherits the ACL of its parent
-/// directory, which for a project checkout means the user's own profile. Said
-/// plainly rather than papered over: the guarantee is weaker there.
-pub fn write_secret_atomic(path: &Path, contents: &[u8]) -> io::Result<()> {
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "the target path has no directory",
-        )
-    })?;
-    std::fs::create_dir_all(parent)?;
-
-    // A sibling, because `rename` is only atomic within one filesystem and on
-    // Windows fails outright across them. Unique, because a leftover from a
-    // crashed run must not be silently reused or clobbered.
-    let temporary = parent.join(format!(
-        ".{}.{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("secret"),
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_nanos())
-            .unwrap_or_default(),
-    ));
-
-    let result = write_then_rename(&temporary, path, contents);
-    if result.is_err() {
-        // Do not leave a world-readable-by-default fragment of a secret behind
-        // for the next run to trip over.
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result
-}
-
-fn write_then_rename(temporary: &Path, path: &Path, contents: &[u8]) -> io::Result<()> {
-    use std::io::Write as _;
-
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-
-    let mut file = options.open(temporary)?;
-    file.write_all(contents)?;
-    // Durability before visibility: a rename that lands before the bytes do
-    // leaves an empty `.env` where a working one used to be.
-    file.sync_all()?;
-    drop(file);
-
-    std::fs::rename(temporary, path)
-}
+/// The create-at-0600 and rename write every environment file on this machine
+/// goes through.
+pub use util::fs::write_secret_atomic;
 
 /// Copies a file aside before it is overwritten, outside any project.
 ///
@@ -195,55 +129,6 @@ mod tests {
 
     fn entry(byte: u8) -> EntryId {
         EntryId::parse(&format!("{byte:02x}").repeat(16)).expect("a valid fixture id")
-    }
-
-    #[test]
-    fn a_written_secret_is_readable_only_by_its_owner() {
-        let sandbox = Sandbox::new("mode");
-        let target = sandbox.0.join(".env");
-        write_secret_atomic(&target, b"DATABASE_URL=postgres://x").unwrap();
-
-        assert_eq!(
-            std::fs::read(&target).unwrap(),
-            b"DATABASE_URL=postgres://x"
-        );
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(&target).unwrap().permissions().mode();
-            assert_eq!(
-                mode & 0o777,
-                0o600,
-                "a .env must not be readable by anyone else"
-            );
-        }
-        #[cfg(not(unix))]
-        {
-            // Windows has no mode; the file inherits the parent ACL. Asserted
-            // as a note so the gap is visible rather than assumed away.
-            eprintln!("skipped: no POSIX permission bits on this platform");
-        }
-    }
-
-    #[test]
-    fn writing_leaves_no_temporary_behind() {
-        let sandbox = Sandbox::new("no-temp");
-        let target = sandbox.0.join(".env");
-        write_secret_atomic(&target, b"A=1").unwrap();
-        write_secret_atomic(&target, b"A=2").unwrap();
-
-        let leftovers: Vec<String> = std::fs::read_dir(&sandbox.0)
-            .unwrap()
-            .filter_map(Result::ok)
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.contains("tmp"))
-            .collect();
-        assert!(
-            leftovers.is_empty(),
-            "temporary files left behind: {leftovers:?}"
-        );
-        assert_eq!(std::fs::read(&target).unwrap(), b"A=2");
     }
 
     #[test]

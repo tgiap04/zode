@@ -500,7 +500,11 @@ message Envelope {
     ProbeAgentBypassFlagResponse probe_agent_bypass_flag_response = 459;
 
     AgentSessionRequest agent_session_request = 460;
-    AgentSessionResponse agent_session_response = 461; // current max
+    AgentSessionResponse agent_session_response = 461;
+
+    LoadPrivateFile load_private_file = 462;
+    LoadPrivateFileResponse load_private_file_response = 463;
+    WritePrivateFile write_private_file = 464; // current max
   }
 
   reserved 87 to 88;
