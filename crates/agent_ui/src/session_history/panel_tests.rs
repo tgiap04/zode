@@ -2343,3 +2343,24 @@ async fn a_resume_its_host_cannot_check_says_why_and_opens_nothing(
         "no tab opened"
     );
 }
+
+/// The panel is built inside the workspace's own update, which is how
+/// `AgentHistoryPanel::load` adds it to a window. Reading the workspace back
+/// from there panics, so a remote project's panel must reach its host without
+/// going through the workspace.
+#[gpui::test]
+async fn a_remote_project_s_panel_is_built_while_its_workspace_is_updating(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let (rig, mut cx) = remote_rig(Some(vec!["/home/u/p"]), cx, server_cx).await;
+
+    let panel = rig.workspace.update_in(&mut cx, |workspace, window, cx| {
+        cx.new(|cx| AgentHistoryPanel::new(workspace, window, cx))
+    });
+    cx.run_until_parked();
+
+    panel.read_with(&cx, |panel, _| {
+        assert!(panel.remote, "the panel of a remote project reads its host");
+    });
+}

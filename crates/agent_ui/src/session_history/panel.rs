@@ -34,6 +34,10 @@ pub(crate) enum CountState {
 /// rail switches the history with it, without this panel watching anything.
 pub struct AgentHistoryPanel {
     workspace: WeakEntity<Workspace>,
+    /// The project this panel lists, held apart from the workspace because the
+    /// panel is built inside the workspace's own update, where reading the
+    /// workspace back panics.
+    project: WeakEntity<project::Project>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) providers: Vec<Arc<dyn SessionProvider>>,
     /// The one sweep of both stores, shared with every other surface that needs
@@ -140,6 +144,7 @@ impl AgentHistoryPanel {
             filter_editor,
             _subscriptions: subscriptions,
             workspace: workspace.weak_handle(),
+            project: workspace.project().downgrade(),
             focus_handle: cx.focus_handle(),
             providers: agent_sessions::default_providers(),
             store,
@@ -236,12 +241,10 @@ impl AgentHistoryPanel {
     /// no worktree yet (a fresh window) shows nothing rather than everything —
     /// "every session on this machine" is not what the panel is for.
     pub(crate) fn project_roots(&self, cx: &App) -> Vec<PathBuf> {
-        let Some(workspace) = self.workspace.upgrade() else {
+        let Some(project) = self.project.upgrade() else {
             return Vec::new();
         };
-        workspace
-            .read(cx)
-            .project()
+        project
             .read(cx)
             .visible_worktrees(cx)
             .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
@@ -339,12 +342,7 @@ impl AgentHistoryPanel {
     /// request rather than kept: the shared store must not hold a connection
     /// this project has closed, and neither should anything else.
     fn remote_host(&self, cx: &App) -> Option<project::agent_session_host::RemoteSessionHost> {
-        self.workspace
-            .upgrade()?
-            .read(cx)
-            .project()
-            .read(cx)
-            .remote_session_host(cx)
+        self.project.upgrade()?.read(cx).remote_session_host(cx)
     }
 
     /// Whether this machine's file manager can show a session's paths. A
@@ -353,13 +351,10 @@ impl AgentHistoryPanel {
     /// project panel's reveal follows.
     pub(crate) fn can_reveal(&self, cx: &App) -> bool {
         let wsl_with_interop = self.remote
-            && self.workspace.upgrade().is_some_and(|workspace| {
-                workspace
-                    .read(cx)
-                    .project()
-                    .read(cx)
-                    .is_via_wsl_with_host_interop(cx)
-            });
+            && self
+                .project
+                .upgrade()
+                .is_some_and(|project| project.read(cx).is_via_wsl_with_host_interop(cx));
         reveal_reaches_the_path(self.remote, wsl_with_interop)
     }
 
