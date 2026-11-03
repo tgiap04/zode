@@ -25,6 +25,19 @@ name needed to address it. Nothing else — no source code, no project contents,
 data. That is the whole of Zode's own data processing. See `legal/privacy-policy.md` for
 the mechanism in detail.
 
+## Payments for the hosted service
+
+Paid plans for the hosted service are bought on the website, not in the editor. Polar
+(polar.sh) processes those payments as merchant of record: it receives what a checkout
+needs — your email address, your payment details and your billing address — and tells the
+service which plan your account has. Polar never receives your synced data, which is
+ciphertext in any case. The editor itself only reads the resulting plan from
+`api.zodekit.site` and never talks to Polar.
+
+| Subprocessor | Purpose | Data |
+|---|---|---|
+| Polar (polar.sh) | Payments, invoices and tax for paid plans | Email, payment and billing details, the plan purchased |
+
 ## One request that is not Zode's own
 
 If Claude Code is already signed in on your machine, Zode's status bar reads your plan

@@ -82,6 +82,9 @@ extend-exclude = [
 extend-ignore-re = [
     # PNG is a file format, not a typo
     "PNG",
+    # Hex key fingerprints in the team sharing test vectors, written whole or in groups of four
+    '\b[0-9a-f]{16,}\b',
+    '\b[0-9a-f]{4}( [0-9a-f]{4}){7}\b',
     'cl\[ist]',
     '\[lan\]guage',
     '"ba"',

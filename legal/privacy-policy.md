@@ -50,6 +50,11 @@ exception and is described as such:
    background. Signing in and enabling sync uploads your encrypted settings to
    `api.zodekit.site` — see the next section. The sign-in request also carries this
    machine's name, so that the account's device list can show you which machine it was.
+   While signed in, the editor also reads your account's plan from `api.zodekit.site`:
+   when you sign in, when you open the account menu or a sync window, and right after a
+   request your plan refused — never at startup and never on a timer. The answer holds the
+   plan's tier, its limits and your team's name; the request carries your session and
+   nothing about how you use the editor.
 5. **Reading your Claude plan quota — automatically.** This is the one request Zode makes
    without you triggering it each time, and it only exists if Claude Code is already
    signed in on this machine. While the window is focused, the status bar polls
@@ -114,7 +119,10 @@ record it keeps, because it keeps none.
 - No in-editor AI provider, no edit predictions, no assistant panel — so no model API ever
   receives your code from Zode itself (see "Coding agents" above for what your own CLI
   tools do).
-- No subscription, no payment processing, no billing data of any kind.
+- No payment processing in the editor. Paid plans for the hosted sync service are bought
+  on the website, `zodekit.site`, where the payment is handled by Polar, our payment
+  provider and merchant of record. The editor never sees a card, an invoice or any billing
+  detail; it only reads which plan your account has, as described above.
 - No advertising, no profiling, no data sold or shared with anyone.
 
 ## How to verify

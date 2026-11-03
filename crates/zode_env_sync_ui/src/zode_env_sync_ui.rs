@@ -13,13 +13,15 @@
 
 mod env_diff_modal;
 pub mod masking;
+mod team_members_modal;
+mod team_vault_section;
 mod toolbar_button;
 mod vault_modal;
 mod wire_panel;
 
 use std::path::PathBuf;
 
-use gpui::{App, Entity, Window};
+use gpui::{App, Entity, Window, actions};
 use notifications::status_toast::StatusToast;
 use ui::prelude::*;
 use workspace::Workspace;
@@ -27,13 +29,33 @@ use zode_account::Account;
 use zode_env_sync::{EnvSession, EnvStatus};
 
 pub use env_diff_modal::EnvDiffModal;
+pub use team_members_modal::TeamMembersModal;
+pub use team_vault_section::TeamVaultSection;
 pub use toolbar_button::EnvSyncToolbar;
 pub use vault_modal::VaultModal;
 pub use wire_panel::WirePanel;
 
+actions!(
+    team_sharing,
+    [
+        /// Opens the team's members: key fingerprints, granting access and
+        /// rotating the team key.
+        OpenTeamMembers
+    ]
+);
+
 pub fn init(cx: &mut App) {
+    // The team session reads nothing and sends nothing until a team window
+    // opens; installing it here is what lets the Team tab and the database
+    // panel's Team group find it.
+    if zode_team_vault::TeamVaultSession::global(cx).is_none()
+        && let Some(account) = Account::global(cx)
+    {
+        zode_team_vault::init(account, cx);
+    }
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace
+            .register_action(open_team_members)
             .register_action(open_vault)
             .register_action(set_up)
             .register_action(push_env_file)
@@ -95,6 +117,23 @@ fn open_vault(
     let handle = cx.weak_entity();
     workspace.toggle_modal(window, cx, move |window, cx| {
         VaultModal::new(session.clone(), handle, window, cx)
+    });
+}
+
+fn open_team_members(
+    workspace: &mut Workspace,
+    _: &OpenTeamMembers,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if session(workspace, cx).is_none() {
+        return;
+    }
+    let Some(team) = zode_team_vault::TeamVaultSession::global(cx) else {
+        return;
+    };
+    workspace.toggle_modal(window, cx, move |_window, cx| {
+        TeamMembersModal::new(team, cx)
     });
 }
 

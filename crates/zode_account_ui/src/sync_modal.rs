@@ -173,6 +173,20 @@ impl SyncModal {
     }
 }
 
+/// The two ways out of a plan refusal. Both open the web app; paying never
+/// happens in the editor.
+pub(crate) fn plan_buttons() -> [Button; 2] {
+    [
+        Button::new("plan-upgrade", "Upgrade\u{2026}")
+            .style(ButtonStyle::Filled)
+            .tooltip(Tooltip::text("Opens the plans page in your browser"))
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::UpgradePlan), cx)),
+        Button::new("plan-manage", "Manage Plan\u{2026}")
+            .tooltip(Tooltip::text("Opens your billing page in your browser"))
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(crate::ManagePlan), cx)),
+    ]
+}
+
 fn title_for(kind: Kind) -> &'static str {
     match kind {
         Kind::Settings => "Settings",
@@ -209,8 +223,10 @@ impl Render for SyncModal {
                 "The stored data was encrypted with a different recovery key.".into(),
                 Color::Warning,
             ),
+            SyncStatus::PlanLimited(limit) => (limit.sentence(), Color::Warning),
             SyncStatus::Failed(text) => (text.to_string(), Color::Error),
         };
+        let plan_limited = matches!(status, SyncStatus::PlanLimited(_));
 
         let disabled = busy || !has_key;
         let mut rows: Vec<_> = Kind::ALL
@@ -251,11 +267,12 @@ impl Render for SyncModal {
                     ModalFooter::new()
                         .start_slot(Label::new(message).size(LabelSize::XSmall).color(tone))
                         .end_slot(
-                            h_flex().gap_1().child(
-                                Button::new("sync-close", "Close").on_click(
+                            h_flex()
+                                .gap_1()
+                                .when(plan_limited, |this| this.children(plan_buttons()))
+                                .child(Button::new("sync-close", "Close").on_click(
                                     cx.listener(|_, _, _window, cx| cx.emit(DismissEvent)),
-                                ),
-                            ),
+                                )),
                         ),
                 ),
             )
@@ -328,6 +345,17 @@ mod tests {
             .expect("the modal must be drawn");
         let medium = cx.update(|window, _| rems(40.).to_pixels(window.rem_size()));
         assert_eq!(bounds.size.width, medium);
+    }
+
+    #[gpui::test]
+    fn the_window_draws_a_plan_refusal(cx: &mut TestAppContext) {
+        draw_with(
+            SyncStatus::PlanLimited(zode_account::PlanLimit::from_body(
+                r#"{"error":"sync_device_limit","limit":2,"used":3}"#,
+                &zode_account::web_url(),
+            )),
+            cx,
+        );
     }
 
     #[gpui::test]

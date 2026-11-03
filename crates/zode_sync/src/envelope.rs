@@ -2,6 +2,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ring::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use ring::rand::{SecureRandom as _, SystemRandom};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::dek::{Dek, KID_LEN};
 
@@ -18,6 +19,36 @@ const ALGORITHM: &str = "AES-256-GCM";
 /// version string can contain it — so no two distinct inputs can build the
 /// same AAD.
 const SEPARATOR: u8 = 0x1F;
+
+/// The singleton holding the user's sharing private key, sealed under the
+/// recovery key. Also the server's sync kind name, so it is a wire contract.
+pub const SHARING_KEY_RESOURCE: &str = "sharing-key";
+
+const TEAM_ENTRY_LABEL: &str = "team-entry";
+
+/// The team key routes that carry no ciphertext of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeamRoute {
+    /// `GET`: the caller's envelopes.
+    Key,
+    /// `GET`: members with their public keys.
+    MemberKeys,
+    /// `PUT`: grant envelopes for the current version.
+    KeyEnvelopes,
+    /// `POST`: move the team to the next key version.
+    KeyRotate,
+}
+
+impl TeamRoute {
+    fn as_str(self) -> &'static str {
+        match self {
+            TeamRoute::Key => "key",
+            TeamRoute::MemberKeys => "members/keys",
+            TeamRoute::KeyEnvelopes => "key/envelopes",
+            TeamRoute::KeyRotate => "key/rotate",
+        }
+    }
+}
 
 /// The three artifacts, matching the server's `kind` path segment exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -117,6 +148,73 @@ impl Resource {
             aad_label: "env",
             discriminator: None,
         }
+    }
+
+    /// The user's own sharing private key, sealed under the recovery key.
+    ///
+    /// A singleton in the user's own store, shaped exactly like `env-key`:
+    /// every machine that holds the recovery key can open it, and nothing
+    /// else can.
+    pub fn sharing_key() -> Self {
+        Self {
+            path: format!("sync/{SHARING_KEY_RESOURCE}"),
+            aad_label: SHARING_KEY_RESOURCE,
+            discriminator: None,
+        }
+    }
+
+    /// `account/sharing-key`: where the public half is registered.
+    ///
+    /// Addressable, never sealed, like [`Resource::env_listing`].
+    pub fn account_sharing_key() -> Self {
+        Self {
+            path: format!("account/{SHARING_KEY_RESOURCE}"),
+            aad_label: SHARING_KEY_RESOURCE,
+            discriminator: None,
+        }
+    }
+
+    /// One entry of a team's shared vault.
+    ///
+    /// Entries are written by many members, so no single user id can be the
+    /// owner field of their AAD; the team is. The discriminator carries the
+    /// team as well as the entry so the binding does not depend on a caller
+    /// remembering to pass the team id where a user id usually goes: a blob
+    /// moved to another team's slot, or to another entry's, does not open.
+    pub fn team_entry(team_id: &str, entry_id: &str) -> Result<Self, SyncCryptoError> {
+        let team_id = validated_segment(team_id)?;
+        let entry_id = validated_segment(entry_id)?;
+        // Both segments are validated, so neither can contain the separator
+        // and no two (team, entry) pairs assemble the same discriminator.
+        let mut discriminator = String::with_capacity(team_id.len() + 1 + entry_id.len());
+        discriminator.push_str(&team_id);
+        discriminator.push(char::from(SEPARATOR));
+        discriminator.push_str(&entry_id);
+        Ok(Self {
+            path: format!("teams/{team_id}/vault/{entry_id}"),
+            aad_label: TEAM_ENTRY_LABEL,
+            discriminator: Some(discriminator),
+        })
+    }
+
+    /// A team's vault listing. Addressable, never sealed.
+    pub fn team_listing(team_id: &str) -> Result<Self, SyncCryptoError> {
+        let team_id = validated_segment(team_id)?;
+        Ok(Self {
+            path: format!("teams/{team_id}/vault"),
+            aad_label: TEAM_ENTRY_LABEL,
+            discriminator: None,
+        })
+    }
+
+    /// One of the team key routes. Addressable, never sealed.
+    pub fn team_route(team_id: &str, route: TeamRoute) -> Result<Self, SyncCryptoError> {
+        let team_id = validated_segment(team_id)?;
+        Ok(Self {
+            path: format!("teams/{team_id}/{}", route.as_str()),
+            aad_label: TEAM_ENTRY_LABEL,
+            discriminator: None,
+        })
     }
 
     pub fn path(&self) -> &str {
@@ -283,12 +381,15 @@ pub fn encrypt_at(
         .fill(&mut nonce_bytes)
         .map_err(|_| SyncCryptoError::Malformed("no randomness available".into()))?;
 
-    let mut buffer = plaintext.to_vec();
+    // Sized for the tag up front, so appending it never reallocates and
+    // leaves a copy of the plaintext behind; wiped on drop either way.
+    let mut buffer = Zeroizing::new(Vec::with_capacity(plaintext.len() + AES_256_GCM.tag_len()));
+    buffer.extend_from_slice(plaintext);
     sealing_key(dek)?
         .seal_in_place_append_tag(
             Nonce::assume_unique_for_key(nonce_bytes),
             Aad::from(aad(user_id, resource, ENVELOPE_VERSION, &kid)),
-            &mut buffer,
+            &mut *buffer,
         )
         .map_err(|_| SyncCryptoError::Malformed("sealing failed".into()))?;
 
@@ -297,7 +398,7 @@ pub fn encrypt_at(
         alg: ALGORITHM.to_string(),
         kid: BASE64.encode(kid),
         nonce: BASE64.encode(nonce_bytes),
-        ct: BASE64.encode(&buffer),
+        ct: BASE64.encode(buffer.as_slice()),
     })
 }
 
@@ -347,15 +448,18 @@ pub fn decrypt_at(
         .and_then(|bytes| bytes.try_into().ok())
         .ok_or_else(|| SyncCryptoError::Malformed("nonce".into()))?;
 
-    let mut buffer = BASE64
-        .decode(&envelope.ct)
-        .map_err(|_| SyncCryptoError::Malformed("ciphertext".into()))?;
+    // Holds the plaintext once opened: wiped when it drops.
+    let mut buffer = Zeroizing::new(
+        BASE64
+            .decode(&envelope.ct)
+            .map_err(|_| SyncCryptoError::Malformed("ciphertext".into()))?,
+    );
 
     let opened = sealing_key(dek)?
         .open_in_place(
             Nonce::assume_unique_for_key(nonce_bytes),
             Aad::from(aad(user_id, resource, envelope.v, &ours)),
-            &mut buffer,
+            buffer.as_mut_slice(),
         )
         .map_err(|_| SyncCryptoError::WrongKey)?;
 

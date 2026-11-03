@@ -27,6 +27,10 @@ impl DatabasePanel {
         let name = node.config.name.clone();
         let pinned = self.is_pinned(&name);
         let connected = self.is_connected(index);
+        // Team connections are not in settings, so neither pinned by name nor
+        // shared again from here.
+        let personal = node.team.is_none();
+        let shareable = personal && crate::team_connections::can_share(cx);
         let panel = cx.weak_entity();
 
         let menu = ContextMenu::build(window, cx, move |menu, _window, _cx| {
@@ -35,16 +39,18 @@ impl DatabasePanel {
             } else {
                 "Pin to This Project"
             };
-            menu.entry(pin_label, None, {
-                let panel = panel.clone();
-                let name = name.clone();
-                move |_window, cx| {
-                    panel
-                        .update(cx, |panel, cx| panel.toggle_pin(&name, cx))
-                        .ok();
-                }
+            menu.when(personal, |menu| {
+                menu.entry(pin_label, None, {
+                    let panel = panel.clone();
+                    let name = name.clone();
+                    move |_window, cx| {
+                        panel
+                            .update(cx, |panel, cx| panel.toggle_pin(&name, cx))
+                            .ok();
+                    }
+                })
+                .separator()
             })
-            .separator()
             .when(connected, |menu| {
                 menu.entry("Disconnect", None, {
                     let panel = panel.clone();
@@ -73,6 +79,16 @@ impl DatabasePanel {
                         .update(cx, |panel, cx| panel.prompt_for_password(index, window, cx))
                         .ok();
                 }
+            })
+            .when(shareable, |menu| {
+                menu.separator().entry("Share with Team…", None, {
+                    let panel = panel.clone();
+                    move |window, cx| {
+                        panel
+                            .update(cx, |panel, cx| panel.share_with_team(index, window, cx))
+                            .ok();
+                    }
+                })
             })
         });
 

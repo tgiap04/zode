@@ -382,7 +382,10 @@ impl ActivityIndicator {
                         .with_rotate_animation(2)
                         .into_any_element(),
                 ),
-                EnvStatus::Failed(_) | EnvStatus::KeyMismatch | EnvStatus::Rollback { .. } => Some(
+                EnvStatus::Failed(_)
+                | EnvStatus::KeyMismatch
+                | EnvStatus::Rollback { .. }
+                | EnvStatus::PlanLimited(_) => Some(
                     Icon::new(IconName::Warning)
                         .size(IconSize::Small)
                         .into_any_element(),

@@ -7,6 +7,7 @@
 use crate::connection_store::read_secret;
 use crate::database_panel::{DatabasePanel, NodeState, OpenTable, SchemaNode};
 use crate::session::Session;
+use crate::team_connections::choose_secret;
 use database::client::DriverError;
 use database::protocol::ErrorCode;
 use gpui::{Context, Window};
@@ -15,7 +16,8 @@ use std::sync::Arc;
 /// What opening a connection came to, decided while the node is borrowed and
 /// acted on once it is not.
 enum Outcome {
-    Connected,
+    /// With the shared password to keep, when one opened it.
+    Connected(Option<zeroize::Zeroizing<String>>),
     /// The driver said the credentials were rejected, which is the one failure
     /// the user can answer here rather than in settings.
     NeedsPassword,
@@ -58,7 +60,17 @@ impl DatabasePanel {
             }
             NodeState::Idle | NodeState::Failed(_) => {}
         }
+        // A team connection's settings are sealed in the team vault; they are
+        // pulled the first time it is opened here, never before.
+        if node.team.as_ref().is_some_and(|team| !team.fetched) {
+            self.fetch_team_connection(index, window, cx);
+            return;
+        }
         let config = node.config.clone();
+        let shared_password = node
+            .team
+            .as_ref()
+            .and_then(|team| team.shared_password.clone());
 
         // Looked up before the node is borrowed again: the registry is a
         // separate entity, and reading it needs the same `cx` the node is
@@ -97,8 +109,9 @@ impl DatabasePanel {
         let secret = read_secret(credentials, config.credential_key().to_string(), cx);
         self.tasks.push(cx.spawn_in(window, async move |this, cx| {
             let opened = async {
-                let secret = secret.await?;
-                Session::open(descriptor, config, secret, cx).await
+                let choice = choose_secret(secret.await?, shared_password);
+                let session = Session::open(descriptor, config, choice.secret, cx).await?;
+                anyhow::Ok((session, choice.remember))
             }
             .await;
 
@@ -108,11 +121,11 @@ impl DatabasePanel {
                         return;
                     };
                     match opened {
-                        Ok(session) => {
+                        Ok((session, remember)) => {
                             node.collapse_schema_level = false;
                             node.state = NodeState::Connected(Arc::new(session));
                             node.expanded = true;
-                            Outcome::Connected
+                            Outcome::Connected(remember)
                         }
                         Err(error) => {
                             node.state = NodeState::Failed(format!("{error:#}").into());
@@ -124,7 +137,12 @@ impl DatabasePanel {
                 // holding a node out of it across either is a second mutable
                 // borrow of the same thing.
                 match outcome {
-                    Outcome::Connected => this.load_schemas(index, cx),
+                    Outcome::Connected(remember) => {
+                        if let Some(password) = remember {
+                            this.remember_shared_password(index, password, cx);
+                        }
+                        this.load_schemas(index, cx)
+                    }
                     Outcome::NeedsPassword => this.prompt_for_password(index, window, cx),
                     Outcome::Failed => {}
                 }

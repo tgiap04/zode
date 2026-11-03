@@ -96,6 +96,7 @@ impl EnvDiffModal {
                 .into(),
                 Color::Error,
             ),
+            EnvStatus::PlanLimited(limit) => (limit.sentence().into(), Color::Warning),
             EnvStatus::Failed(message) => (message.clone(), Color::Error),
         }
     }
