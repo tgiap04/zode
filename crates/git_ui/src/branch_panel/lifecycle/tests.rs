@@ -1988,11 +1988,9 @@ mod confirm_delete_checkout {
         });
     }
 
-    /// A checkout whose files are not on this machine offers no sessions to
-    /// delete: the session index is this machine's, so the stocked sessions
-    /// that spell the checkout's path are local ones it merely shares a path
-    /// with. A collaboration guest stands in for a remote server -- both
-    /// answer `is_local() == false`, which is all the menu reads.
+    /// A collaboration guest's checkout offers no sessions to delete: its
+    /// sessions are on a collaborator's machine, so the stocked sessions that
+    /// spell the checkout's path are this machine's, merely sharing a path.
     #[gpui::test]
     async fn a_checkout_not_on_this_machine_plans_no_session_deletion(cx: &mut TestAppContext) {
         let (panel, id, cx) = panel_ready_to_delete(cx).await;
@@ -2268,6 +2266,51 @@ mod single_delete {
         cx.run_until_parked();
         cx.simulate_prompt_answer("Move to Trash");
         cx.run_until_parked();
+    }
+
+    /// A row's delete goes to the operation that deletes a session on its
+    /// project's host. A collaboration guest's has no host here that could, so
+    /// it is refused out loud rather than dropped without a word.
+    #[gpui::test]
+    async fn a_guest_rows_delete_is_refused_out_loud(cx: &mut TestAppContext) {
+        let (panel, _store, _session, _log, cx) = panel_listing_one_session(cx, "guest").await;
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace still alive");
+        let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
+        project.update(cx, |project, _| project.mark_as_collab_for_testing());
+        let entry = panel.read_with(cx, |panel, _| {
+            panel
+                .rows
+                .iter()
+                .filter_map(|row| match row {
+                    TreeRow::Worktree { agents, .. } => Some(agents.clone()),
+                    _ => None,
+                })
+                .flat_map(|agents| agents.iter().cloned().collect::<Vec<_>>())
+                .find(|entry| matches!(entry, AgentEntry::Past { .. }))
+                .expect("the fixture lists one finished session")
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.delete_agent_session(&entry, window, cx)
+        });
+        cx.run_until_parked();
+
+        assert!(!cx.has_pending_prompt(), "nothing is offered for deletion");
+        let refusal = workspace::notifications::NotificationId::named(
+            "Deleting sessions of a shared project is not supported".into(),
+        );
+        assert!(
+            workspace.read_with(cx, |workspace, _| workspace
+                .notification_ids()
+                .contains(&refusal)),
+            "the refusal is said, not swallowed"
+        );
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(listed_ids(panel), vec!["guest".to_string()]);
+        });
     }
 
     /// Prompt answered, store idle.

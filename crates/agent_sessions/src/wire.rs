@@ -55,6 +55,10 @@ pub enum SessionOp {
     DirectoriesExist {
         paths: Vec<String>,
     },
+    PathsExist {
+        paths: Vec<String>,
+        kind: WirePathKind,
+    },
     /// Names the session and nothing else. The host finds it in its own store
     /// and decides what deleting it takes; a client never says which paths go.
     Delete {
@@ -92,9 +96,20 @@ pub enum SessionOpResult {
     DirectoriesExist {
         exists: Vec<bool>,
     },
+    PathsExist {
+        exists: Vec<bool>,
+    },
     Delete {
         outcome: WireDeleteOutcome,
     },
+}
+
+/// What a path has to be on the host to count as there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WirePathKind {
+    File,
+    Directory,
 }
 
 /// What a delete on the host came to.
@@ -378,6 +393,9 @@ pub struct WireProgress {
     pub scanned_to: u64,
     pub restarted: bool,
     pub identity: Option<u64>,
+    /// Absent from an older build, and then read as nothing more to read.
+    #[serde(default)]
+    pub more_to_read: bool,
 }
 
 impl From<&TranscriptProgress> for WireProgress {
@@ -393,6 +411,7 @@ impl From<&TranscriptProgress> for WireProgress {
             scanned_to: progress.scanned_to,
             restarted: progress.restarted,
             identity: progress.identity,
+            more_to_read: progress.more_to_read,
         }
     }
 }
@@ -410,6 +429,7 @@ impl From<WireProgress> for TranscriptProgress {
             scanned_to: progress.scanned_to,
             restarted: progress.restarted,
             identity: progress.identity,
+            more_to_read: progress.more_to_read,
         }
     }
 }
@@ -485,6 +505,13 @@ mod tests {
     }
 
     #[test]
+    fn progress_from_a_server_that_never_says_whether_more_is_left_has_none_left() {
+        let json = r#"{"tool_use_ids":[],"turn_marks":[],"subagent_events":[],"scanned_to":5,"restarted":false,"identity":null}"#;
+        let progress: WireProgress = serde_json::from_str(json).unwrap();
+        assert!(!progress.more_to_read);
+    }
+
+    #[test]
     fn every_op_and_result_survives_serde() {
         let session = WireSession::from(&linux_session());
         let ops = vec![
@@ -517,6 +544,10 @@ mod tests {
             SessionOp::DirectoriesExist {
                 paths: vec!["/home/u/p".to_string()],
             },
+            SessionOp::PathsExist {
+                paths: vec!["/home/u/p/s.jsonl".to_string()],
+                kind: WirePathKind::File,
+            },
             SessionOp::Delete {
                 agent: WireAgent::Copilot,
                 id: "y".to_string(),
@@ -548,6 +579,7 @@ mod tests {
             scanned_to: 99,
             restarted: true,
             identity: Some(u64::MAX),
+            more_to_read: true,
         };
         let subagent = SubagentSummary {
             id: Arc::from("agent-a"),
@@ -587,6 +619,9 @@ mod tests {
             },
             SessionOpResult::DirectoriesExist {
                 exists: vec![true, false],
+            },
+            SessionOpResult::PathsExist {
+                exists: vec![false, true],
             },
             SessionOpResult::Delete {
                 outcome: WireDeleteOutcome::BinaryMissing {

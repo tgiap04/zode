@@ -1245,10 +1245,32 @@ mod tests {
                 "a pass from {from} read to {}, past its cap of {cap}",
                 pass.scanned_to
             );
+            assert_eq!(
+                pass.more_to_read,
+                pass.scanned_to < text.len() as u64,
+                "a pass from {from} to {} must say whether it left any of the file unread",
+                pass.scanned_to
+            );
             found.extend(pass.tool_use_ids);
             from = pass.scanned_to;
         }
         assert_eq!(found, whole.tool_use_ids);
+        assert!(!whole.more_to_read, "an uncapped pass reads to the end");
+    }
+
+    /// A line still being written is not more to read: the pass that reached
+    /// it stopped at the end of what is whole, not at its cap.
+    #[test]
+    fn a_capped_pass_up_to_a_line_still_being_written_has_nothing_more_to_read() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("s1.jsonl");
+        let whole_line = result_line("toolu_done");
+        let text = format!("{whole_line}\n{{\"type\":\"user\",\"mess");
+        std::fs::write(&log, &text).unwrap();
+
+        let pass = read_transcript_progress_in(&log, 0, TRANSCRIPT_WINDOW, 4096).unwrap();
+        assert_eq!(pass.scanned_to, whole_line.len() as u64 + 1);
+        assert!(!pass.more_to_read);
     }
 
     /// A line longer than the cap has to be read whole, or no pass would ever
@@ -1819,7 +1841,7 @@ fn read_transcript_progress_in(
     // written faster than it is read still ends this pass.
     let available = length - from;
     let mut budget = available.min(max_bytes.max(1));
-    let (scan, read) = loop {
+    let (scan, read, budget) = loop {
         file.seek(SeekFrom::Start(from))?;
         let mut scan = claude_log::ChunkScan::default();
         let read = read_complete_lines(file.by_ref().take(budget), window, |lines| {
@@ -1829,7 +1851,7 @@ fn read_transcript_progress_in(
         // until that line fits, or this pass and every one after it would stay
         // where it started.
         if read > 0 || budget >= available {
-            break (scan, read);
+            break (scan, read, budget);
         }
         budget = budget.saturating_mul(2).min(available);
     };
@@ -1840,6 +1862,10 @@ fn read_transcript_progress_in(
         scanned_to: from + read,
         restarted,
         identity,
+        // Cut short by the cap, not by the end: what lies past the budget can
+        // be a line still being written, which the next pass then reports as
+        // nothing more.
+        more_to_read: budget < available,
     })
 }
 

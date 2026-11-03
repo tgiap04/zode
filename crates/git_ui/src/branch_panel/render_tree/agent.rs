@@ -350,12 +350,12 @@ impl BranchPanel {
         })
     }
 
-    /// Moves one session's transcript to the trash, after asking.
+    /// Deletes one session, after asking.
     ///
     /// Through `agent_ui::delete_session`, the same call the history panel
     /// makes: what a delete takes and what it warns about belong to the
     /// operation, not to whichever surface asked for it.
-    fn delete_agent_session(
+    pub(crate) fn delete_agent_session(
         &mut self,
         entry: &AgentEntry,
         window: &mut Window,
@@ -368,14 +368,10 @@ impl BranchPanel {
         else {
             return;
         };
-        // These rows come from this machine's own store, so for a project on
-        // another host one only matches a checkout by its path string: the id
-        // is not one the host holds, and asking it to delete would remove
-        // nothing while saying it did.
-        if !workspace.read(cx).project().read(cx).is_local() {
-            log::warn!("not deleting agent session {id}: its checkout is not on this machine");
-            return;
-        }
+        // For a local or remote project the rows come from the store for its
+        // host, so the id is one that host holds, and `delete_session` has the
+        // host delete it. A collaboration guest's rows are this machine's
+        // sessions that merely share a path, and `delete_session` refuses them.
         let index = store.read(cx).index().clone();
         let Some(session) = index.find(id) else {
             return;

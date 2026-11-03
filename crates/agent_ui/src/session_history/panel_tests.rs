@@ -2012,12 +2012,12 @@ async fn a_remote_delete_with_nothing_left_asks_before_dropping_the_row(cx: &mut
     assert!(remaining_ids(&panel, &mut cx).is_empty());
 }
 
-/// Nothing here can run a remote host's agent yet. A resume from a remote
-/// panel refuses and says so before any local check runs: this session's
-/// directory exists on this machine, so a local check would open a tab that
-/// starts fresh while looking resumed.
+/// The panel's own `remote` mark no longer refuses a resume: whether one goes
+/// ahead is the project's host's to say, which for this local project is this
+/// machine. A real remote host's answer is covered by the tests over a fake
+/// remote server below.
 #[gpui::test]
-async fn resuming_in_a_remote_panel_refuses_and_says_why(cx: &mut TestAppContext) {
+async fn a_panel_marked_remote_leaves_the_resume_to_the_projects_host(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree("/root", json!({ "a.txt": "" })).await;
@@ -2029,6 +2029,33 @@ async fn resuming_in_a_remote_panel_refuses_and_says_why(cx: &mut TestAppContext
     panel.update(&mut cx, |panel, _| panel.remote = true);
     let before = active_item_of(&workspace, &mut cx);
 
+    panel.update_in(&mut cx, |panel, window, cx| {
+        panel.resume(&target, agent_sessions::Fork::Continue, window, cx)
+    });
+    cx.run_until_parked();
+
+    assert_ne!(
+        active_item_of(&workspace, &mut cx),
+        before,
+        "the resumed session's tab opened"
+    );
+}
+
+/// A collaboration guest's sessions are on the collaborator's machine, which
+/// nothing here can ask: a resume refuses and says so, rather than opening a
+/// tab that would start fresh while looking resumed.
+#[gpui::test]
+async fn resuming_in_a_shared_project_refuses_and_says_why(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let here = std::env::temp_dir();
+    let target = session("one", &here.to_string_lossy(), "First", 300);
+    let (panel, mut cx) =
+        panel_with(&["/root"], vec![target.clone()], Vec::new(), fs.clone(), cx).await;
+    let workspace = make_project_not_local(&panel, &mut cx);
+    let before = active_item_of(&workspace, &mut cx);
+
     for fork in [agent_sessions::Fork::Continue, agent_sessions::Fork::New] {
         panel.update_in(&mut cx, |panel, window, cx| {
             panel.resume(&target, fork, window, cx)
@@ -2038,30 +2065,19 @@ async fn resuming_in_a_remote_panel_refuses_and_says_why(cx: &mut TestAppContext
 
     assert!(has_message(
         &workspace,
-        super::actions::REMOTE_RESUME_UNSUPPORTED,
+        super::actions::SHARED_RESUME_REFUSAL,
         &mut cx
     ));
     assert_eq!(active_item_of(&workspace, &mut cx), before, "no tab opened");
 }
 
 #[test]
-fn a_remote_rows_resume_controls_are_off_and_say_why() {
-    let remote = super::row::resume_controls(true, true, true);
-    assert!(!remote.resume && !remote.fork);
-    assert_eq!(
-        remote.resume_tooltip,
-        super::actions::REMOTE_RESUME_UNSUPPORTED
-    );
-    assert_eq!(
-        remote.fork_tooltip,
-        super::actions::REMOTE_RESUME_UNSUPPORTED
-    );
-
-    let local = super::row::resume_controls(true, true, false);
-    assert!(local.resume && local.fork);
-    let codex = super::row::resume_controls(true, false, false);
+fn a_rows_resume_controls_follow_its_directory_and_its_agent() {
+    let alive = super::row::resume_controls(true, true);
+    assert!(alive.resume && alive.fork);
+    let codex = super::row::resume_controls(true, false);
     assert!(codex.resume && !codex.fork);
-    let gone = super::row::resume_controls(false, true, false);
+    let gone = super::row::resume_controls(false, true);
     assert!(!gone.resume && !gone.fork);
     assert_eq!(
         gone.fork_tooltip,
@@ -2078,4 +2094,252 @@ fn only_paths_this_machine_can_reach_are_revealed() {
     assert!(reveal_reaches_the_path(false, false));
     assert!(reveal_reaches_the_path(true, true));
     assert!(!reveal_reaches_the_path(true, false));
+}
+
+/// A project opened over a fake remote server, whose session requests are
+/// answered here, so a test sees exactly what the server was asked.
+struct RemoteRig {
+    workspace: Entity<workspace::Workspace>,
+    project: Entity<Project>,
+    deleted: Arc<std::sync::Mutex<Vec<(AgentKind, String)>>>,
+    _server_keepalive: Entity<()>,
+}
+
+/// `folders` are the directories the server says it has, or `None` for a
+/// server built before the session requests it is sent, which says it cannot
+/// read them.
+async fn remote_rig(
+    folders: Option<Vec<&'static str>>,
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) -> (RemoteRig, VisualTestContext) {
+    init_test(cx);
+    cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+    server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+    let params = cx.update(workspace::AppState::test);
+    let (options, server_session, connect_guard) = remote::RemoteClient::fake_server(cx, server_cx);
+    let server_keepalive = server_cx.new(|_| ());
+    server_session.add_request_handler(
+        server_keepalive.downgrade(),
+        |_, _: rpc::TypedEnvelope<rpc::proto::Ping>, _| async { Ok(rpc::proto::Ack {}) },
+    );
+    let deleted: Arc<std::sync::Mutex<Vec<(AgentKind, String)>>> = Arc::default();
+    server_session.add_request_handler(server_keepalive.downgrade(), {
+        let deleted = deleted.clone();
+        move |_, envelope: rpc::TypedEnvelope<rpc::proto::AgentSessionRequest>, _| {
+            let answer =
+                answer_session_request(&envelope.payload.op_json, folders.as_deref(), &deleted);
+            async move { answer }
+        }
+    });
+    drop(connect_guard);
+    let remote_client = remote::RemoteClient::connect_mock(options, cx).await;
+    let project = cx.update(|cx| {
+        Project::remote(
+            remote_client,
+            params.client.clone(),
+            params.node_runtime.clone(),
+            params.user_store.clone(),
+            params.languages.clone(),
+            params.fs.clone(),
+            false,
+            cx,
+        )
+    });
+    let window = cx.add_window({
+        let project = project.clone();
+        move |window, cx| {
+            let workspace =
+                cx.new(|cx| workspace::Workspace::new(None, project, params, window, cx));
+            MultiWorkspace::new(workspace, window, cx)
+        }
+    });
+    let workspace = window
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .expect("the window is open");
+    let cx = VisualTestContext::from_window(window.into(), cx);
+    (
+        RemoteRig {
+            workspace,
+            project,
+            deleted,
+            _server_keepalive: server_keepalive,
+        },
+        cx,
+    )
+}
+
+fn answer_session_request(
+    op_json: &str,
+    folders: Option<&[&'static str]>,
+    deleted: &std::sync::Mutex<Vec<(AgentKind, String)>>,
+) -> anyhow::Result<rpc::proto::AgentSessionResponse> {
+    use agent_sessions::wire::{SessionOp, SessionOpResult, WireDeleteOutcome};
+    use anyhow::Context as _;
+    let Some(folders) = folders else {
+        return Err(
+            anyhow::anyhow!("unknown variant").context("a session request this server cannot read")
+        );
+    };
+    let result = match serde_json::from_str::<SessionOp>(op_json)? {
+        SessionOp::List { .. } => SessionOpResult::List {
+            sessions: Vec::new(),
+            unavailable: Vec::new(),
+        },
+        SessionOp::DirectoriesExist { paths } => SessionOpResult::DirectoriesExist {
+            exists: paths
+                .iter()
+                .map(|path| folders.contains(&path.as_str()))
+                .collect(),
+        },
+        SessionOp::Delete { agent, id } => {
+            deleted
+                .lock()
+                .map_err(|_| anyhow::anyhow!("the record of deletes is poisoned"))?
+                .push((agent.into(), id));
+            SessionOpResult::Delete {
+                outcome: WireDeleteOutcome::Gone,
+            }
+        }
+        other => anyhow::bail!("this fake server does not answer {other:?}"),
+    };
+    Ok(rpc::proto::AgentSessionResponse {
+        result_json: serde_json::to_string(&result).context("encoding the answer")?,
+    })
+}
+
+fn deletes_seen(rig: &RemoteRig) -> Vec<(AgentKind, String)> {
+    rig.deleted
+        .lock()
+        .map(|deleted| deleted.clone())
+        .unwrap_or_default()
+}
+
+/// A checkout removal or "delete all" in a remote project names each session
+/// to the server by agent and id, and touches nothing on this machine --
+/// though files here spell the very paths the sessions were listed with.
+#[gpui::test]
+async fn a_remote_projects_sweep_asks_its_host_for_each_session_and_trashes_nothing_here(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    use fs::Fs as _;
+    let (rig, mut cx) = remote_rig(Some(Vec::new()), cx, server_cx).await;
+    let client_fs = rig
+        .project
+        .read_with(&cx, |project, _| project.fs().as_fake());
+    client_fs
+        .insert_tree(
+            "/home/u/.claude/projects/-home-u-p",
+            json!({ "one.jsonl": "", "two.jsonl": "" }),
+        )
+        .await;
+    let on_host = |id: &str, agent: AgentKind| SessionSummary {
+        agent,
+        log_path: Some(PathBuf::from(format!(
+            "/home/u/.claude/projects/-home-u-p/{id}.jsonl"
+        ))),
+        log_bytes: 10,
+        ..session(id, "/home/u/p", id, 300)
+    };
+    let sessions = [
+        on_host("one", AgentKind::Claude),
+        on_host("two", AgentKind::Codex),
+    ];
+    let plan = super::DeleteAll::on_host(sessions.iter());
+    assert!(plan.targets.iter().all(super::DeleteTarget::is_on_host));
+
+    let sweep = cx
+        .update(|_, cx| super::actions::execute_session_deletion(&rig.workspace, plan.targets, cx));
+    sweep.await;
+    cx.run_until_parked();
+
+    assert_eq!(
+        deletes_seen(&rig),
+        vec![
+            (AgentKind::Claude, "one".to_string()),
+            (AgentKind::Codex, "two".to_string())
+        ],
+        "the server is asked for each session, by agent and id"
+    );
+    assert!(
+        trashed_names(&client_fs).is_empty(),
+        "nothing on this machine is trashed, got {:?}",
+        trashed_names(&client_fs)
+    );
+    assert!(
+        client_fs
+            .is_file(std::path::Path::new(
+                "/home/u/.claude/projects/-home-u-p/one.jsonl"
+            ))
+            .await
+    );
+}
+
+/// Whether a remote session may be resumed is the server's to say: its folder
+/// is a path there, and this machine has none of it.
+#[gpui::test]
+async fn a_remote_sessions_folder_is_checked_on_its_host(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let (rig, mut cx) = remote_rig(Some(vec!["/home/u/p"]), cx, server_cx).await;
+    let host = rig
+        .project
+        .read_with(&cx, |project, cx| project.agent_session_host(cx))
+        .expect("a remote project has a session host");
+    assert!(host.is_remote());
+    let there = session("one", "/home/u/p", "First", 300);
+    let gone = session("two", "/home/u/gone", "Second", 300);
+
+    let refusal_there = cx.update(|_, cx| {
+        super::actions::resume_refusal_on(&host, &there, agent_sessions::Fork::Continue, cx)
+    });
+    let refusal_gone = cx.update(|_, cx| {
+        super::actions::resume_refusal_on(&host, &gone, agent_sessions::Fork::Continue, cx)
+    });
+    cx.run_until_parked();
+
+    assert_eq!(refusal_there.await.ok(), Some(None));
+    assert_eq!(
+        refusal_gone.await.ok(),
+        Some(Some(super::ResumeRefusal::CwdGone))
+    );
+}
+
+/// A server that cannot answer has not said the folder is gone. The resume
+/// is refused, and the reason -- here, a server to update -- is said.
+#[gpui::test]
+async fn a_resume_its_host_cannot_check_says_why_and_opens_nothing(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let (rig, mut cx) = remote_rig(None, cx, server_cx).await;
+    let target = session("one", "/home/u/p", "First", 300);
+    let before = active_item_of(&rig.workspace, &mut cx);
+
+    cx.update(|window, cx| {
+        super::actions::resume_session(
+            &rig.workspace,
+            &target,
+            agent_sessions::Fork::Continue,
+            window,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+
+    let failed =
+        workspace::notifications::NotificationId::unique::<super::actions::ResumeCheckFailed>();
+    assert!(
+        rig.workspace.read_with(&cx, |workspace, _| workspace
+            .notification_ids()
+            .contains(&failed)),
+        "the failed check is said, not swallowed"
+    );
+    assert_eq!(
+        active_item_of(&rig.workspace, &mut cx),
+        before,
+        "no tab opened"
+    );
 }

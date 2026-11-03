@@ -22,7 +22,7 @@ use std::{
 };
 
 use agent_sessions::{AgentKind, Fork, SessionIndex, SessionSummary, provider_for};
-use agent_ui::{ResumeRefusal, SessionStore, resume_refusal_in_background, resume_session};
+use agent_ui::{ResumeRefusal, SessionStore, resume_refusal_on, resume_session};
 use futures::StreamExt as _;
 use gpui::{AnyWindowHandle, App, AsyncApp, Entity, Global, WeakEntity, WindowHandle};
 use remote_relay_protocol::{Control, SessionCursor, SessionEntry, error_code};
@@ -565,24 +565,35 @@ pub(crate) async fn resume(
         }
     }
 
-    let refusal = cx
-        .update(|cx| {
-            resume_refusal_in_background(
-                &session,
-                if fork { Fork::New } else { Fork::Continue },
-                cx,
-            )
-        })
-        .await;
-    match refusal {
-        Some(ResumeRefusal::Unsupported) => {
+    // Asked of the host the target workspace's project is on, the one
+    // `resume_session` asks again: a directory is only there on that host.
+    let refusal = cx.update(|cx| {
+        let workspace = target.workspace.upgrade()?;
+        let host = workspace
+            .read(cx)
+            .project()
+            .read(cx)
+            .agent_session_host(cx)?;
+        Some(resume_refusal_on(
+            &host,
+            &session,
+            if fork { Fork::New } else { Fork::Continue },
+            cx,
+        ))
+    });
+    let Some(refusal) = refusal else {
+        return Err(not_found());
+    };
+    match refusal.await {
+        Ok(Some(ResumeRefusal::Unsupported)) => {
             return Err(BrowseError::new(
                 UNSUPPORTED,
                 "this agent cannot do that with a session",
             ));
         }
-        Some(ResumeRefusal::CwdGone) => return Err(not_found()),
-        None => {}
+        Ok(Some(ResumeRefusal::CwdGone)) => return Err(not_found()),
+        Ok(None) => {}
+        Err(error) => return Err(BrowseError::internal(&format!("{error:#}"))),
     }
 
     let message = resume_toast(&device_name, fork, display_title(&session));

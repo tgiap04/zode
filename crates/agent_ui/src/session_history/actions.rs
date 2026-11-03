@@ -3,6 +3,7 @@ use agent_sessions::{
     AgentCommand, AgentKind, Deletion, Fork, SessionProvider, SessionSummary,
     wire::WireDeleteOutcome,
 };
+use anyhow::Context as _;
 use gpui::{
     App, AppContext as _, AsyncWindowContext, ClipboardItem, Context, Entity, SharedString, Task,
     Window,
@@ -42,13 +43,7 @@ pub enum ResumeRefusal {
 /// to tell somebody else why nothing happened. This is the same two checks, in
 /// the same order, asked first.
 pub fn resume_refusal(session: &SessionSummary, fork: Fork) -> Option<ResumeRefusal> {
-    // Asked only so the control stays disabled where the agent cannot honour
-    // it — Codex has no fork. The command itself is rebuilt at spawn time from
-    // the id, so what comes back here is discarded.
-    if agent_sessions::provider_for(session.agent)
-        .resume_command(session, fork)
-        .is_none()
-    {
+    if agent_cannot_resume(session, fork) {
         return Some(ResumeRefusal::Unsupported);
     }
     if !cwd_exists(session) {
@@ -57,21 +52,45 @@ pub fn resume_refusal(session: &SessionSummary, fork: Fork) -> Option<ResumeRefu
     None
 }
 
-/// [`resume_refusal`], answered on the background executor.
+/// Whether the agent has no way to do `fork` with `session`.
 ///
-/// The check stats the directory the session ran in and builds the agent's
-/// store, which for two of the four stores canonicalizes a path. On a stalled
-/// network mount that is as long as the mount stalls, and a caller on the
-/// foreground thread -- which is every caller there is -- would hold the whole
-/// window for it. [`resume_session`] uses this; a caller that reports the
-/// refusal itself should wait on it rather than call [`resume_refusal`].
-pub fn resume_refusal_in_background(
+/// Asked only so the control stays disabled where the agent cannot honour it
+/// -- Codex has no fork. The command itself is rebuilt at spawn time from the
+/// id, so what comes back here is discarded, and building it reads nothing.
+fn agent_cannot_resume(session: &SessionSummary, fork: Fork) -> bool {
+    agent_sessions::provider_for(session.agent)
+        .resume_command(session, fork)
+        .is_none()
+}
+
+/// [`resume_refusal`], asked of the host the session is on: whether the agent
+/// can do it, and whether the directory it ran in is there *on that host*.
+///
+/// A remote session's directory names a path on the remote, which on this
+/// machine may be nothing at all -- a WSL path is not even absolute on Windows
+/// -- or, worse, some unrelated local folder that happens to share it.
+///
+/// An error is a host that could not be asked, which is not an answer about
+/// the directory: a caller refuses the resume, since a tab opened into a
+/// directory nobody could check would be a guess, and says why -- a server
+/// that is out of date has a fix, and a refusal that reads as "the folder is
+/// gone" hides it.
+pub fn resume_refusal_on(
+    host: &AgentSessionHost,
     session: &SessionSummary,
     fork: Fork,
     cx: &App,
-) -> Task<Option<ResumeRefusal>> {
-    let session = session.clone();
-    cx.background_spawn(async move { resume_refusal(&session, fork) })
+) -> Task<anyhow::Result<Option<ResumeRefusal>>> {
+    if agent_cannot_resume(session, fork) {
+        return Task::ready(Ok(Some(ResumeRefusal::Unsupported)));
+    }
+    let checked = host.directories_exist(vec![session.cwd.clone()], cx);
+    cx.background_spawn(async move {
+        let exists = checked
+            .await
+            .context("could not check the session's folder on its host")?;
+        Ok((exists.first() != Some(&true)).then_some(ResumeRefusal::CwdGone))
+    })
 }
 
 /// What a tab opened onto `session` is bound to.
@@ -99,9 +118,9 @@ fn intent_for_resume(session: &SessionSummary, fork: Fork) -> SessionIntent {
 /// a fork must not carry the id it forked from -- belong to the operation, not
 /// to whichever surface asked for it.
 ///
-/// Whether it may be resumed is decided off the foreground thread (see
-/// [`resume_refusal_in_background`]), so the tab opens a moment after this
-/// returns, and not at all when the answer is no.
+/// Whether it may be resumed is decided off the foreground thread, by the host
+/// the session is on (see [`resume_refusal_on`]), so the tab opens a moment
+/// after this returns, and not at all when the answer is no.
 pub fn resume_session(
     workspace: &Entity<workspace::Workspace>,
     session: &SessionSummary,
@@ -109,15 +128,14 @@ pub fn resume_session(
     window: &mut Window,
     cx: &mut App,
 ) {
-    // The checks below stat this machine's disk and build this machine's
-    // providers. For a session on a remote host they answer about the wrong
-    // machine: nothing at all on Windows with WSL, or, where a local path
-    // happens to match, a tab that starts fresh while looking resumed.
-    if workspace.read(cx).project().read(cx).is_via_remote_server() {
-        refuse_remote_resume(workspace, cx);
+    // A collaboration guest's sessions are on a collaborator's machine, which
+    // nothing here can ask; a tab opened anyway would start fresh while
+    // looking resumed.
+    let Some(host) = session_host(workspace, cx) else {
+        refuse_shared_resume(workspace, cx);
         return;
-    }
-    let refusal = resume_refusal_in_background(session, fork, cx);
+    };
+    let refusal = resume_refusal_on(&host, session, fork, cx);
     let agent = session.agent.builtin_agent_id();
     // `SessionOrigin::new` drops the title of a tab that is not tracked -- so a
     // fork does not inherit the name of the conversation it branched from
@@ -133,8 +151,26 @@ pub fn resume_session(
     let workspace = workspace.downgrade();
     window
         .spawn(cx, async move |cx| {
-            if refusal.await.is_some() {
-                return;
+            match refusal.await {
+                Ok(None) => {}
+                // The control that asked is disabled for these already.
+                Ok(Some(_)) => return,
+                Err(error) => {
+                    log::warn!("not resuming a session: {error:#}");
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            show_message(
+                                workspace,
+                                (
+                                    NotificationId::unique::<ResumeCheckFailed>(),
+                                    format!("{error:#}").into(),
+                                ),
+                                cx,
+                            )
+                        })
+                        .log_err();
+                    return;
+                }
             }
             workspace
                 .update_in(cx, |workspace, window, cx| {
@@ -145,13 +181,18 @@ pub fn resume_session(
         .detach();
 }
 
-/// What resuming a session on a remote host says, until a tab can run the
-/// agent there.
-pub(crate) const REMOTE_RESUME_UNSUPPORTED: &str = "Resuming a remote session is not supported yet";
+/// The notification a resume raises when the session's host could not say
+/// whether its folder is there.
+pub(crate) struct ResumeCheckFailed;
 
-fn refuse_remote_resume(workspace: &Entity<workspace::Workspace>, cx: &mut App) {
+/// What refusing a resume in a collaboration guest's project tells the
+/// reader: its sessions are on the collaborator's machine.
+pub(crate) const SHARED_RESUME_REFUSAL: &str =
+    "Resuming a session of a shared project is not supported";
+
+fn refuse_shared_resume(workspace: &Entity<workspace::Workspace>, cx: &mut App) {
     workspace.update(cx, |workspace, cx| {
-        show_message(workspace, named_message(REMOTE_RESUME_UNSUPPORTED), cx)
+        show_message(workspace, named_message(SHARED_RESUME_REFUSAL), cx)
     });
 }
 
@@ -628,6 +669,14 @@ pub struct DeleteTarget {
     pub deletion: TargetDeletion,
 }
 
+impl DeleteTarget {
+    /// Whether the host the session is on decides what goes: the target names
+    /// the session and carries nothing a sweep here could act on.
+    pub fn is_on_host(&self) -> bool {
+        matches!(self.deletion, TargetDeletion::OnHost(_))
+    }
+}
+
 /// What one target of a bulk delete takes.
 pub enum TargetDeletion {
     /// What this machine's provider says the session owns: nothing, a set of
@@ -771,25 +820,29 @@ pub fn plan_delete_all<'a>(
     }
 }
 
-/// [`plan_delete_all`] for sessions on a remote host, counted without reading
-/// anything: this machine has none of their files.
-fn plan_remote_delete_all<'a>(sessions: impl IntoIterator<Item = &'a SessionSummary>) -> DeleteAll {
-    let mut targets = Vec::new();
-    let mut total_bytes = 0;
-    for session in sessions {
-        let Some(deletion) = remote_deletion_preview(session) else {
-            continue;
-        };
-        total_bytes += session.log_bytes;
-        targets.push(DeleteTarget {
-            id: session.id.clone(),
-            agent: session.agent,
-            deletion: TargetDeletion::OnHost(deletion),
-        });
-    }
-    DeleteAll {
-        targets,
-        total_bytes,
+impl DeleteAll {
+    /// [`plan_delete_all`] for sessions on a remote host, counted without
+    /// reading anything: this machine has none of their files. Its targets
+    /// name a session and nothing else, so what [`execute_session_deletion`]
+    /// takes for them is whatever the host decides, by agent and id.
+    pub fn on_host<'a>(sessions: impl IntoIterator<Item = &'a SessionSummary>) -> Self {
+        let mut targets = Vec::new();
+        let mut total_bytes = 0;
+        for session in sessions {
+            let Some(deletion) = remote_deletion_preview(session) else {
+                continue;
+            };
+            total_bytes += session.log_bytes;
+            targets.push(DeleteTarget {
+                id: session.id.clone(),
+                agent: session.agent,
+                deletion: TargetDeletion::OnHost(deletion),
+            });
+        }
+        Self {
+            targets,
+            total_bytes,
+        }
     }
 }
 
@@ -1213,10 +1266,6 @@ impl AgentHistoryPanel {
         let Some(workspace) = self.workspace().upgrade() else {
             return;
         };
-        if self.remote {
-            refuse_remote_resume(&workspace, cx);
-            return;
-        }
         resume_session(&workspace, session, fork, window, cx);
     }
 
@@ -1334,7 +1383,7 @@ impl AgentHistoryPanel {
         let roots = self.project_roots(cx);
         let in_project = sessions_in_project(self.sessions(cx), &roots);
         let plan = if remote {
-            plan_remote_delete_all(in_project)
+            DeleteAll::on_host(in_project)
         } else {
             plan_delete_all(in_project.map(|session| {
                 let deletion = self
@@ -1851,7 +1900,7 @@ mod tests {
             ..session("d", "/home/u/p", 0)
         };
 
-        let plan = plan_remote_delete_all([
+        let plan = DeleteAll::on_host([
             &transcript,
             &opencode,
             &no_files,

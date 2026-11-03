@@ -21,7 +21,8 @@ use agent_sessions::{
     AgentCommand, AgentKind, Deletion, SessionCounts, SessionProvider, SessionSummary,
     SubagentSummary, TranscriptProgress,
     wire::{
-        SessionOp, SessionOpResult, WireAgent, WireDeleteOutcome, WireSession, WireUnavailable,
+        SessionOp, SessionOpResult, WireAgent, WireDeleteOutcome, WirePathKind, WireSession,
+        WireUnavailable,
     },
 };
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -255,6 +256,91 @@ impl AgentSessionHost {
             Self::Remote(remote) => remote.directories_exist(paths, cx),
         }
     }
+
+    /// Whether each of `paths` is there on the host as a `kind`, in order.
+    pub fn paths_exist(
+        &self,
+        paths: Vec<PathBuf>,
+        kind: WirePathKind,
+        cx: &App,
+    ) -> Task<Result<Vec<bool>>> {
+        match self {
+            Self::Local(_) => cx.background_spawn(async move {
+                Ok(paths.iter().map(|path| path_exists(path, kind)).collect())
+            }),
+            Self::Remote(remote) => remote.paths_exist(paths, kind, cx),
+        }
+    }
+
+    /// The session a tab starts from: the host's answer for the id, unless the
+    /// tab was pinned to a particular copy of it.
+    ///
+    /// Asked for an id that two transcripts carry, a store answers with
+    /// whichever it reaches first, and the tab would then run the CLI in *that*
+    /// one's directory -- possibly outside every folder the person who vetted
+    /// the other copy checked. So when the answer is not the pinned copy, the
+    /// pinned copy wins, provided its transcript is still on the host: one
+    /// deleted since is a session that is gone, and answering with another copy
+    /// in its place would be the same substitution.
+    ///
+    /// The store still gets the first word on whether the session exists at
+    /// all. A store that keeps sessions as rows, whose transcript can be missing
+    /// while the session is not, is not second-guessed by a file check.
+    pub fn find_pinned(
+        &self,
+        agent: AgentKind,
+        id: &str,
+        anchor: Option<SessionSummary>,
+        cx: &App,
+    ) -> Task<Result<Option<SessionSummary>>> {
+        let found = self.find(agent, id, cx);
+        let host = self.clone();
+        cx.spawn(async move |cx| {
+            let found = found.await?;
+            let pinned_log = match (&anchor, &found) {
+                (Some(anchor), Some(found)) if !is_same_copy(anchor, found) => {
+                    anchor.log_path.clone()
+                }
+                _ => None,
+            };
+            let anchor_log_there = match pinned_log {
+                Some(log_path) => cx
+                    .update(|cx| host.paths_exist(vec![log_path], WirePathKind::File, cx))
+                    .await?
+                    .first()
+                    .copied()
+                    .unwrap_or(false),
+                None => true,
+            };
+            Ok(pinned_choice(anchor, found, anchor_log_there))
+        })
+    }
+}
+
+/// [`AgentSessionHost::find_pinned`]'s decision, once the store has answered
+/// and, where it matters, the host has said whether the pinned copy's
+/// transcript is still there.
+fn pinned_choice(
+    anchor: Option<SessionSummary>,
+    found: Option<SessionSummary>,
+    anchor_log_there: bool,
+) -> Option<SessionSummary> {
+    match (anchor, found) {
+        (None, found) => found,
+        // Nothing holds the id any more, whichever copy was pinned.
+        (Some(_), None) => None,
+        (Some(anchor), Some(found)) => {
+            if is_same_copy(&anchor, &found) {
+                Some(found)
+            } else {
+                anchor_log_there.then_some(anchor)
+            }
+        }
+    }
+}
+
+fn is_same_copy(anchor: &SessionSummary, found: &SessionSummary) -> bool {
+    found.cwd == anchor.cwd && found.log_path == anchor.log_path
 }
 
 /// A project's remote server, as the place its sessions are kept.
@@ -429,6 +515,29 @@ impl RemoteSessionHost {
         })
     }
 
+    pub fn paths_exist(
+        &self,
+        paths: Vec<PathBuf>,
+        kind: WirePathKind,
+        cx: &App,
+    ) -> Task<Result<Vec<bool>>> {
+        let expected = paths.len();
+        let op = SessionOp::PathsExist {
+            paths: paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            kind,
+        };
+        let answer = self.request(op, cx);
+        cx.background_spawn(async move {
+            match answer.await? {
+                SessionOpResult::PathsExist { exists } if exists.len() == expected => Ok(exists),
+                other => Err(unexpected_answer(&other)),
+            }
+        })
+    }
+
     /// Deletes a session on the host. Only its agent and id are sent: the
     /// server finds it in its own store, works out what deleting it takes, and
     /// does that with its own file system and its own copy of the agent's CLI.
@@ -477,10 +586,24 @@ impl RemoteSessionHost {
                 REMOTE_SESSIONS_OUT_OF_DATE,
                 if_unanswered,
             )
-            .await?;
+            .await
+            .map_err(name_a_server_older_than_its_request)?;
             serde_json::from_str(&response.result_json)
                 .context("the remote server sent a session answer this app cannot read")
         })
+    }
+}
+
+/// What a server says of a request whose op it has no variant for, which is
+/// what one built before that op reaches. It knows the envelope, so it answers
+/// rather than dropping it, and the client reads this to name the fix.
+const UNREADABLE_SESSION_REQUEST: &str = "a session request this server cannot read";
+
+fn name_a_server_older_than_its_request(error: anyhow::Error) -> anyhow::Error {
+    if format!("{error:#}").contains(UNREADABLE_SESSION_REQUEST) {
+        anyhow!(REMOTE_SESSIONS_OUT_OF_DATE)
+    } else {
+        error
     }
 }
 
@@ -556,8 +679,8 @@ impl AgentSessionService {
         envelope: TypedEnvelope<proto::AgentSessionRequest>,
         mut cx: AsyncApp,
     ) -> Result<proto::AgentSessionResponse> {
-        let op: SessionOp = serde_json::from_str(&envelope.payload.op_json)
-            .context("a session request this server cannot read")?;
+        let op: SessionOp =
+            serde_json::from_str(&envelope.payload.op_json).context(UNREADABLE_SESSION_REQUEST)?;
         let result = Self::answer(&this, op, &mut cx).await?;
         // A listing is every session on the host; encoding it is no work for
         // the thread every other request on this server waits behind.
@@ -679,14 +802,12 @@ impl AgentSessionService {
                     quiet_for_ms: quiet_for.map(agent_sessions::wire::duration_to_millis),
                 }
             }
-            SessionOp::DirectoriesExist { paths } => {
-                let mut exists = Vec::with_capacity(paths.len());
-                for path in paths {
-                    let path = Path::new(&path);
-                    exists.push(is_local_absolute_path(path) && fs.is_dir(path).await);
-                }
-                SessionOpResult::DirectoriesExist { exists }
-            }
+            SessionOp::DirectoriesExist { paths } => SessionOpResult::DirectoriesExist {
+                exists: paths_exist_on(fs.as_ref(), paths, WirePathKind::Directory).await,
+            },
+            SessionOp::PathsExist { paths, kind } => SessionOpResult::PathsExist {
+                exists: paths_exist_on(fs.as_ref(), paths, kind).await,
+            },
             SessionOp::Delete { agent, id } => {
                 let provider = provider_for(agent)?;
                 let outcome =
@@ -819,6 +940,35 @@ async fn delete_here(
 /// render.
 pub fn directory_exists(path: &Path) -> bool {
     is_local_absolute_path(path) && path.is_dir()
+}
+
+/// Whether `path` is there on this machine as a `kind`. Stats the disk, so
+/// never from a render.
+fn path_exists(path: &Path, kind: WirePathKind) -> bool {
+    match kind {
+        // Not behind the shape guard a directory is: a transcript path is one
+        // this machine's own store wrote down, and one on a UNC share, which
+        // the guard refuses, was always checked.
+        WirePathKind::File => path.is_file(),
+        WirePathKind::Directory => directory_exists(path),
+    }
+}
+
+/// [`path_exists`] on a server, through its file system, for paths a client
+/// sent: each must be an absolute path on the server before it is looked at.
+async fn paths_exist_on(fs: &dyn Fs, paths: Vec<String>, kind: WirePathKind) -> Vec<bool> {
+    let mut exists = Vec::with_capacity(paths.len());
+    for path in paths {
+        let path = Path::new(&path);
+        exists.push(
+            is_local_absolute_path(path)
+                && match kind {
+                    WirePathKind::File => fs.is_file(path).await,
+                    WirePathKind::Directory => fs.is_dir(path).await,
+                },
+        );
+    }
+    exists
 }
 
 /// Every provider's `cwd` is untrusted data (it is read from a store this
@@ -1673,5 +1823,152 @@ mod tests {
             .expect("a local listing never fails");
         assert_eq!(listing.sessions, vec![newer]);
         assert!(listing.unavailable.is_empty());
+    }
+
+    /// Answers every lookup with the copy it was given, whatever the id.
+    fn answers_with(found: Option<SessionSummary>) -> AgentSessionHost {
+        AgentSessionHost::Local(vec![Arc::new(StubProvider {
+            agent: AgentKind::Claude,
+            found,
+            deletion: Deletion::Nothing,
+        })])
+    }
+
+    fn copy(cwd: &str, log_path: Option<PathBuf>) -> SessionSummary {
+        SessionSummary {
+            cwd: PathBuf::from(cwd),
+            log_path,
+            ..stub_session("one", AgentKind::Claude)
+        }
+    }
+
+    async fn find_pinned(
+        host: &AgentSessionHost,
+        anchor: Option<SessionSummary>,
+        cx: &mut TestAppContext,
+    ) -> Option<SessionSummary> {
+        cx.update(|cx| host.find_pinned(AgentKind::Claude, "one", anchor, cx))
+            .await
+            .expect("a local lookup does not fail")
+    }
+
+    /// The same id under two project directories: the tab was opened onto one,
+    /// and the store, asked by id, answers with the other.
+    #[gpui::test]
+    async fn a_pinned_lookup_keeps_the_vetted_copy_while_its_transcript_is_there(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let vetted_log = directory.path().join("vetted.jsonl");
+        std::fs::write(&vetted_log, "{}\n").expect("the vetted transcript is written");
+        let vetted = copy("/inside/an/open/folder", Some(vetted_log));
+        let other = copy("/outside/every/open/folder", None);
+        let host = answers_with(Some(other.clone()));
+
+        assert_eq!(
+            find_pinned(&host, None, cx).await,
+            Some(other),
+            "with nothing pinned the store's answer stands"
+        );
+        assert_eq!(
+            find_pinned(&host, Some(vetted.clone()), cx).await,
+            Some(vetted)
+        );
+    }
+
+    #[gpui::test]
+    async fn a_pinned_copy_whose_transcript_is_gone_is_not_replaced_by_another(
+        cx: &mut TestAppContext,
+    ) {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let vetted = copy("/inside", Some(directory.path().join("deleted.jsonl")));
+        let host = answers_with(Some(copy("/outside", None)));
+        assert_eq!(
+            find_pinned(&host, Some(vetted), cx).await,
+            None,
+            "a copy nobody vetted is not what the tab agreed to start"
+        );
+    }
+
+    /// A store whose sessions are rows can hold a session with no transcript
+    /// of its own, and its word on that session is the one that counts.
+    #[gpui::test]
+    async fn a_pinned_session_with_no_transcript_file_still_stands(cx: &mut TestAppContext) {
+        let vetted = copy("/inside", None);
+        let host = answers_with(Some(copy("/outside", None)));
+        assert_eq!(
+            find_pinned(&host, Some(vetted.clone()), cx).await,
+            Some(vetted)
+        );
+    }
+
+    #[gpui::test]
+    async fn a_pinned_copy_the_store_agrees_on_is_the_stores_own_summary(cx: &mut TestAppContext) {
+        let vetted = copy("/inside", Some(PathBuf::from("/nowhere/at/all.jsonl")));
+        let fresher = SessionSummary {
+            title: "retitled since".into(),
+            ..vetted.clone()
+        };
+        let host = answers_with(Some(fresher.clone()));
+        assert_eq!(
+            find_pinned(&host, Some(vetted), cx).await,
+            Some(fresher),
+            "the same copy, so the store's word on it stands, even with its file out of sight"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_session_the_store_no_longer_holds_is_gone_whatever_was_pinned(
+        cx: &mut TestAppContext,
+    ) {
+        let host = answers_with(None);
+        assert_eq!(
+            find_pinned(&host, Some(copy("/inside", None)), cx).await,
+            None
+        );
+    }
+
+    #[gpui::test]
+    async fn the_local_host_tells_files_from_directories(cx: &mut TestAppContext) {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let file = directory.path().join("transcript.jsonl");
+        std::fs::write(&file, "{}\n").expect("the transcript is written");
+        let host = answers_with(None);
+        let paths = vec![
+            file.clone(),
+            directory.path().to_path_buf(),
+            directory.path().join("missing.jsonl"),
+            PathBuf::from("relative.jsonl"),
+        ];
+
+        let files = cx
+            .update(|cx| host.paths_exist(paths.clone(), WirePathKind::File, cx))
+            .await
+            .expect("a local check does not fail");
+        let directories = cx
+            .update(|cx| host.paths_exist(paths, WirePathKind::Directory, cx))
+            .await
+            .expect("a local check does not fail");
+
+        assert_eq!(files, vec![true, false, false, false]);
+        assert_eq!(directories, vec![false, true, false, false]);
+    }
+
+    /// A pinned copy's transcript path comes from this machine's own store,
+    /// and was always checked with a plain `is_file`. A test's working
+    /// directory is its crate, so a relative manifest path names a file there
+    /// that the absolute-path guard alone would refuse.
+    #[gpui::test]
+    async fn the_local_host_checks_a_transcript_as_this_machines_store_does(
+        cx: &mut TestAppContext,
+    ) {
+        let manifest = PathBuf::from("Cargo.toml");
+        assert!(manifest.is_file(), "the test runs in its crate's directory");
+        let host = answers_with(None);
+        let files = cx
+            .update(|cx| host.paths_exist(vec![manifest], WirePathKind::File, cx))
+            .await
+            .expect("a local check does not fail");
+        assert_eq!(files, vec![true]);
     }
 }

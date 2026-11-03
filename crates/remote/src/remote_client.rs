@@ -1411,6 +1411,58 @@ mod tests {
             error.message
         );
     }
+
+    /// A caller that gives up on a request -- a deadline, a closed view --
+    /// drops its future. The slot its answer would have landed in goes with
+    /// it, or every abandoned request on a long-lived connection stays.
+    #[gpui::test]
+    async fn a_dropped_request_leaves_no_slot_for_its_answer(cx: &mut gpui::TestAppContext) {
+        let (_incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
+        let (outgoing_tx, _outgoing_rx) = mpsc::unbounded::<Envelope>();
+        let client =
+            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test", false));
+        cx.run_until_parked();
+
+        let request =
+            client.request_dynamic(proto::Ping {}.into_envelope(0, None, None), "Ping", true);
+        assert_eq!(
+            client.response_channels.lock().len(),
+            1,
+            "a request in flight waits for its answer"
+        );
+
+        drop(request);
+        assert_eq!(client.response_channels.lock().len(), 0);
+    }
+
+    #[gpui::test]
+    async fn an_answered_request_leaves_no_slot_behind(cx: &mut gpui::TestAppContext) {
+        let (incoming_tx, incoming_rx) = mpsc::unbounded::<Envelope>();
+        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded::<Envelope>();
+        let client =
+            cx.update(|cx| ChannelClient::new(incoming_rx, outgoing_tx, cx, "test", false));
+        cx.run_until_parked();
+
+        let request =
+            client.request_dynamic(proto::Ping {}.into_envelope(0, None, None), "Ping", true);
+        let mut sent_id = None;
+        while let Ok(envelope) = outgoing_rx.try_recv() {
+            if matches!(envelope.payload, Some(proto::envelope::Payload::Ping(_))) {
+                sent_id = Some(envelope.id);
+            }
+        }
+        let sent_id = sent_id.expect("the ping went out");
+        let mut answer = proto::Ack {}.into_envelope(100, Some(sent_id), None);
+        answer.id = 100;
+        incoming_tx
+            .unbounded_send(answer)
+            .expect("the client is listening");
+
+        let response = cx.background_spawn(request);
+        cx.run_until_parked();
+        assert!(response.await.is_ok(), "the answer reached the caller");
+        assert_eq!(client.response_channels.lock().len(), 0);
+    }
 }
 
 impl From<SshConnectionOptions> for RemoteConnectionOptions {
@@ -1497,6 +1549,23 @@ pub trait RemoteConnection: Send + Sync {
 
 type ResponseChannels = Mutex<HashMap<MessageId, oneshot::Sender<(Envelope, oneshot::Sender<()>)>>>;
 
+/// A request's place in the response channels, given up when the request's
+/// future is dropped. An answer takes the place out itself; one that never
+/// comes -- the caller gave up first -- would otherwise hold it for the life
+/// of the connection.
+struct ResponseSlot {
+    channels: Weak<ResponseChannels>,
+    id: MessageId,
+}
+
+impl Drop for ResponseSlot {
+    fn drop(&mut self) {
+        if let Some(channels) = self.channels.upgrade() {
+            channels.lock().remove(&self.id);
+        }
+    }
+}
+
 struct Signal<T> {
     tx: Mutex<Option<oneshot::Sender<T>>>,
     rx: Shared<Task<Option<T>>>,
@@ -1532,7 +1601,7 @@ pub(crate) struct ChannelClient {
     next_message_id: AtomicU32,
     outgoing_tx: Mutex<mpsc::UnboundedSender<Envelope>>,
     buffer: Mutex<VecDeque<Envelope>>,
-    response_channels: ResponseChannels,
+    response_channels: Arc<ResponseChannels>,
     message_handlers: Mutex<ProtoMessageHandlerSet>,
     max_received: AtomicU32,
     name: &'static str,
@@ -1554,7 +1623,7 @@ impl ChannelClient {
             outgoing_tx: Mutex::new(outgoing_tx),
             next_message_id: AtomicU32::new(0),
             max_received: AtomicU32::new(0),
-            response_channels: ResponseChannels::default(),
+            response_channels: Arc::default(),
             message_handlers: Default::default(),
             buffer: Mutex::new(VecDeque::new()),
             name,
@@ -1796,6 +1865,10 @@ impl ChannelClient {
         let mut response_channels_lock = self.response_channels.lock();
         response_channels_lock.insert(MessageId(envelope.id), tx);
         drop(response_channels_lock);
+        let slot = ResponseSlot {
+            channels: Arc::downgrade(&self.response_channels),
+            id: MessageId(envelope.id),
+        };
 
         let result = if use_buffer {
             self.send_buffered(envelope)
@@ -1803,6 +1876,7 @@ impl ChannelClient {
             self.send_unbuffered(envelope)
         };
         async move {
+            let _slot = slot;
             if let Err(error) = &result {
                 log::error!("failed to send message: {error}");
                 anyhow::bail!("failed to send message: {error}");

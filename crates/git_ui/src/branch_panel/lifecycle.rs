@@ -647,8 +647,10 @@ impl BranchPanel {
             .collect()
     }
 
-    /// Creates the shared session store the first time the panel is drawn, and
-    /// asks it for its one sweep.
+    /// Creates the session store for this panel's project the first time the
+    /// panel is drawn, and asks it for its one sweep: the process-wide one for
+    /// a project on this machine, the one for its host for a remote project,
+    /// so a checkout's agents are the ones that ran in it there.
     ///
     /// Not at construction: reading the agents' histories opens every
     /// transcript on disk. `AgentHistoryPanel` already carries the rule that
@@ -658,7 +660,11 @@ impl BranchPanel {
         if self.session_store.is_some() {
             return;
         }
-        let store = agent_ui::SessionStore::global(cx);
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let project = workspace.read(cx).project().clone();
+        let store = agent_ui::SessionStore::for_project(&project, cx);
         // The sweep lands on the store, so the panel has to be told when it
         // does. Held in a field, never detached: a detached observe outlives
         // the panel and fires into a dropped handle.

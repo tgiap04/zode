@@ -132,6 +132,7 @@ pub trait SessionProvider: Send + Sync {
             scanned_to: from,
             restarted: false,
             identity: None,
+            more_to_read: false,
         })
     }
 

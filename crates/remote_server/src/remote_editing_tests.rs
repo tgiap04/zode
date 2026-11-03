@@ -3597,6 +3597,226 @@ mod agent_sessions_on_remote {
         assert_eq!(exists.ok(), Some(vec![true, false, false]));
     }
 
+    /// A tab of a remote project asks the server for its session, so one the
+    /// server holds is resumed under its own id in the directory it ran in --
+    /// whatever this machine's own stores hold, which here is nothing.
+    #[gpui::test]
+    async fn test_remote_tab_resumes_the_session_the_server_holds(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let (project, headless) = init_test(&fs, cx, server_cx).await;
+        let store = server_claude_store();
+        give_the_server(&headless, store.path(), server_cx);
+        let client_home = util::test::TempTree::new(json!({}));
+        let client_store = ClaudeProvider::new(client_home.path().to_path_buf());
+        assert_eq!(
+            client_store.find(SERVER_SESSION).ok().flatten(),
+            None,
+            "this machine holds no copy of the session"
+        );
+
+        let host = AgentSessionHost::Remote(remote_host(&project, cx));
+        let found = cx
+            .update(|cx| host.find_pinned(AgentKind::Claude, SERVER_SESSION, None, cx))
+            .await;
+        cx.run_until_parked();
+
+        let session = match found {
+            Ok(Some(session)) => session,
+            other => panic!("the server's session must be found, got {other:?}"),
+        };
+        let command = client_store
+            .resume_command(&session, agent_sessions::Fork::Continue)
+            .expect("Claude resumes what its store holds");
+        assert_eq!(
+            command.args,
+            vec!["--resume".to_string(), SERVER_SESSION.to_string()]
+        );
+        assert_eq!(command.cwd.to_string_lossy(), "/project");
+    }
+
+    /// A fork reads its source from the server, which is the only place the
+    /// source is.
+    #[gpui::test]
+    async fn test_remote_fork_branches_off_a_session_only_the_server_holds(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let (project, headless) = init_test(&fs, cx, server_cx).await;
+        let store = server_claude_store();
+        give_the_server(&headless, store.path(), server_cx);
+        let host = AgentSessionHost::Remote(remote_host(&project, cx));
+        let listed = cx
+            .update(|cx| host.list(cx))
+            .await
+            .map(|listing| listing.sessions)
+            .unwrap_or_default();
+        let source = listed
+            .into_iter()
+            .next()
+            .expect("the server lists its session");
+
+        let found = cx
+            .update(|cx| {
+                host.find_pinned(AgentKind::Claude, SERVER_SESSION, Some(source.clone()), cx)
+            })
+            .await;
+        cx.run_until_parked();
+
+        let session = match found {
+            Ok(Some(session)) => session,
+            other => panic!("a fork's source on the server must be found, got {other:?}"),
+        };
+        let command = ClaudeProvider::new(PathBuf::from("/unused"))
+            .resume_command(&session, agent_sessions::Fork::New)
+            .expect("Claude forks");
+        assert_eq!(
+            command.args,
+            vec![
+                "--resume".to_string(),
+                SERVER_SESSION.to_string(),
+                "--fork-session".to_string()
+            ]
+        );
+    }
+
+    /// A tab pinned to one copy of a session that the server now finds
+    /// somewhere else keeps its copy only while that copy's transcript is on
+    /// the server. The same file on this machine says nothing about it.
+    #[gpui::test]
+    async fn test_remote_pinned_copy_is_checked_on_the_server_not_here(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let (project, headless) = init_test(&fs, cx, server_cx).await;
+        let store = server_claude_store();
+        give_the_server(&headless, store.path(), server_cx);
+        let pinned_log = PathBuf::from("/elsewhere/-project-copy/pinned.jsonl");
+        let pinned = agent_sessions::SessionSummary {
+            id: SERVER_SESSION.into(),
+            agent: AgentKind::Claude,
+            title: "Pinned copy".to_string(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd: PathBuf::from("/project/copy"),
+            branch: None,
+            model: None,
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
+            log_path: Some(pinned_log.clone()),
+            log_bytes: 0,
+        };
+        let client_fs = project.read_with(cx, |project, _| project.fs().as_fake());
+        client_fs
+            .insert_tree("/elsewhere/-project-copy", json!({ "pinned.jsonl": "" }))
+            .await;
+        let host = AgentSessionHost::Remote(remote_host(&project, cx));
+
+        let while_gone = cx
+            .update(|cx| {
+                host.find_pinned(AgentKind::Claude, SERVER_SESSION, Some(pinned.clone()), cx)
+            })
+            .await;
+        cx.run_until_parked();
+        assert_eq!(
+            while_gone.ok(),
+            Some(None),
+            "a pinned copy whose transcript is gone from the server is gone"
+        );
+
+        fs.insert_tree("/elsewhere/-project-copy", json!({ "pinned.jsonl": "" }))
+            .await;
+        let while_there = cx
+            .update(|cx| {
+                host.find_pinned(AgentKind::Claude, SERVER_SESSION, Some(pinned.clone()), cx)
+            })
+            .await;
+        cx.run_until_parked();
+        assert_eq!(while_there.ok(), Some(Some(pinned)));
+    }
+
+    #[gpui::test]
+    async fn test_remote_paths_are_checked_on_the_server(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({ "s.jsonl": "", "src": {} }))
+            .await;
+        let (project, _headless) = init_test(&fs, cx, server_cx).await;
+        let host = remote_host(&project, cx);
+        let paths = vec![
+            PathBuf::from("/project/s.jsonl"),
+            PathBuf::from("/project/src"),
+            PathBuf::from("/nowhere.jsonl"),
+            PathBuf::from("relative.jsonl"),
+        ];
+
+        let files = cx
+            .update(|cx| {
+                host.paths_exist(paths.clone(), agent_sessions::wire::WirePathKind::File, cx)
+            })
+            .await;
+        let directories = cx
+            .update(|cx| host.paths_exist(paths, agent_sessions::wire::WirePathKind::Directory, cx))
+            .await;
+
+        assert_eq!(files.ok(), Some(vec![true, false, false, false]));
+        assert_eq!(directories.ok(), Some(vec![false, true, false, false]));
+    }
+
+    /// A server that predates a request knows its envelope but not its op, and
+    /// says so. That is the same out-of-date server as one with no handler.
+    #[gpui::test]
+    async fn test_remote_names_an_out_of_date_server_for_an_op_it_cannot_read(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        init_logger();
+        let (opts, server_session, connect_guard) = RemoteClient::fake_server(cx, server_cx);
+        let server_keepalive = server_cx.new(|_| ());
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::Ping>, _| async { Ok(rpc::proto::Ack {}) },
+        );
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::AgentSessionRequest>, _| async {
+                Err::<rpc::proto::AgentSessionResponse, _>(
+                    anyhow::anyhow!("unknown variant `paths_exist`")
+                        .context("a session request this server cannot read"),
+                )
+            },
+        );
+        drop(connect_guard);
+        let remote = RemoteClient::connect_mock(opts, cx).await;
+        let project = build_project(remote, cx);
+
+        let host = remote_host(&project, cx);
+        let exists = cx
+            .update(|cx| {
+                host.paths_exist(
+                    vec![PathBuf::from("/project/s.jsonl")],
+                    agent_sessions::wire::WirePathKind::File,
+                    cx,
+                )
+            })
+            .await;
+
+        assert_eq!(
+            exists.map_err(|error| error.to_string()).err().as_deref(),
+            Some(REMOTE_SESSIONS_OUT_OF_DATE)
+        );
+    }
+
     /// A server that knows the request but has no handler for it answers at
     /// once, and the history names the fix rather than showing an error.
     #[gpui::test]

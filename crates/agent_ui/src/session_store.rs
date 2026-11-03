@@ -147,6 +147,28 @@ impl SessionStore {
         }
     }
 
+    /// The store [`Self::for_project`] would give `project`, if it has been
+    /// created, without creating it or registering `project` with it. For
+    /// read-only callers that must not bring a sweep into existence.
+    ///
+    /// `None` for a collaboration guest: no store here holds its sessions,
+    /// and the process-wide one would answer with this machine's.
+    pub fn try_for_project(project: &Entity<Project>, cx: &App) -> Option<Entity<Self>> {
+        let project = project.read(cx);
+        if project.is_local() {
+            return Self::try_global(cx);
+        }
+        if !project.is_via_remote_server() {
+            return None;
+        }
+        let identity =
+            workspace::remote_connection_identity(&project.remote_connection_options(cx)?);
+        cx.try_global::<RemoteSessionStores>()?
+            .0
+            .get(&identity)
+            .cloned()
+    }
+
     /// The store for the host `identity` names, created on first use, with
     /// `project` -- reached through `host` -- among those a sweep may ask.
     ///
@@ -880,6 +902,26 @@ mod tests {
             assert!(!store.is_scanning());
             assert_eq!(store.index().len(), 1);
         });
+    }
+
+    /// Looking a store up never creates one, and a collaboration guest is
+    /// never handed this machine's: its sessions are not the ones in it.
+    #[gpui::test]
+    async fn looking_a_store_up_creates_none_and_gives_a_guest_none(cx: &mut TestAppContext) {
+        let local = test_project(cx).await;
+        let guest = test_project(cx).await;
+        guest.update(cx, |project, _| project.mark_as_collab_for_testing());
+
+        assert!(cx.update(|cx| SessionStore::try_for_project(&local, cx).is_none()));
+        assert!(cx.update(|cx| SessionStore::try_global(cx).is_none()));
+
+        let global = cx.update(|cx| SessionStore::global(cx));
+        assert_eq!(
+            cx.update(|cx| SessionStore::try_for_project(&local, cx))
+                .map(|store| store.entity_id()),
+            Some(global.entity_id())
+        );
+        assert!(cx.update(|cx| SessionStore::try_for_project(&guest, cx).is_none()));
     }
 
     /// A project on this machine, and a collaboration guest's, read this

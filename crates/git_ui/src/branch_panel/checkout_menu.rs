@@ -370,16 +370,18 @@ impl BranchPanel {
         // make opening this menu the thing that pays for the first sweep.
         // An empty plan is the correct answer for that reader: today's
         // prompt, unchanged.
-        let project_is_local = self
-            .workspace
-            .upgrade()
-            .is_some_and(|workspace| workspace.read(cx).project().read(cx).is_local());
+        let lives_on = self.workspace.upgrade().map_or(
+            checkout_deletion::SessionsLiveOn::Elsewhere,
+            |workspace| {
+                checkout_deletion::SessionsLiveOn::of(workspace.read(cx).project().read(cx))
+            },
+        );
         let index = self
             .session_store
             .as_ref()
             .map(|store| store.read(cx).index().clone());
         let plan = checkout_deletion::checkout_session_plan(
-            project_is_local,
+            lives_on,
             index.as_deref(),
             &path,
             &other_live_worktrees,

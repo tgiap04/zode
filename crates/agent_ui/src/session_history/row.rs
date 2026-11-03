@@ -115,7 +115,7 @@ pub(crate) fn render_session(
     let colors = cx.theme().colors();
     let expanded = panel.expanded_rows.contains(&session.id);
     let alive = panel.cwd_alive(&session.cwd);
-    let controls = resume_controls(alive, panel.can_fork(session), panel.remote);
+    let controls = resume_controls(alive, panel.can_fork(session));
     let can_reveal = panel.can_reveal(cx);
     let roots = panel.project_roots(cx);
     let menu_handle = panel.menu_handle(&session.id);
@@ -222,20 +222,11 @@ pub(crate) struct ResumeControls {
     pub(crate) fork_tooltip: &'static str,
 }
 
-/// Several reasons a control can be off, and its tooltip names the one that
-/// applies, in the order they are checked: a session on a remote host first,
-/// since nothing here can run it; then a dead directory; then an agent with no
-/// fork.
-pub(crate) fn resume_controls(alive: bool, can_fork: bool, remote: bool) -> ResumeControls {
-    use crate::session_history::actions::REMOTE_RESUME_UNSUPPORTED;
-    if remote {
-        return ResumeControls {
-            resume: false,
-            resume_tooltip: REMOTE_RESUME_UNSUPPORTED,
-            fork: false,
-            fork_tooltip: REMOTE_RESUME_UNSUPPORTED,
-        };
-    }
+/// Two reasons a control can be off, and its tooltip names the one that
+/// applies, in the order they are checked: a dead directory first, then an
+/// agent with no fork. For a remote project `alive` is the remote host's
+/// answer about the directory, never this machine's.
+pub(crate) fn resume_controls(alive: bool, can_fork: bool) -> ResumeControls {
     ResumeControls {
         resume: alive,
         resume_tooltip: if alive {
