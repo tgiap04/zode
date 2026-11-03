@@ -10,6 +10,12 @@
 //! skipped in every run and could rot unnoticed -- the trap
 //! `database/src/driver_test_suite.rs` records having fallen into.
 
+use std::path::{Path, PathBuf};
+
+use parking_lot::Mutex;
+use util::command::{Command, CommandHost};
+use util::paths::PathStyle;
+
 use crate::backend::{ContainerBackend, ContainerError};
 use crate::resource::ResourceKind;
 
@@ -73,7 +79,8 @@ pub async fn shared_suite(backend: &dyn ContainerBackend) -> Result<usize, Strin
             // look at is just as unable to answer, and just as much *not* a
             // failure of the trait. Kubernetes on a machine with no kubeconfig
             // context is the ordinary case, not an exception.
-            | Err(ContainerError::NotConfigured { .. }) => {
+            | Err(ContainerError::NotConfigured { .. })
+            | Err(ContainerError::HostUnavailable { .. }) => {
                 // The engine cannot answer. Nothing about the trait is disproven,
                 // and every remaining kind would say the same, so stop.
                 return Ok(reached);
@@ -95,4 +102,132 @@ pub async fn shared_suite(backend: &dyn ContainerBackend) -> Result<usize, Strin
     }
 
     Ok(reached)
+}
+
+/// One command a backend asked its host for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordedCommand {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub cwd: Option<PathBuf>,
+}
+
+/// A host that writes down every command it is asked for.
+///
+/// What it hands back runs nothing useful: by default a program that is not
+/// there, so whatever the backend does next it does without an engine. A
+/// backend that reached an engine without asking this host would leave it
+/// with nothing written down, which is what the tests built on it check.
+pub struct RecordingHost {
+    /// `None` for a host standing in for this machine.
+    name: Option<String>,
+    answer: Option<(String, Vec<String>)>,
+    refusal: Option<String>,
+    environment: Vec<(String, String)>,
+    recorded: Mutex<Vec<RecordedCommand>>,
+}
+
+impl RecordingHost {
+    /// Hands back a program that does not exist for every command.
+    pub fn new(name: &str) -> Self {
+        Self {
+            name: Some(name.to_string()),
+            answer: None,
+            refusal: None,
+            environment: Vec::new(),
+            recorded: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The same host, with `variables` in the environment its tools start with.
+    pub fn with_environment(self, variables: &[(&str, &str)]) -> Self {
+        Self {
+            environment: variables
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+            ..self
+        }
+    }
+
+    /// Stands in for this machine: no host name, like `LocalCommandHost`.
+    pub fn this_machine() -> Self {
+        Self {
+            name: None,
+            ..Self::new("this machine")
+        }
+    }
+
+    /// Hands back `program args` for every command, whatever was asked for.
+    pub fn answering_with(name: &str, program: &str, args: &[&str]) -> Self {
+        Self {
+            answer: Some((
+                program.to_string(),
+                args.iter().map(|arg| arg.to_string()).collect(),
+            )),
+            ..Self::new(name)
+        }
+    }
+
+    /// Refuses every command, the way a remote-control connection does.
+    pub fn refusing(name: &str, reason: &str) -> Self {
+        Self {
+            refusal: Some(reason.to_string()),
+            ..Self::new(name)
+        }
+    }
+
+    pub fn recorded(&self) -> Vec<RecordedCommand> {
+        self.recorded.lock().clone()
+    }
+}
+
+impl CommandHost for RecordingHost {
+    fn command(
+        &self,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+        cwd: Option<&Path>,
+    ) -> anyhow::Result<Command> {
+        self.recorded.lock().push(RecordedCommand {
+            program: program.to_string(),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            env: env
+                .iter()
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect(),
+            cwd: cwd.map(Path::to_path_buf),
+        });
+        if let Some(reason) = &self.refusal {
+            anyhow::bail!(
+                "{program} cannot be run on {}: {reason}",
+                self.name.as_deref().unwrap_or("this machine")
+            );
+        }
+        Ok(match &self.answer {
+            Some((program, args)) => {
+                let mut command = Command::new(program);
+                command.args(args);
+                command
+            }
+            None => Command::new("zode-recorded-command-that-does-not-exist"),
+        })
+    }
+
+    fn path_style(&self) -> PathStyle {
+        PathStyle::Posix
+    }
+
+    fn remote_name(&self) -> Option<String> {
+        self.name.clone()
+    }
+
+    fn environment_variable(&self, name: &str) -> Option<String> {
+        self.environment
+            .iter()
+            .find(|(variable, _)| variable == name)
+            .map(|(_, value)| value.clone())
+    }
 }

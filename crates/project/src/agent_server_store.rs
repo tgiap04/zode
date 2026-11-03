@@ -367,7 +367,7 @@ fn locate_binary(
 /// WSL appends the Windows `PATH` to the distro's by default, so a Windows-side
 /// `claude.cmd` shim or npm global would otherwise satisfy the lookup and the
 /// terminal would run a Windows program against Linux paths.
-fn without_windows_drive_mounts(search_path: &str) -> String {
+pub(crate) fn without_windows_drive_mounts(search_path: &str) -> String {
     search_path
         .split(':')
         .filter(|entry| !is_windows_drive_mount(entry))

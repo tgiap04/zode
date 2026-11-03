@@ -13,7 +13,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use util::command::{Command, Stdio};
+use util::command::{CommandHost, Stdio};
 
 /// Why a git step did not go through, in git's own words.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -167,37 +167,56 @@ fn is_read_only(args: &[&str]) -> bool {
     )
 }
 
-async fn run_git(root: &Path, args: &[&str]) -> Result<GitOutput, String> {
-    let mut command = Command::new("git");
+async fn run_git(host: &dyn CommandHost, root: &Path, args: &[&str]) -> Result<GitOutput, String> {
+    let root = root.to_string_lossy();
+    let mut words: Vec<&str> = Vec::with_capacity(args.len() + 3);
     if is_read_only(args) {
-        command.arg("--no-optional-locks");
+        words.push("--no-optional-locks");
     }
-    command
-        .arg("-C")
-        .arg(root)
-        .args(args)
+    words.extend(["-C", root.as_ref()]);
+    words.extend_from_slice(args);
+    let mut env = vec![
         // Nobody can see a prompt from here, so a command that wants a
         // password, a passphrase or a host-key answer must fail instead.
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GCM_INTERACTIVE", "never")
+        ("GIT_TERMINAL_PROMPT", "0"),
+        ("GCM_INTERACTIVE", "never"),
         // English, so "not a git repository" can be told from a real failure.
-        .env("LC_ALL", "C")
+        ("LC_ALL", "C"),
+    ];
+    // Left alone when the person has their own, so an ssh wrapper or a
+    // specific key still works: the host passes it to git itself, and a
+    // `GIT_SSH_COMMAND` set here would also override a `GIT_SSH` wrapper.
+    if ["GIT_SSH_COMMAND", "GIT_SSH"]
+        .iter()
+        .all(|variable| host.environment_variable(variable).is_none())
+    {
+        env.push(("GIT_SSH_COMMAND", "ssh -o BatchMode=yes"));
+    }
+    let mut command = host
+        .command("git", &words, &env, None)
+        .map_err(|error| format!("{error:#}"))?;
+    command
         .stdin(Stdio::null())
         // Dropping the future (a closed dialog, a timeout) must stop git, not
         // leave a fetch running against the network.
         .kill_on_drop(true);
-    // Left alone when the person has their own, so an ssh wrapper or a
-    // specific key still works.
-    if std::env::var_os("GIT_SSH_COMMAND").is_none() {
-        command.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
-    }
+    let not_installed = || match host.remote_name() {
+        Some(host) => format!("git is not installed on {host}"),
+        None => "git is not installed".to_string(),
+    };
     let output = command.output().await.map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
-            "git is not installed".to_string()
+            not_installed()
         } else {
             format!("could not run git: {error}")
         }
     })?;
+    // Through a remote host's wrapper a missing `git` is `env`'s 127, since the
+    // wrapper itself always starts. Run here, 127 is git's own answer -- `git
+    // switch` hands back a post-checkout hook's status -- and not a missing git.
+    if host.remote_name().is_some() && output.status.code() == Some(COMMAND_NOT_FOUND_EXIT) {
+        return Err(not_installed());
+    }
     Ok(GitOutput {
         code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -205,14 +224,22 @@ async fn run_git(root: &Path, args: &[&str]) -> Result<GitOutput, String> {
     })
 }
 
+/// Exit status a POSIX shell, and `env`, give for a program not on `PATH`.
+const COMMAND_NOT_FOUND_EXIT: i32 = 127;
+
 /// `git <args>` that must succeed; stdout on success, git's words on failure.
-async fn git(root: &Path, step: &'static str, args: &[&str]) -> Result<String, GitFailure> {
+async fn git(
+    host: &dyn CommandHost,
+    root: &Path,
+    step: &'static str,
+    args: &[&str],
+) -> Result<String, GitFailure> {
     let failure = |message: String| GitFailure {
         step,
         conflicting_files: conflicting_files(&message),
         message,
     };
-    let output = run_git(root, args).await.map_err(failure)?;
+    let output = run_git(host, root, args).await.map_err(failure)?;
     if output.success() {
         return Ok(output.stdout);
     }
@@ -245,8 +272,11 @@ fn conflicting_files(message: &str) -> Vec<String> {
 /// are not checkouts, and those simply get no button. `Err` is anything else
 /// (git missing, a lock, a broken repository) -- the caller must not treat that
 /// as "no checkout", or a transient failure would make the row blink out.
-pub(crate) async fn inspect(directory: PathBuf) -> Result<Option<Checkout>, GitFailure> {
-    let toplevel = match run_git(&directory, &["rev-parse", "--show-toplevel"]).await {
+pub(crate) async fn inspect(
+    host: &dyn CommandHost,
+    directory: PathBuf,
+) -> Result<Option<Checkout>, GitFailure> {
+    let toplevel = match run_git(host, &directory, &["rev-parse", "--show-toplevel"]).await {
         Ok(output) if output.success() => output.stdout,
         Ok(output) if output.stderr.contains("not a git repository") => return Ok(None),
         Ok(output) => {
@@ -259,7 +289,7 @@ pub(crate) async fn inspect(directory: PathBuf) -> Result<Option<Checkout>, GitF
         Err(message) => return Err(failure("inspect", message, None)),
     };
     let root = PathBuf::from(toplevel.trim());
-    let state = current_state(&root).await?;
+    let state = current_state(host, &root).await?;
     Ok(Some(Checkout { root, state }))
 }
 
@@ -276,8 +306,8 @@ fn failure(step: &'static str, message: String, code: Option<i32>) -> GitFailure
 }
 
 /// `Some(branch)` when HEAD is on one, `None` when it is detached.
-async fn current_branch(root: &Path) -> Result<Option<String>, GitFailure> {
-    let symbolic = run_git(root, &["symbolic-ref", "--short", "--quiet", "HEAD"])
+async fn current_branch(host: &dyn CommandHost, root: &Path) -> Result<Option<String>, GitFailure> {
+    let symbolic = run_git(host, root, &["symbolic-ref", "--short", "--quiet", "HEAD"])
         .await
         .map_err(|message| failure("inspect", message, None))?;
     if symbolic.success() {
@@ -295,15 +325,19 @@ async fn current_branch(root: &Path) -> Result<Option<String>, GitFailure> {
     Ok(None)
 }
 
-pub(crate) async fn current_state(root: &Path) -> Result<CheckoutState, GitFailure> {
-    if let Some(branch) = current_branch(root).await? {
+pub(crate) async fn current_state(
+    host: &dyn CommandHost,
+    root: &Path,
+) -> Result<CheckoutState, GitFailure> {
+    if let Some(branch) = current_branch(host, root).await? {
         return Ok(CheckoutState::Branch(branch));
     }
-    let short_sha = git(root, "inspect", &["rev-parse", "--short", "HEAD"])
+    let short_sha = git(host, root, "inspect", &["rev-parse", "--short", "HEAD"])
         .await?
         .trim()
         .to_string();
     let pointing = git(
+        host,
         root,
         "inspect",
         &[
@@ -350,11 +384,15 @@ fn names_pointing_at_head(refnames: &str) -> Vec<String> {
 /// The short id of HEAD when it is detached and no branch or tag contains it:
 /// the commits there are reachable only through the reflog once the checkout
 /// moves away.
-pub(crate) async fn orphaned_head(root: &Path) -> Result<Option<String>, GitFailure> {
-    if current_branch(root).await?.is_some() {
+pub(crate) async fn orphaned_head(
+    host: &dyn CommandHost,
+    root: &Path,
+) -> Result<Option<String>, GitFailure> {
+    if current_branch(host, root).await?.is_some() {
         return Ok(None);
     }
     let containing = git(
+        host,
         root,
         "inspect",
         &[
@@ -372,13 +410,16 @@ pub(crate) async fn orphaned_head(root: &Path) -> Result<Option<String>, GitFail
     if !containing.trim().is_empty() {
         return Ok(None);
     }
-    let short_sha = git(root, "inspect", &["rev-parse", "--short", "HEAD"]).await?;
+    let short_sha = git(host, root, "inspect", &["rev-parse", "--short", "HEAD"]).await?;
     Ok(Some(short_sha.trim().to_string()))
 }
 
 /// How many paths `git status` reports as changed, untracked included.
-pub(crate) async fn uncommitted_changes(root: &Path) -> Result<usize, GitFailure> {
-    let status = git(root, "status", &["status", "--porcelain"]).await?;
+pub(crate) async fn uncommitted_changes(
+    host: &dyn CommandHost,
+    root: &Path,
+) -> Result<usize, GitFailure> {
+    let status = git(host, root, "status", &["status", "--porcelain"]).await?;
     Ok(status
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -387,8 +428,11 @@ pub(crate) async fn uncommitted_changes(root: &Path) -> Result<usize, GitFailure
 
 /// The remote to fetch and list: `origin` when there is one, otherwise the
 /// first listed. `None` for a repository with no remote at all.
-pub(crate) async fn select_remote(root: &Path) -> Result<Option<String>, GitFailure> {
-    let remotes = git(root, "list remotes", &["remote"]).await?;
+pub(crate) async fn select_remote(
+    host: &dyn CommandHost,
+    root: &Path,
+) -> Result<Option<String>, GitFailure> {
+    let remotes = git(host, root, "list remotes", &["remote"]).await?;
     let names: Vec<&str> = remotes
         .lines()
         .map(str::trim)
@@ -401,8 +445,12 @@ pub(crate) async fn select_remote(root: &Path) -> Result<Option<String>, GitFail
         .map(|name| name.to_string()))
 }
 
-pub(crate) async fn fetch(root: &Path, remote: &str) -> Result<(), GitFailure> {
-    git(root, "fetch", &["fetch", remote, "--prune"])
+pub(crate) async fn fetch(
+    host: &dyn CommandHost,
+    root: &Path,
+    remote: &str,
+) -> Result<(), GitFailure> {
+    git(host, root, "fetch", &["fetch", remote, "--prune"])
         .await
         .map(|_| ())
 }
@@ -428,6 +476,7 @@ pub(crate) async fn within(
 
 /// Branches of `remote` (when there is one), then the other worktrees.
 pub(crate) async fn list_targets(
+    host: &dyn CommandHost,
     root: &Path,
     remote: Option<&str>,
 ) -> Result<Vec<Target>, GitFailure> {
@@ -435,6 +484,7 @@ pub(crate) async fn list_targets(
     if let Some(remote) = remote {
         let prefix = format!("refs/remotes/{remote}/");
         let refs = git(
+            host,
             root,
             "list branches",
             &["for-each-ref", "--format=%(refname)", &prefix],
@@ -448,7 +498,13 @@ pub(crate) async fn list_targets(
         );
     }
 
-    let worktrees = git(root, "list worktrees", &["worktree", "list", "--porcelain"]).await?;
+    let worktrees = git(
+        host,
+        root,
+        "list worktrees",
+        &["worktree", "list", "--porcelain"],
+    )
+    .await?;
     targets.extend(
         parse_worktrees(&worktrees)
             .into_iter()
@@ -499,10 +555,14 @@ fn parse_worktrees(text: &str) -> Vec<Target> {
 /// The target is resolved to a commit id first and the switch is to that id: a
 /// name that git cannot resolve fails here with a clear message instead of
 /// being handed to `switch`, which would try to read it as a branch to create.
-pub(crate) async fn switch(root: &Path, target: &Target) -> Result<String, GitFailure> {
+pub(crate) async fn switch(
+    host: &dyn CommandHost,
+    root: &Path,
+    target: &Target,
+) -> Result<String, GitFailure> {
     let revision = target.revision();
     let spec = format!("{revision}^{{commit}}");
-    let resolved = run_git(root, &["rev-parse", "--verify", "--quiet", &spec])
+    let resolved = run_git(host, root, &["rev-parse", "--verify", "--quiet", &spec])
         .await
         .map_err(|message| GitFailure {
             step: "switch",
@@ -520,7 +580,7 @@ pub(crate) async fn switch(root: &Path, target: &Target) -> Result<String, GitFa
             conflicting_files: Vec::new(),
         });
     }
-    git(root, "switch", &["switch", "--detach", &commit]).await?;
+    git(host, root, "switch", &["switch", "--detach", &commit]).await?;
     Ok(commit)
 }
 
@@ -610,6 +670,7 @@ pub(crate) mod fixture {
 mod tests {
     use super::fixture::{fixture, run};
     use super::*;
+    use util::command::LocalCommandHost;
 
     fn block<T>(future: impl std::future::Future<Output = T>) -> T {
         smol::block_on(future)
@@ -618,7 +679,7 @@ mod tests {
     #[test]
     fn on_a_branch_the_state_is_its_name() {
         let fixture = fixture();
-        let checkout = block(inspect(fixture.work))
+        let checkout = block(inspect(&LocalCommandHost, fixture.work))
             .expect("inspects")
             .expect("a checkout");
         assert_eq!(checkout.state, CheckoutState::Branch("main".into()));
@@ -628,7 +689,10 @@ mod tests {
     #[test]
     fn a_directory_that_is_not_a_checkout_has_none() {
         let temp = tempfile::tempdir().expect("tempdir");
-        assert_eq!(block(inspect(temp.path().to_path_buf())), Ok(None));
+        assert_eq!(
+            block(inspect(&LocalCommandHost, temp.path().to_path_buf())),
+            Ok(None)
+        );
     }
 
     #[test]
@@ -636,7 +700,7 @@ mod tests {
         let fixture = fixture();
         let nested = fixture.work.join("deep");
         std::fs::create_dir_all(&nested).expect("mkdir");
-        let checkout = block(inspect(nested))
+        let checkout = block(inspect(&LocalCommandHost, nested))
             .expect("inspects")
             .expect("a checkout");
         assert_eq!(checkout.root, fixture.work);
@@ -645,13 +709,14 @@ mod tests {
     #[test]
     fn detached_with_a_branch_on_it_names_the_branch() {
         let fixture = fixture();
-        block(fetch(&fixture.work, "origin")).expect("fetch");
+        block(fetch(&LocalCommandHost, &fixture.work, "origin")).expect("fetch");
         block(switch(
+            &LocalCommandHost,
             &fixture.work,
             &Target::remote_branch("origin", "fix.x"),
         ))
         .expect("switch");
-        let state = block(current_state(&fixture.work)).expect("state");
+        let state = block(current_state(&LocalCommandHost, &fixture.work)).expect("state");
         let CheckoutState::Detached { short_sha, names } = &state else {
             panic!("expected detached, got {state:?}");
         };
@@ -665,17 +730,18 @@ mod tests {
     #[test]
     fn deleting_the_branch_the_checkout_was_detached_from_reads_as_no_branch_here() {
         let fixture = fixture();
-        block(fetch(&fixture.work, "origin")).expect("fetch");
+        block(fetch(&LocalCommandHost, &fixture.work, "origin")).expect("fetch");
         block(switch(
+            &LocalCommandHost,
             &fixture.work,
             &Target::remote_branch("origin", "fix.x"),
         ))
         .expect("switch");
 
         run(&fixture.origin, &["branch", "-D", "fix.x"]);
-        block(fetch(&fixture.work, "origin")).expect("fetch --prune");
+        block(fetch(&LocalCommandHost, &fixture.work, "origin")).expect("fetch --prune");
 
-        let state = block(current_state(&fixture.work)).expect("state");
+        let state = block(current_state(&LocalCommandHost, &fixture.work)).expect("state");
         assert!(state.points_nowhere(), "got {state:?}");
         assert!(state.label().ends_with("no branch points here (deleted?)"));
         assert_eq!(
@@ -699,7 +765,12 @@ mod tests {
                 "origin/fix.x",
             ],
         );
-        let targets = block(list_targets(&fixture.work, Some("origin"))).expect("targets");
+        let targets = block(list_targets(
+            &LocalCommandHost,
+            &fixture.work,
+            Some("origin"),
+        ))
+        .expect("targets");
 
         let branches: Vec<&str> = targets
             .iter()
@@ -740,12 +811,17 @@ mod tests {
         );
         std::fs::write(other.join("scratch.txt"), "wip").expect("write");
 
-        let targets = block(list_targets(&fixture.work, Some("origin"))).expect("targets");
+        let targets = block(list_targets(
+            &LocalCommandHost,
+            &fixture.work,
+            Some("origin"),
+        ))
+        .expect("targets");
         let worktree = targets
             .into_iter()
             .find(|target| matches!(target, Target::Worktree { .. }))
             .expect("a worktree");
-        block(switch(&fixture.work, &worktree)).expect("switch");
+        block(switch(&LocalCommandHost, &fixture.work, &worktree)).expect("switch");
 
         assert_eq!(
             std::fs::read_to_string(fixture.work.join("a.txt")).expect("read"),
@@ -757,19 +833,26 @@ mod tests {
     #[test]
     fn uncommitted_changes_are_counted_untracked_included() {
         let fixture = fixture();
-        assert_eq!(block(uncommitted_changes(&fixture.work)), Ok(0));
+        assert_eq!(
+            block(uncommitted_changes(&LocalCommandHost, &fixture.work)),
+            Ok(0)
+        );
         std::fs::write(fixture.work.join("a.txt"), "local").expect("write");
         std::fs::write(fixture.work.join("new.txt"), "new").expect("write");
-        assert_eq!(block(uncommitted_changes(&fixture.work)), Ok(2));
+        assert_eq!(
+            block(uncommitted_changes(&LocalCommandHost, &fixture.work)),
+            Ok(2)
+        );
     }
 
     #[test]
     fn a_conflicting_local_change_makes_the_switch_fail_and_names_the_file() {
         let fixture = fixture();
-        block(fetch(&fixture.work, "origin")).expect("fetch");
+        block(fetch(&LocalCommandHost, &fixture.work, "origin")).expect("fetch");
         std::fs::write(fixture.work.join("a.txt"), "local").expect("write");
 
         let failure = block(switch(
+            &LocalCommandHost,
             &fixture.work,
             &Target::remote_branch("origin", "fix.x"),
         ))
@@ -777,7 +860,7 @@ mod tests {
         assert_eq!(failure.step, "switch");
         assert_eq!(failure.conflicting_files, vec!["a.txt".to_string()]);
         assert_eq!(
-            block(current_state(&fixture.work)),
+            block(current_state(&LocalCommandHost, &fixture.work)),
             Ok(CheckoutState::Branch("main".into())),
             "a refused switch leaves the checkout where it was"
         );
@@ -786,9 +869,10 @@ mod tests {
     #[test]
     fn a_non_conflicting_local_change_is_carried_over() {
         let fixture = fixture();
-        block(fetch(&fixture.work, "origin")).expect("fetch");
+        block(fetch(&LocalCommandHost, &fixture.work, "origin")).expect("fetch");
         std::fs::write(fixture.work.join("mine.txt"), "mine").expect("write");
         block(switch(
+            &LocalCommandHost,
             &fixture.work,
             &Target::remote_branch("origin", "fix.x"),
         ))
@@ -800,6 +884,7 @@ mod tests {
     fn a_branch_that_no_longer_exists_fails_before_anything_moves() {
         let fixture = fixture();
         let failure = block(switch(
+            &LocalCommandHost,
             &fixture.work,
             &Target::remote_branch("origin", "gone"),
         ))
@@ -811,7 +896,8 @@ mod tests {
     fn a_failing_fetch_is_reported_as_a_fetch_failure() {
         let fixture = fixture();
         std::fs::remove_dir_all(&fixture.origin).expect("remove origin");
-        let failure = block(fetch(&fixture.work, "origin")).expect_err("origin is gone");
+        let failure =
+            block(fetch(&LocalCommandHost, &fixture.work, "origin")).expect_err("origin is gone");
         assert_eq!(failure.step, "fetch");
         assert!(!failure.message.is_empty());
     }
@@ -844,7 +930,7 @@ mod tests {
         let fixture = fixture();
         run(&fixture.work, &["switch", "--detach", "main"]);
         run(&fixture.work, &["branch", "-r", "-d", "origin/main"]);
-        let state = block(current_state(&fixture.work)).expect("state");
+        let state = block(current_state(&LocalCommandHost, &fixture.work)).expect("state");
         assert_eq!(state.label().split(" \u{b7} ").nth(1), Some("main"));
         assert!(!state.points_nowhere());
     }
@@ -855,7 +941,7 @@ mod tests {
         run(&fixture.work, &["switch", "--detach", "origin/fix.x"]);
         run(&fixture.work, &["branch", "-r", "-d", "origin/fix.x"]);
         run(&fixture.work, &["tag", "v1"]);
-        let state = block(current_state(&fixture.work)).expect("state");
+        let state = block(current_state(&LocalCommandHost, &fixture.work)).expect("state");
         assert_eq!(state.label().split(" \u{b7} ").nth(1), Some("tag v1"));
         assert!(!state.points_nowhere());
     }
@@ -866,24 +952,31 @@ mod tests {
         run(&fixture.work, &["switch", "--detach", "origin/fix.x"]);
         run(&fixture.work, &["branch", "local-fix"]);
         run(&fixture.work, &["tag", "v1"]);
-        let state = block(current_state(&fixture.work)).expect("state");
+        let state = block(current_state(&LocalCommandHost, &fixture.work)).expect("state");
         assert_eq!(state.label().split(" \u{b7} ").nth(1), Some("origin/fix.x"));
     }
 
     #[test]
     fn a_detached_head_no_ref_contains_is_orphaned() {
         let fixture = fixture();
-        assert_eq!(block(orphaned_head(&fixture.work)), Ok(None), "on a branch");
+        assert_eq!(
+            block(orphaned_head(&LocalCommandHost, &fixture.work)),
+            Ok(None),
+            "on a branch"
+        );
         run(&fixture.work, &["switch", "--detach", "origin/fix.x"]);
         assert_eq!(
-            block(orphaned_head(&fixture.work)),
+            block(orphaned_head(&LocalCommandHost, &fixture.work)),
             Ok(None),
             "a branch holds it"
         );
 
         run(&fixture.work, &["commit", "--allow-empty", "-m", "loose"]);
         let loose = run(&fixture.work, &["rev-parse", "--short", "HEAD"]);
-        assert_eq!(block(orphaned_head(&fixture.work)), Ok(Some(loose)));
+        assert_eq!(
+            block(orphaned_head(&LocalCommandHost, &fixture.work)),
+            Ok(Some(loose))
+        );
     }
 
     #[test]
@@ -891,11 +984,16 @@ mod tests {
         let fixture = fixture();
         run(&fixture.work, &["remote", "rename", "origin", "upstream"]);
         assert_eq!(
-            block(select_remote(&fixture.work)),
+            block(select_remote(&LocalCommandHost, &fixture.work)),
             Ok(Some("upstream".to_string()))
         );
-        block(fetch(&fixture.work, "upstream")).expect("fetch");
-        let targets = block(list_targets(&fixture.work, Some("upstream"))).expect("targets");
+        block(fetch(&LocalCommandHost, &fixture.work, "upstream")).expect("fetch");
+        let targets = block(list_targets(
+            &LocalCommandHost,
+            &fixture.work,
+            Some("upstream"),
+        ))
+        .expect("targets");
         assert_eq!(
             targets,
             vec![
@@ -904,7 +1002,7 @@ mod tests {
             ]
         );
         assert_eq!(targets[0].title(), "upstream/fix.x");
-        block(switch(&fixture.work, &targets[0])).expect("switch");
+        block(switch(&LocalCommandHost, &fixture.work, &targets[0])).expect("switch");
         assert_eq!(
             std::fs::read_to_string(fixture.work.join("a.txt")).expect("read"),
             "two"
@@ -924,14 +1022,20 @@ mod tests {
             ],
         );
         assert_eq!(
-            block(select_remote(&fixture.work)),
+            block(select_remote(&LocalCommandHost, &fixture.work)),
             Ok(Some("origin".to_string())),
             "origin wins over an earlier name"
         );
         run(&fixture.work, &["remote", "remove", "aaa"]);
         run(&fixture.work, &["remote", "remove", "origin"]);
-        assert_eq!(block(select_remote(&fixture.work)), Ok(None));
-        assert_eq!(block(list_targets(&fixture.work, None)), Ok(Vec::new()));
+        assert_eq!(
+            block(select_remote(&LocalCommandHost, &fixture.work)),
+            Ok(None)
+        );
+        assert_eq!(
+            block(list_targets(&LocalCommandHost, &fixture.work, None)),
+            Ok(Vec::new())
+        );
     }
 
     #[test]
@@ -968,6 +1072,66 @@ mod tests {
         }
         for write in ["fetch", "switch"] {
             assert!(!is_read_only(&[write]), "{write}");
+        }
+    }
+
+    /// A compose project's directory is a path on the engine's host, so git
+    /// is asked there, with its no-prompt settings given to git itself rather
+    /// than to the wrapper that reaches the host.
+    #[test]
+    fn git_runs_on_the_checkout_s_host_with_its_settings() {
+        let host = container::backend_test_suite::RecordingHost::new("Ubuntu-22.04");
+
+        let outcome = block(inspect(&host, PathBuf::from("/home/me/app")));
+
+        let recorded = host.recorded();
+        assert_eq!(recorded.len(), 1, "{recorded:?}");
+        assert_eq!(recorded[0].program, "git");
+        assert_eq!(
+            recorded[0].args,
+            [
+                "--no-optional-locks",
+                "-C",
+                "/home/me/app",
+                "rev-parse",
+                "--show-toplevel"
+            ]
+        );
+        for variable in [
+            "GIT_TERMINAL_PROMPT",
+            "GCM_INTERACTIVE",
+            "LC_ALL",
+            "GIT_SSH_COMMAND",
+        ] {
+            assert!(
+                recorded[0].env.iter().any(|(name, _)| name == variable),
+                "{variable} must reach git: {:?}",
+                recorded[0].env
+            );
+        }
+        let message = outcome.expect_err("the recorded git cannot start").message;
+        assert_eq!(message, "git is not installed on Ubuntu-22.04");
+    }
+
+    /// The host's own ssh setting already reaches git through the host; a
+    /// default set here would replace it, and `GIT_SSH_COMMAND` also wins over
+    /// a `GIT_SSH` wrapper.
+    #[test]
+    fn the_host_s_own_ssh_setting_is_left_to_reach_git() {
+        for variable in ["GIT_SSH_COMMAND", "GIT_SSH"] {
+            let host = container::backend_test_suite::RecordingHost::new("Ubuntu-22.04")
+                .with_environment(&[(variable, "/home/me/bin/ssh-wrapper")]);
+
+            block(inspect(&host, PathBuf::from("/home/me/app"))).ok();
+
+            let recorded = host.recorded();
+            assert!(
+                recorded.iter().all(|command| command
+                    .env
+                    .iter()
+                    .all(|(name, _)| name != "GIT_SSH_COMMAND")),
+                "with {variable} on the host no ssh command may be set here: {recorded:?}"
+            );
         }
     }
 }

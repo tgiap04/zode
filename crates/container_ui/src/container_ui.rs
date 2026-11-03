@@ -21,7 +21,8 @@ mod terminal;
 pub use container_panel::ContainerPanel;
 pub use standalone::WIDE_ENOUGH_FOR_EVERY_COLUMN;
 
-use gpui::{App, Context, WeakEntity};
+use gpui::{App, Context, Entity, WeakEntity};
+use project::Project;
 use ui::IconName;
 use workspace::Workspace;
 
@@ -31,22 +32,16 @@ use workspace::Workspace;
 /// `floating_pane` already consumes -- so a caller there never has to learn
 /// the words "Docker" or "Kubernetes" for itself.
 ///
-/// Always `ContainerPanel::default_backends`, never
-/// `container_panel::engines_for_a_new_view`: this is read once to build a
-/// menu's labels and glyphs, not to open a real view, so it must keep
-/// answering with the real three engines even under a test that has swapped
-/// the live list for fakes.
+/// Always `container_panel::ENGINES`, never a view's engines: this is read
+/// once to build a menu's labels and glyphs, not to open a real view, so it
+/// must keep answering with the real three engines even under a test that has
+/// swapped the live list for fakes -- and it builds no backend, so it runs
+/// nothing anywhere.
 pub fn engine_marks() -> impl Iterator<Item = (usize, IconName, &'static str)> {
-    ContainerPanel::default_backends()
+    container_panel::ENGINES
         .into_iter()
         .enumerate()
-        .map(|(index, backend)| {
-            (
-                index,
-                engine_mark_icon(backend.kind()),
-                backend.kind().label(),
-            )
-        })
+        .map(|(index, kind)| (index, engine_mark_icon(kind), kind.label()))
 }
 
 /// The glyph for an engine, kept in step with `render::engine_icon` by hand.
@@ -73,17 +68,19 @@ fn engine_mark_icon(kind: container::BackendKind) -> IconName {
 /// outside this crate needs this function to set it rather than reaching for
 /// the field itself.
 ///
-/// Reads through `container_panel::engines_for_a_new_view`, not
-/// `default_backends` directly, so a test that opens a container tab through
-/// this path is exercising the same swappable engine list `container_ui`'s
-/// own tests already rely on -- not spawning a real `docker`.
+/// Takes `project` from the caller rather than reading it off `workspace`,
+/// which may be leased while this runs. Its engines run on that project's
+/// host, through `container_panel::engines_for_project`, which is also what
+/// lets a test that opens a container tab here swap in fakes -- not spawn a
+/// real `docker`.
 pub fn standalone_in_workspace(
     engine: usize,
     workspace: WeakEntity<Workspace>,
+    project: &Entity<Project>,
     cx: &mut Context<ContainerPanel>,
 ) -> ContainerPanel {
-    let backends = container_panel::engines_for_a_new_view(cx);
-    let mut panel = ContainerPanel::standalone(backends, engine, cx);
+    let engines = container_panel::engines_for_project(project, cx);
+    let mut panel = ContainerPanel::standalone(engines, engine, cx);
     panel.workspace = Some(workspace);
     panel
 }
@@ -157,6 +154,13 @@ pub(crate) struct EnginesForTest(pub(crate) Vec<std::sync::Arc<dyn container::Co
 
 #[cfg(any(test, feature = "test-support"))]
 impl gpui::Global for EnginesForTest {}
+
+/// What a local project's engines run through, when a test has to watch it.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) struct LocalHostForTest(pub(crate) std::sync::Arc<dyn util::command::CommandHost>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl gpui::Global for LocalHostForTest {}
 
 /// Builds every tab and window opened from here over engines that never leave
 /// the process.

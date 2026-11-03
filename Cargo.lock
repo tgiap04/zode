@@ -2366,6 +2366,7 @@ dependencies = [
 name = "container"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "container",
  "futures 0.3.32",

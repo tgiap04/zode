@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use util::command::Command;
+use util::command::{Command, CommandHost};
 
 use crate::backend::ContainerError;
 
@@ -139,11 +139,19 @@ pub(crate) fn parse(stdout: &str) -> Result<Kubeconfig, ContainerError> {
 ///
 /// `path` goes *before* the subcommand and *replaces* the `$KUBECONFIG` merge
 /// described at the top of this module -- see there for how that was checked.
-pub(crate) fn command(program: &str, path: Option<&Path>) -> Command {
-    let mut command = Command::new(program);
-    if let Some(path) = path {
-        command.arg("--kubeconfig").arg(path);
+///
+/// Built through `host`, so the file `kubectl` merges is the one on the
+/// machine the project lives on.
+pub(crate) fn command(
+    host: &dyn CommandHost,
+    program: &str,
+    path: Option<&Path>,
+) -> Result<Command, ContainerError> {
+    let path = path.map(|path| path.to_string_lossy());
+    let mut args: Vec<&str> = Vec::with_capacity(6);
+    if let Some(path) = &path {
+        args.extend(["--kubeconfig", path.as_ref()]);
     }
-    command.args(["config", "view", "-o", "json"]);
-    command
+    args.extend(["config", "view", "-o", "json"]);
+    crate::backend::host_command(host, program, &args)
 }

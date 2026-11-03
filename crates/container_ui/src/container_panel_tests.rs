@@ -328,7 +328,10 @@ mod engines {
     async fn a_fresh_panel_offers_every_engine_and_starts_on_docker(cx: &mut TestAppContext) {
         init_test(cx);
         let (panel, cx) = cx.add_window_view(|_window, cx| {
-            ContainerPanel::with_backends(ContainerPanel::default_backends(), cx)
+            ContainerPanel::with_backends(
+                ContainerPanel::default_backends(Arc::new(util::command::LocalCommandHost)),
+                cx,
+            )
         });
         cx.run_until_parked();
         panel.read_with(cx, |panel, _| {
@@ -2658,5 +2661,309 @@ mod search {
         panel.update(cx, |panel, cx| panel.choose_kind(ResourceKind::Pod, cx));
         cx.run_until_parked();
         assert_eq!(panel.read_with(cx, |panel, cx| panel.query(cx)), "nginx");
+    }
+}
+
+/// Engines that run on a recording host, with a second recorder standing in
+/// for this machine, so a test can tell which machine was asked.
+mod on_the_project_s_host {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+    use std::sync::Arc;
+
+    use container::backend_test_suite::RecordingHost;
+    use container::{ContainerError, ResourceKind};
+    use futures::channel::oneshot;
+    use gpui::{AppContext as _, Task, TestAppContext};
+    use util::command::CommandHost;
+
+    use super::init_test;
+    use crate::container_panel::{ContainerPanel, Engines, ListState, engines_for_project};
+
+    type HostTask = Task<anyhow::Result<Arc<dyn CommandHost>>>;
+
+    /// Real engines, and this machine's host replaced by a recorder.
+    fn record_this_machine(cx: &mut TestAppContext) -> Arc<RecordingHost> {
+        init_test(cx);
+        let this_machine = Arc::new(RecordingHost::this_machine());
+        cx.update(|cx| {
+            cx.remove_global::<crate::EnginesForTest>();
+            cx.set_global(crate::LocalHostForTest(this_machine.clone()));
+        });
+        this_machine
+    }
+
+    fn programs(host: &RecordingHost) -> Vec<String> {
+        host.recorded()
+            .into_iter()
+            .map(|command| format!("{} {}", command.program, command.args.join(" ")))
+            .collect()
+    }
+
+    /// A remote project named `host_name` whose host answers with `answers`,
+    /// one per time it is asked.
+    fn resolving(host_name: &str, answers: Vec<HostTask>) -> Engines {
+        let answers = RefCell::new(VecDeque::from(answers));
+        Engines::Resolving {
+            resolve: Rc::new(move |_cx| answers.borrow_mut().pop_front()),
+            host_name: Some(host_name.to_string()),
+        }
+    }
+
+    fn answer(cx: &TestAppContext, host: Arc<RecordingHost>) -> HostTask {
+        cx.background_spawn(async move { Ok::<Arc<dyn CommandHost>, _>(host) })
+    }
+
+    fn unreachable(cx: &TestAppContext) -> HostTask {
+        cx.background_spawn(async {
+            Err::<Arc<dyn CommandHost>, _>(anyhow::anyhow!("Ubuntu-22.04 is not connected"))
+        })
+    }
+
+    #[gpui::test]
+    async fn a_remote_view_runs_nothing_here_before_or_after_its_host_answers(
+        cx: &mut TestAppContext,
+    ) {
+        let this_machine = record_this_machine(cx);
+        let remote = Arc::new(RecordingHost::new("Ubuntu-22.04"));
+        let (send, answered) = oneshot::channel::<Arc<dyn CommandHost>>();
+        let pending = cx.background_spawn(async move {
+            answered
+                .await
+                .map_err(|_| anyhow::anyhow!("the host was never reached"))
+        });
+
+        let (panel, cx) = cx.add_window_view(|_window, cx| {
+            ContainerPanel::standalone(resolving("Ubuntu-22.04", vec![pending]), 0, cx)
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            assert!(
+                panel.backends.is_empty(),
+                "no engine before there is a host"
+            );
+            assert!(matches!(panel.state, ListState::Loading));
+            assert_eq!(
+                panel.host_name().as_deref(),
+                Some("Ubuntu-22.04"),
+                "the header says which machine while it is being reached"
+            );
+        });
+        assert_eq!(programs(&this_machine), Vec::<String>::new());
+        assert_eq!(programs(&remote), Vec::<String>::new());
+
+        send.send(remote.clone())
+            .map_err(|_| "the panel stopped waiting")
+            .expect("the panel is waiting for its host");
+        cx.run_until_parked();
+
+        assert_eq!(
+            programs(&this_machine),
+            Vec::<String>::new(),
+            "a remote view must never ask this machine's engines"
+        );
+        assert_eq!(
+            programs(&remote),
+            vec![
+                "docker ps -a --format {{json .}}".to_string(),
+                "docker events --format {{json .}}".to_string(),
+            ]
+        );
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.host_name().as_deref(), Some("Ubuntu-22.04"));
+            assert_eq!(panel.backends.len(), 3);
+            assert!(
+                !panel.offers_local_config_file_picker(),
+                "this machine's file dialog cannot choose a file on the host"
+            );
+        });
+    }
+
+    #[gpui::test]
+    async fn a_host_that_cannot_be_reached_is_said_and_nothing_runs_here(cx: &mut TestAppContext) {
+        let this_machine = record_this_machine(cx);
+        let failed = unreachable(cx);
+
+        let (panel, cx) = cx.add_window_view(|_window, cx| {
+            ContainerPanel::standalone(resolving("Ubuntu-22.04", vec![failed]), 0, cx)
+        });
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            match &panel.state {
+                ListState::Failed(ContainerError::HostUnavailable { detail }) => {
+                    assert_eq!(detail, "Ubuntu-22.04 is not connected")
+                }
+                _ => panic!("an unreachable host must be its own error"),
+            }
+            assert_eq!(panel.host_name().as_deref(), Some("Ubuntu-22.04"));
+        });
+        assert_eq!(programs(&this_machine), Vec::<String>::new());
+    }
+
+    /// The failed view's Refresh is the only way back to a host that has
+    /// since come up; it must ask the project again, not do nothing.
+    #[gpui::test]
+    async fn refreshing_a_view_whose_host_failed_asks_for_the_host_again(cx: &mut TestAppContext) {
+        let this_machine = record_this_machine(cx);
+        let remote = Arc::new(RecordingHost::new("Ubuntu-22.04"));
+        let answers = vec![unreachable(cx), answer(cx, remote.clone())];
+
+        let (panel, cx) = cx.add_window_view(|_window, cx| {
+            ContainerPanel::standalone(resolving("Ubuntu-22.04", answers), 0, cx)
+        });
+        cx.run_until_parked();
+        assert!(panel.read_with(cx, |panel, _| matches!(
+            panel.state,
+            ListState::Failed(ContainerError::HostUnavailable { .. })
+        )));
+        assert_eq!(programs(&remote), Vec::<String>::new());
+
+        panel.update(cx, |panel, cx| panel.reload(cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            programs(&remote),
+            vec![
+                "docker ps -a --format {{json .}}".to_string(),
+                "docker events --format {{json .}}".to_string(),
+            ]
+        );
+        assert_eq!(programs(&this_machine), Vec::<String>::new());
+        panel.read_with(cx, |panel, _| assert_eq!(panel.backends.len(), 3));
+    }
+
+    /// No file can be picked on the host from here, so the host's own
+    /// kubeconfig is what the context menu offers.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_remote_kubernetes_view_offers_the_host_s_own_contexts(cx: &mut TestAppContext) {
+        let this_machine = record_this_machine(cx);
+        let kubeconfig = r#"{"contexts":[{"name":"dev"},{"name":"prod","context":{"namespace":"web"}}],"current-context":"dev"}"#;
+        let remote = Arc::new(RecordingHost::answering_with(
+            "Ubuntu-22.04",
+            "printf",
+            &["%s", kubeconfig],
+        ));
+        let answers = vec![answer(cx, remote.clone())];
+
+        // `printf` is a real process; parking lets its output arrive.
+        cx.executor().allow_parking();
+        let (panel, cx) = cx.add_window_view(|_window, cx| {
+            ContainerPanel::standalone(resolving("Ubuntu-22.04", answers), 2, cx)
+        });
+        cx.run_until_parked();
+        let reading = panel.update(cx, |panel, _| panel.config_load.take());
+        if let Some(reading) = reading {
+            reading.await;
+        }
+        cx.run_until_parked();
+
+        panel.read_with(cx, |panel, _| {
+            let names: Vec<&str> = panel
+                .config_targets
+                .iter()
+                .map(|target| target.name.as_str())
+                .collect();
+            assert_eq!(names, ["dev", "prod"]);
+            assert!(panel.offers_config_picker());
+            assert_eq!(panel.active_kind, ResourceKind::Pod);
+        });
+        assert!(
+            programs(&remote).contains(&"kubectl config view -o json".to_string()),
+            "{:?}",
+            programs(&remote)
+        );
+        assert_eq!(programs(&this_machine), Vec::<String>::new());
+    }
+
+    #[gpui::test]
+    async fn a_local_project_s_engines_run_here_from_the_first_frame(cx: &mut TestAppContext) {
+        let this_machine = record_this_machine(cx);
+        let fs = fs::FakeFs::new(cx.executor());
+        let project = project::Project::test(fs, [] as [&std::path::Path; 0], cx).await;
+
+        let (panel, cx) = cx.add_window_view(|_window, cx| {
+            let engines = engines_for_project(&project, cx);
+            ContainerPanel::standalone(engines, 0, cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            programs(&this_machine),
+            vec![
+                "docker ps -a --format {{json .}}".to_string(),
+                "docker events --format {{json .}}".to_string(),
+            ]
+        );
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(panel.host_name(), None);
+            assert!(panel.offers_local_config_file_picker());
+        });
+    }
+
+    /// A project really opened over a remote server, through both ways a view
+    /// is opened in a workspace: the views wait for that project's host and
+    /// never ask this machine meanwhile or after.
+    #[gpui::test]
+    async fn a_remote_project_s_views_wait_for_its_host_and_never_run_here(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let this_machine = record_this_machine(cx);
+        let fs = fs::FakeFs::new(cx.executor());
+        let (project, _server) = project::Project::test_remote(fs, cx, server_cx).await;
+        let host_name = project.read_with(cx, |project, cx| {
+            project
+                .remote_client()
+                .expect("a remote project has a remote client")
+                .read(cx)
+                .connection_options()
+                .display_name()
+        });
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace =
+            multi_workspace.read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone());
+
+        let pane_view = workspace.update_in(cx, |_, _, cx| {
+            let handle = cx.weak_entity();
+            cx.new(|cx| crate::standalone_in_workspace(0, handle, &project, cx))
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            crate::standalone::open_in_editor_tab(workspace, window, cx)
+        });
+        let tab = workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.items_of_type::<ContainerPanel>(cx).next()
+            })
+            .expect("the tab was opened");
+
+        for view in [&pane_view, &tab] {
+            view.read_with(cx, |panel, _| {
+                assert!(
+                    panel.backends.is_empty(),
+                    "no engine before the host answers"
+                );
+                assert_eq!(panel.host_name().as_deref(), Some(host_name.as_str()));
+            });
+        }
+        cx.run_until_parked();
+
+        for view in [&pane_view, &tab] {
+            view.read_with(cx, |panel, _| {
+                assert_eq!(panel.backends.len(), 3);
+                assert!(panel.command_host.is_some());
+                assert_eq!(panel.host_name().as_deref(), Some(host_name.as_str()));
+            });
+        }
+        assert_eq!(
+            programs(&this_machine),
+            Vec::<String>::new(),
+            "a remote project's views must never ask this machine's engines"
+        );
     }
 }

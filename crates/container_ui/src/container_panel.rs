@@ -1,15 +1,18 @@
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use container::kubeconfig::ConfigTarget;
 use container::{
-    BackendEvent, ContainerBackend, ContainerError, DestructivePlan, DockerBackend,
+    BackendEvent, BackendKind, ContainerBackend, ContainerError, DestructivePlan, DockerBackend,
     KubernetesBackend, PruneScope, ResourceAction, ResourceKind,
 };
 use futures::StreamExt as _;
 use futures::future::Either;
+use project::Project;
 use std::collections::HashMap;
 use std::time::Duration;
+use util::command::{CommandHost, LocalCommandHost};
 
 /// How often the list is re-read when nothing has said it changed.
 ///
@@ -18,6 +21,23 @@ use std::time::Duration;
 /// half a minute; slow enough that a machine with the column open all day is not
 /// running `docker ps` every second.
 const REFRESH_TICK: Duration = Duration::from_secs(30);
+
+/// Every engine a view offers, in the order the switcher shows them.
+pub(crate) const ENGINES: [BackendKind; 3] = [
+    BackendKind::Docker,
+    BackendKind::Podman,
+    BackendKind::Kubernetes,
+];
+
+/// The kind a view on engine `active` starts on: that engine's first, since
+/// another engine's first may be one it has no word for (Kubernetes lists no
+/// containers).
+fn first_kind(backends: &[Arc<dyn ContainerBackend>], active: usize) -> ResourceKind {
+    backends
+        .get(active)
+        .and_then(|backend| backend.supported_kinds().first().copied())
+        .unwrap_or(ResourceKind::Container)
+}
 use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Task, Window};
 use ui::prelude::*;
 use workspace::Workspace;
@@ -216,8 +236,8 @@ pub struct ContainerPanel {
     /// afterwards knows which file it belongs to.
     ///
     /// Not persisted -- there is no settings key for this panel, so each new tab
-    /// or OS window starts back at `default_backends()` and this is `None`
-    /// again. See the module's own note on that deferral.
+    /// or OS window starts back at its project's default engines and this is
+    /// `None` again. See the module's own note on that deferral.
     pub(crate) config_path: Option<PathBuf>,
     /// What the chosen file offered the last time it was read.
     pub(crate) config_targets: Vec<ConfigTarget>,
@@ -227,6 +247,21 @@ pub struct ContainerPanel {
     /// same reason as `load`: dropping the panel mid-read must not leave a
     /// `kubectl config view` still running for a view that is already gone.
     pub(crate) config_load: Option<Task<()>>,
+    /// The machine the engines run on, which is also where a compose project's
+    /// checkout is: this one, or the remote project's host.
+    ///
+    /// `None` while a remote project's host is still being reached. There are
+    /// no engines until it is, so nothing runs here in the meantime.
+    pub(crate) command_host: Option<Arc<dyn CommandHost>>,
+    /// Reaching the remote host. Held so a closed view stops waiting; `None`
+    /// once it has answered either way.
+    pub(crate) host_load: Option<Task<()>>,
+    /// Asks the project for its host again, so a host that could not be
+    /// reached is retried on refresh. `None` for a view built over a host.
+    pub(crate) resolve_host: Option<ResolveHost>,
+    /// The remote project's name for its host, shown while the host itself is
+    /// still being reached or could not be.
+    pub(crate) pending_host_name: Option<String>,
     /// The search field over the list, made on first draw.
     ///
     /// Kept across engine and kind switches: somebody looking for one thing
@@ -239,19 +274,72 @@ pub enum ContainerPanelEvent {}
 impl EventEmitter<ContainerPanelEvent> for ContainerPanel {}
 impl EventEmitter<PanelEvent> for ContainerPanel {}
 
-/// The engines a freshly opened view starts with.
+/// Asks a remote project for its host; `None` once the project is gone.
+pub(crate) type ResolveHost =
+    Rc<dyn Fn(&mut App) -> Option<Task<anyhow::Result<Arc<dyn CommandHost>>>>>;
+
+/// The engines a new view starts with, or how it will get them.
+pub(crate) enum Engines {
+    /// Ready, over the host they run on.
+    Built {
+        backends: Vec<Arc<dyn ContainerBackend>>,
+        host: Arc<dyn CommandHost>,
+    },
+    /// A remote project's host, still to be reached.
+    Resolving {
+        resolve: ResolveHost,
+        host_name: Option<String>,
+    },
+}
+
+/// The engines for a view of `project`.
 ///
-/// `ContainerPanel::default_backends`, unless a test has replaced them. The two
-/// are kept apart on purpose: the test that asserts the real engine list must
-/// keep seeing the real list, so the replacement is applied here -- where a tab
-/// is opened -- and not there.
-pub(crate) fn engines_for_a_new_view(cx: &App) -> Vec<Arc<dyn ContainerBackend>> {
+/// A local project's are built at once, exactly as before there were remote
+/// ones. Any other project waits for its own host: falling back to this
+/// machine's `docker` would list containers that have nothing to do with the
+/// project, and act on them.
+pub(crate) fn engines_for_project(project: &Entity<Project>, cx: &mut App) -> Engines {
+    if project.read(cx).is_local() {
+        let host = local_host(cx);
+        return Engines::Built {
+            backends: engines_on(host.clone(), cx),
+            host,
+        };
+    }
+    let host_name = project
+        .read(cx)
+        .remote_client()
+        .map(|remote_client| remote_client.read(cx).connection_options().display_name());
+    let project = project.downgrade();
+    Engines::Resolving {
+        resolve: Rc::new(move |cx| {
+            let project = project.upgrade()?;
+            Some(project.update(cx, |project, cx| project.command_host(cx)))
+        }),
+        host_name,
+    }
+}
+
+/// `ContainerPanel::default_backends` over `host`, unless a test has replaced
+/// them. The two are kept apart on purpose: the test that asserts the real
+/// engine list must keep seeing the real list, so the replacement is applied
+/// here -- where a view gets its engines -- and not there.
+fn engines_on(host: Arc<dyn CommandHost>, cx: &App) -> Vec<Arc<dyn ContainerBackend>> {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(engines) = cx.try_global::<crate::EnginesForTest>() {
         return engines.0.clone();
     }
     let _ = cx;
-    ContainerPanel::default_backends()
+    ContainerPanel::default_backends(host)
+}
+
+fn local_host(cx: &App) -> Arc<dyn CommandHost> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(host) = cx.try_global::<crate::LocalHostForTest>() {
+        return host.0.clone();
+    }
+    let _ = cx;
+    Arc::new(LocalCommandHost)
 }
 
 impl ContainerPanel {
@@ -263,7 +351,8 @@ impl ContainerPanel {
     /// window for a column nobody had opened. Nothing constructs this view
     /// unasked any more, so there is no `set_active` to wait for.
     pub fn new(workspace: &Workspace, _window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut panel = Self::build(engines_for_a_new_view(cx), cx);
+        let engines = engines_for_project(workspace.project(), cx);
+        let mut panel = Self::build(engines, 0, cx);
         panel.workspace = Some(workspace.weak_handle());
         panel.reload(cx);
         panel.start_watching(cx);
@@ -276,16 +365,28 @@ impl ContainerPanel {
     /// itself out the same way). The column this used to also live in is gone --
     /// two places showing the same list was two places to keep in step, and the
     /// tab is where it was asked for.
-    pub(crate) fn build(backends: Vec<Arc<dyn ContainerBackend>>, cx: &mut Context<Self>) -> Self {
-        Self {
+    ///
+    /// `active` is the engine to start on, clamped to the ones there are.
+    pub(crate) fn build(engines: Engines, active: usize, cx: &mut Context<Self>) -> Self {
+        let (backends, command_host, resolve_host, pending_host_name) = match engines {
+            Engines::Built { backends, host } => (backends, Some(host), None, None),
+            Engines::Resolving { resolve, host_name } => {
+                (Vec::new(), None, Some(resolve), host_name)
+            }
+        };
+        // Kept as asked while there are no engines yet, so the view lands on
+        // it once the host answers.
+        let active_backend = if resolve_host.is_some() {
+            active
+        } else {
+            active.min(backends.len().saturating_sub(1))
+        };
+        let mut panel = Self {
             measured_width: None,
             focus_handle: cx.focus_handle(),
-            active_kind: backends
-                .first()
-                .and_then(|backend| backend.supported_kinds().first().copied())
-                .unwrap_or(ResourceKind::Container),
+            active_kind: first_kind(&backends, active_backend),
             backends,
-            active_backend: 0,
+            active_backend,
             state: ListState::Loading,
             load: None,
             reloading: false,
@@ -305,8 +406,129 @@ impl ContainerPanel {
             config_targets: Vec::new(),
             config_error: None,
             config_load: None,
+            command_host,
+            host_load: None,
+            resolve_host,
+            pending_host_name,
             search: None,
+        };
+        panel.wait_for_host(cx);
+        panel
+    }
+
+    /// Asks the project for its host and builds the engines once it answers.
+    ///
+    /// Once, not on every reconnect: the host this resolves to follows the
+    /// project's remote client to whichever connection it holds next. Asked
+    /// again only by a refresh after it failed.
+    fn wait_for_host(&mut self, cx: &mut Context<Self>) {
+        let Some(resolve) = self.resolve_host.clone() else {
+            return;
+        };
+        let Some(resolving) = resolve(cx) else {
+            self.state = ListState::Failed(ContainerError::HostUnavailable {
+                detail: "the project was closed".to_string(),
+            });
+            cx.notify();
+            return;
+        };
+        self.state = ListState::Loading;
+        self.host_load = Some(cx.spawn(async move |this, cx| {
+            let resolved = resolving.await;
+            let applied = this.update(cx, |this, cx| {
+                this.host_load = None;
+                match resolved {
+                    Ok(host) => this.adopt_host(host, cx),
+                    Err(error) => {
+                        this.state = ListState::Failed(ContainerError::HostUnavailable {
+                            detail: format!("{error:#}"),
+                        });
+                        cx.notify();
+                    }
+                }
+            });
+            if let Err(error) = applied {
+                log::debug!("panel closed before its host was reached: {error}");
+            }
+        }));
+        cx.notify();
+    }
+
+    fn adopt_host(&mut self, host: Arc<dyn CommandHost>, cx: &mut Context<Self>) {
+        self.backends = engines_on(host.clone(), cx);
+        self.command_host = Some(host);
+        self.resolve_host = None;
+        self.active_backend = self
+            .active_backend
+            .min(self.backends.len().saturating_sub(1));
+        self.active_kind = first_kind(&self.backends, self.active_backend);
+        self.state = ListState::Loading;
+        self.reload(cx);
+        self.start_watching(cx);
+        self.load_host_config_targets(cx);
+        cx.notify();
+    }
+
+    /// The host's name, when the engines run somewhere other than here --
+    /// already while that host is still being reached.
+    pub(crate) fn host_name(&self) -> Option<String> {
+        match &self.command_host {
+            Some(host) => host.remote_name(),
+            None => self.pending_host_name.clone(),
         }
+    }
+
+    /// Whether a kubeconfig may be chosen with this machine's file dialog.
+    ///
+    /// Not for a remote host: the dialog browses this machine, and a file
+    /// picked there names a path `kubectl` would look for on the host. The
+    /// host's own contexts are still offered.
+    pub(crate) fn offers_local_config_file_picker(&self) -> bool {
+        self.command_host
+            .as_ref()
+            .is_some_and(|host| host.remote_name().is_none())
+    }
+
+    /// Whether the config menu has anything to offer: this machine's file
+    /// dialog, or contexts already read.
+    pub(crate) fn offers_config_picker(&self) -> bool {
+        self.offers_local_config_file_picker() || !self.config_targets.is_empty()
+    }
+
+    /// Lists the contexts of the host's own kubeconfig, for a remote view.
+    ///
+    /// There is no file to pick there (see `offers_local_config_file_picker`),
+    /// so without this the menu would be empty. Read without a path, which is
+    /// the kubeconfig `kubectl` on the host merges by itself. A failure is
+    /// left to the list, which runs the same `kubectl` and says why in full.
+    fn load_host_config_targets(&mut self, cx: &mut Context<Self>) {
+        if self.command_host.is_none() || self.offers_local_config_file_picker() {
+            return;
+        }
+        let Some(backend) = self
+            .backend()
+            .filter(|backend| backend.config_source().is_some())
+            .cloned()
+        else {
+            return;
+        };
+        self.config_load = Some(cx.spawn(async move |this, cx| {
+            let targets = backend.config_targets(None).await;
+            let applied = this.update(cx, |this, cx| {
+                this.config_load = None;
+                match targets {
+                    Ok(targets) => this.config_targets = targets,
+                    Err(error) => {
+                        log::debug!("could not list the host's kubeconfig contexts: {error}");
+                        this.config_targets = Vec::new();
+                    }
+                }
+                cx.notify();
+            });
+            if let Err(error) = applied {
+                log::debug!("panel closed before the host's contexts were read: {error}");
+            }
+        }));
     }
 
     /// The engines a fresh panel offers.
@@ -319,16 +541,21 @@ impl ContainerPanel {
     ///
     /// Deliberately NOT read from the `remote.use_podman` setting. That setting
     /// governs which engine a *dev container* is built with on a remote host;
-    /// this panel is local-only, and reusing it here would tie two unrelated
-    /// choices together.
+    /// this panel lists the engines of the project's own machine, whichever
+    /// that is, and reusing it here would tie two unrelated choices together.
     ///
     /// Docker first because it is what most people have.
-    pub(crate) fn default_backends() -> Vec<Arc<dyn ContainerBackend>> {
-        vec![
-            Arc::new(DockerBackend::docker()),
-            Arc::new(DockerBackend::podman()),
-            Arc::new(KubernetesBackend::new()),
-        ]
+    pub(crate) fn default_backends(host: Arc<dyn CommandHost>) -> Vec<Arc<dyn ContainerBackend>> {
+        ENGINES
+            .iter()
+            .map(|kind| -> Arc<dyn ContainerBackend> {
+                match kind {
+                    BackendKind::Docker => Arc::new(DockerBackend::docker(host.clone())),
+                    BackendKind::Podman => Arc::new(DockerBackend::podman(host.clone())),
+                    BackendKind::Kubernetes => Arc::new(KubernetesBackend::new(host.clone())),
+                }
+            })
+            .collect()
     }
 
     pub(crate) fn busy_for(&self, id: &str) -> Option<Busy> {
@@ -421,6 +648,7 @@ impl ContainerPanel {
         // The old engine's listener would go on waking the panel about a list it
         // is no longer showing.
         self.start_watching(cx);
+        self.load_host_config_targets(cx);
         cx.notify();
     }
 
@@ -725,13 +953,14 @@ impl ContainerPanel {
     /// not reach a real engine.
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_backend(backend: Arc<dyn ContainerBackend>, cx: &mut Context<Self>) -> Self {
-        Self::build(vec![backend], cx)
+        Self::with_backends(vec![backend], cx)
     }
 
     /// A column panel over several backends, for tests of the switcher.
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_backends(backends: Vec<Arc<dyn ContainerBackend>>, cx: &mut Context<Self>) -> Self {
-        Self::build(backends, cx)
+        let host = local_host(cx);
+        Self::build(Engines::Built { backends, host }, 0, cx)
     }
 
     pub async fn load(
@@ -750,6 +979,11 @@ impl ContainerPanel {
     /// `state`.
     pub(crate) fn reload(&mut self, cx: &mut Context<Self>) {
         let Some(backend) = self.backend().cloned() else {
+            // No engines because the host could not be reached: a refresh is
+            // the way to ask again, not a dead end.
+            if self.command_host.is_none() && self.host_load.is_none() {
+                self.wait_for_host(cx);
+            }
             return;
         };
         let kind = self.active_kind;
