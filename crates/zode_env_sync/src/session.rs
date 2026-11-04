@@ -3,12 +3,13 @@ use std::sync::Arc;
 
 use gpui::{App, Context, Entity, EventEmitter, Global, SharedString, Task};
 use util::ResultExt as _;
-use zode_account::Account;
+use zode_account::{Account, PlanLimit};
+use zode_sync::client::ClientError;
 use zode_sync::sync::SyncContext;
 use zode_sync::{Dek, Resource, client, from_blob, to_blob};
 
 use crate::env_dek::{self, EnvDek};
-use crate::env_sync::{self, EnvFile, LocalEnvFile, PullOutcome, PushOutcome};
+use crate::env_sync::{self, EnvFile, EnvSyncError, LocalEnvFile, PullOutcome, PushOutcome};
 use crate::ids::EntryId;
 use crate::manifest::Manifest;
 use crate::{Bindings, Checkout, EnvCryptoError, keystore, seal};
@@ -56,6 +57,10 @@ pub enum EnvStatus {
         seen: u64,
         got: u64,
     },
+    /// The account's plan does not cover this (HTTP 402). Its own status
+    /// rather than a `Failed` string so the windows can offer the plan pages,
+    /// and so nothing ever reads it as "sign in again".
+    PlanLimited(PlanLimit),
     Failed(SharedString),
 }
 
@@ -75,6 +80,7 @@ impl EnvStatus {
                 "the server offered version {got} of a file already at {seen} here — nothing was written"
             )
             .into(),
+            EnvStatus::PlanLimited(limit) => limit.sentence().into(),
             EnvStatus::Failed(message) => message.clone(),
         }
     }
@@ -333,13 +339,13 @@ impl EnvSession {
                     // opening should do.
                     _ = this.update(cx, |this, cx| this.set_status(EnvStatus::Idle, cx));
                 }
-                Err(EnvCryptoError::KeyRotated { .. } | EnvCryptoError::WrongKey) => {
+                Err(EnvSyncError::Crypto(
+                    EnvCryptoError::KeyRotated { .. } | EnvCryptoError::WrongKey,
+                )) => {
                     _ = this.update(cx, |this, cx| this.set_status(EnvStatus::KeyMismatch, cx));
                 }
                 Err(error) => {
-                    _ = this.update(cx, |this, cx| {
-                        this.set_status(EnvStatus::Failed(format!("{error}").into()), cx);
-                    });
+                    _ = this.update(cx, |this, cx| this.fail(error, cx));
                 }
             }
         })
@@ -367,7 +373,7 @@ impl EnvSession {
                 .map_err(|error| anyhow::anyhow!("{error}"))?;
             let blob = to_blob(&wrapped).map_err(|error| anyhow::anyhow!("{error}"))?;
 
-            client::store(
+            let stored = client::store(
                 &context.http_client,
                 &context.api_url,
                 &context.credential.access_token,
@@ -376,8 +382,16 @@ impl EnvSession {
                 &blob,
                 client::Precondition::Create,
             )
-            .await
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
+            .await;
+            if let Err(error) = stored {
+                // Said in the window as well as returned: the caller only logs
+                // the error, and a plan refusal here is the one answer the user
+                // can act on.
+                let error = EnvSyncError::from(error);
+                let message = error.to_string();
+                this.update(cx, |this, cx| this.fail(error, cx))?;
+                anyhow::bail!(message);
+            }
 
             keystore::write(&credentials, &context.credential.user_id, &env_dek, cx).await?;
             this.update(cx, |this, cx| {
@@ -560,9 +574,7 @@ impl EnvSession {
                 Ok(PushOutcome::Conflict(divergence)) => {
                     this.hold(entry, target, divergence, false, cx);
                 }
-                Err(error) => {
-                    this.set_status(EnvStatus::Failed(format!("{error}").into()), cx);
-                }
+                Err(error) => this.fail(error, cx),
             });
         }));
     }
@@ -609,9 +621,7 @@ impl EnvSession {
                 Ok(PushOutcome::Conflict(divergence)) => {
                     this.hold(entry, Target::local(local_path), divergence, false, cx);
                 }
-                Err(error) => {
-                    this.set_status(EnvStatus::Failed(format!("{error}").into()), cx);
-                }
+                Err(error) => this.fail(error, cx),
             });
         }));
     }
@@ -689,9 +699,7 @@ impl EnvSession {
                 Ok(PullOutcome::Rollback { seen, got }) => {
                     this.set_status(EnvStatus::Rollback { seen, got }, cx);
                 }
-                Err(error) => {
-                    this.set_status(EnvStatus::Failed(format!("{error}").into()), cx);
-                }
+                Err(error) => this.fail(error, cx),
             });
         }));
     }
@@ -884,12 +892,15 @@ impl EnvSession {
                     this.reconciliation = reconciliation;
                     this.set_status(EnvStatus::Idle, cx);
                 }
-                (Err(EnvCryptoError::KeyRotated { .. } | EnvCryptoError::WrongKey), _) => {
+                (
+                    Err(EnvSyncError::Crypto(
+                        EnvCryptoError::KeyRotated { .. } | EnvCryptoError::WrongKey,
+                    )),
+                    _,
+                ) => {
                     this.set_status(EnvStatus::KeyMismatch, cx);
                 }
-                (Err(error), _) | (_, Err(error)) => {
-                    this.set_status(EnvStatus::Failed(format!("{error}").into()), cx);
-                }
+                (Err(error), _) | (_, Err(error)) => this.fail(error, cx),
             });
         }));
     }
@@ -1158,9 +1169,7 @@ impl EnvSession {
                 return;
             };
             if let Err(error) = write_manifest(&context, &env_dek, &manifest).await {
-                _ = this.update(cx, |this, cx| {
-                    this.set_status(EnvStatus::Failed(format!("{error}").into()), cx);
-                });
+                _ = this.update(cx, |this, cx| this.fail(error, cx));
             }
         })
         .detach();
@@ -1169,6 +1178,19 @@ impl EnvSession {
     /// What the catalogue and the server disagree about, as of the last load.
     pub fn reconciliation(&self) -> &crate::Reconciliation {
         &self.reconciliation
+    }
+
+    /// Records why something did not happen. A plan refusal gets its own
+    /// status and a fresh read of the plan; nothing retries it.
+    fn fail(&mut self, error: EnvSyncError, cx: &mut Context<Self>) {
+        match error {
+            EnvSyncError::Client(ClientError::PlanLimit(limit)) => {
+                self.set_status(EnvStatus::PlanLimited(limit), cx);
+                self.account
+                    .update(cx, |account, cx| account.refresh_plan(cx));
+            }
+            error => self.set_status(EnvStatus::Failed(format!("{error}").into()), cx),
+        }
     }
 
     fn set_status(&mut self, status: EnvStatus, cx: &mut Context<Self>) {
@@ -1231,10 +1253,7 @@ impl EnvSession {
 }
 
 /// Reads and opens the catalogue. An account with none yet gets an empty one.
-async fn load_manifest(
-    context: &SyncContext,
-    env_dek: &EnvDek,
-) -> Result<Manifest, EnvCryptoError> {
+async fn load_manifest(context: &SyncContext, env_dek: &EnvDek) -> Result<Manifest, EnvSyncError> {
     let resource = seal::manifest_resource()?;
     let document = client::fetch(
         &context.http_client,
@@ -1242,13 +1261,12 @@ async fn load_manifest(
         &context.credential.access_token,
         &resource,
     )
-    .await
-    .map_err(|error| EnvCryptoError::Malformed(format!("{error}")))?;
+    .await?;
 
     let Some(document) = document else {
         return Ok(Manifest::new());
     };
-    let envelope = from_blob(&document.blob)?;
+    let envelope = from_blob(&document.blob).map_err(EnvCryptoError::from)?;
     // No rollback check on the catalogue read itself: a stale catalogue is
     // surfaced by the reconciliation below rather than refused, and refusing
     // it would leave the user with no list at all.
@@ -1259,7 +1277,7 @@ async fn load_manifest(
         None,
         &envelope,
     )?;
-    Manifest::from_json(&opened.payload)
+    Ok(Manifest::from_json(&opened.payload)?)
 }
 
 /// Seals and stores the catalogue.
@@ -1272,7 +1290,7 @@ async fn write_manifest(
     context: &SyncContext,
     env_dek: &EnvDek,
     manifest: &Manifest,
-) -> Result<(), EnvCryptoError> {
+) -> Result<(), EnvSyncError> {
     let resource = seal::manifest_resource()?;
     let current = client::fetch(
         &context.http_client,
@@ -1280,8 +1298,7 @@ async fn write_manifest(
         &context.credential.access_token,
         &resource,
     )
-    .await
-    .map_err(|error| EnvCryptoError::Malformed(format!("{error}")))?;
+    .await?;
 
     let seq = match &current {
         Some(document) => from_blob(&document.blob)
@@ -1307,7 +1324,7 @@ async fn write_manifest(
         seq,
         &manifest.to_json()?,
     )?;
-    let blob = to_blob(&envelope)?;
+    let blob = to_blob(&envelope).map_err(EnvCryptoError::from)?;
 
     let precondition = match &current {
         Some(document) => client::Precondition::Replace(&document.revision),
@@ -1322,29 +1339,27 @@ async fn write_manifest(
         &blob,
         precondition,
     )
-    .await
-    .map_err(|error| EnvCryptoError::Malformed(format!("{error}")))?;
+    .await?;
     Ok(())
 }
 
 /// Asks which entries the server actually holds.
-async fn list_entries(context: &SyncContext) -> Result<Vec<crate::RemoteEntry>, EnvCryptoError> {
+async fn list_entries(context: &SyncContext) -> Result<Vec<crate::RemoteEntry>, EnvSyncError> {
     let body = client::fetch_body(
         &context.http_client,
         &context.api_url,
         &context.credential.access_token,
         &Resource::env_listing(),
     )
-    .await
-    .map_err(|error| EnvCryptoError::Malformed(format!("{error}")))?;
+    .await?;
 
     match body {
-        Some(body) => crate::vault::parse_listing(&body),
+        Some(body) => Ok(crate::vault::parse_listing(&body)?),
         // A 404 on the collection means the route is not there at all, which
         // is not the same as an empty vault and must not be reported as one.
-        None => Err(EnvCryptoError::Malformed(
-            "the sync service has no environment store".into(),
-        )),
+        None => Err(
+            EnvCryptoError::Malformed("the sync service has no environment store".into()).into(),
+        ),
     }
 }
 
@@ -1353,22 +1368,22 @@ fn unavailable() -> EnvStatus {
 }
 
 /// Reads and unwraps the stored environment key. `Ok(None)` means none exists.
-async fn fetch_env_key(context: &SyncContext, dek: &Dek) -> Result<Option<EnvDek>, EnvCryptoError> {
-    let resource = Resource::env_singleton(crate::ENV_KEY_RESOURCE)?;
+async fn fetch_env_key(context: &SyncContext, dek: &Dek) -> Result<Option<EnvDek>, EnvSyncError> {
+    let resource =
+        Resource::env_singleton(crate::ENV_KEY_RESOURCE).map_err(EnvCryptoError::from)?;
     let document = client::fetch(
         &context.http_client,
         &context.api_url,
         &context.credential.access_token,
         &resource,
     )
-    .await
-    .map_err(|error| EnvCryptoError::Malformed(format!("{error}")))?;
+    .await?;
 
     let Some(document) = document else {
         return Ok(None);
     };
-    let envelope = from_blob(&document.blob)?;
-    env_dek::unwrap_key(dek, &context.credential.user_id, &envelope).map(Some)
+    let envelope = from_blob(&document.blob).map_err(EnvCryptoError::from)?;
+    Ok(env_dek::unwrap_key(dek, &context.credential.user_id, &envelope).map(Some)?)
 }
 
 async fn build_context(account: &Entity<Account>, cx: &mut gpui::AsyncApp) -> Option<SyncContext> {
@@ -1431,6 +1446,7 @@ mod tests {
             EnvStatus::NeedsRecoveryKey,
             EnvStatus::KeyMismatch,
             EnvStatus::Rollback { seen: 9, got: 4 },
+            EnvStatus::PlanLimited(env_refusal()),
             EnvStatus::Failed("the service is unreachable".into()),
         ] {
             assert!(
@@ -1438,6 +1454,161 @@ mod tests {
                 "{status:?} has nothing to say",
             );
         }
+    }
+
+    fn env_refusal() -> PlanLimit {
+        PlanLimit::from_body(
+            r#"{"error":"env_sync_not_in_plan","tier":"free"}"#,
+            &zode_account::web_url(),
+        )
+    }
+
+    struct NoKeychain;
+
+    impl credentials_provider::CredentialsProvider for NoKeychain {
+        fn read_credentials<'a>(
+            &'a self,
+            _url: &'a str,
+            _cx: &'a gpui::AsyncApp,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = anyhow::Result<Option<(String, Vec<u8>)>>> + 'a>,
+        > {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn write_credentials<'a>(
+            &'a self,
+            _url: &'a str,
+            _username: &'a str,
+            _password: &'a [u8],
+            _cx: &'a gpui::AsyncApp,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn delete_credentials<'a>(
+            &'a self,
+            _url: &'a str,
+            _cx: &'a gpui::AsyncApp,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// A server that refuses everything with a plan 402 and counts plan reads.
+    fn refusing_server() -> (
+        Arc<dyn http_client::HttpClient>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let plan_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = plan_reads.clone();
+        let client: Arc<dyn http_client::HttpClient> =
+            http_client::FakeHttpClient::create(move |request| {
+                let counter = counter.clone();
+                async move {
+                    if request.uri().path().ends_with("/account/plan") {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        return Ok(http_client::Response::builder()
+                            .status(500)
+                            .body(Default::default())
+                            .expect("a well-formed response"));
+                    }
+                    Ok(http_client::Response::builder()
+                        .status(402)
+                        .body(r#"{"error":"sync_device_limit","limit":2,"used":3}"#.into())
+                        .expect("a well-formed response"))
+                }
+            });
+        (client, plan_reads)
+    }
+
+    fn refused_context(client: Arc<dyn http_client::HttpClient>) -> SyncContext {
+        SyncContext {
+            http_client: client,
+            api_url: "http://test.invalid/api".into(),
+            credential: zode_account::ApiCredential {
+                access_token: "token".into(),
+                user_id: "1".into(),
+            },
+        }
+    }
+
+    fn is_device_refusal<T>(result: &Result<T, EnvSyncError>) -> bool {
+        matches!(
+            result,
+            Err(EnvSyncError::Client(ClientError::PlanLimit(limit)))
+                if limit.reason == zode_account::PlanLimitReason::SyncDeviceLimit
+        )
+    }
+
+    /// The vault's own reads used to fold every client error into "this is not
+    /// a Zode environment blob", which turned a plan refusal into a claim of
+    /// corrupt data. Each of them must hand the refusal on intact.
+    #[gpui::test]
+    fn the_vault_reads_hand_a_plan_refusal_on_intact(_cx: &mut TestAppContext) {
+        let (client, _) = refusing_server();
+        let context = refused_context(client);
+        let env_dek = EnvDek::generate().expect("a key");
+        let dek = Dek::generate().expect("a key");
+
+        let listed = futures::executor::block_on(list_entries(&context));
+        assert!(is_device_refusal(&listed), "list: {listed:?}");
+        let loaded = futures::executor::block_on(load_manifest(&context, &env_dek));
+        assert!(is_device_refusal(&loaded), "manifest read");
+        let written =
+            futures::executor::block_on(write_manifest(&context, &env_dek, &Manifest::new()));
+        assert!(is_device_refusal(&written), "manifest write: {written:?}");
+        let key = futures::executor::block_on(fetch_env_key(&context, &dek));
+        assert!(is_device_refusal(&key), "env key");
+    }
+
+    #[gpui::test]
+    fn a_plan_refusal_becomes_its_own_status_and_reads_the_plan(cx: &mut TestAppContext) {
+        let (client, plan_reads) = refusing_server();
+        let account = cx.update(|cx| {
+            cx.new(|_| {
+                let mut account = Account::for_test_with(
+                    AccountStatus::SignedIn(AccountUser {
+                        id: "1".into(),
+                        email: "ada@example.com".into(),
+                        name: None,
+                        avatar_url: None,
+                    }),
+                    client,
+                    Arc::new(NoKeychain),
+                );
+                account.set_tokens_for_test();
+                account
+            })
+        });
+        let session = cx.update(|cx| cx.new(|_| EnvSession::new(account)));
+
+        session.update(cx, |session, cx| {
+            session.fail(
+                EnvSyncError::Client(ClientError::PlanLimit(env_refusal())),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        session.read_with(cx, |session, _| {
+            assert_eq!(session.status(), &EnvStatus::PlanLimited(env_refusal()));
+            assert_eq!(
+                session.status().sentence(),
+                ".env sync is part of Pro. Nothing was uploaded; your synced files are still readable."
+            );
+        });
+        assert_eq!(plan_reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Anything else stays a failure, and is not a reason to read the plan.
+        session.update(cx, |session, cx| {
+            session.fail(EnvSyncError::Client(ClientError::Unauthorized), cx)
+        });
+        cx.run_until_parked();
+        session.read_with(cx, |session, _| {
+            assert!(matches!(session.status(), EnvStatus::Failed(_)));
+        });
+        assert_eq!(plan_reads.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     fn one_entry() -> (crate::ProjectId, EntryId, Manifest) {

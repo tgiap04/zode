@@ -156,6 +156,8 @@
 - [Your Zode Account](./account.md)
 - [Environment sync protocol](./env-sync-protocol.md)
 - [Environment sync security](./env-sync-security.md)
+- [Team sharing protocol](./team-sharing-protocol.md)
+- [Team sharing security](./team-sharing-security.md)
 - [Remote control](./remote-control.md)
 - [Remote control security](./remote-control-security.md)
 - [Remote control protocol](./remote-control-protocol.md)

@@ -40,6 +40,23 @@ impl Dek {
         Self { bytes }
     }
 
+    /// Copies a key straight out of a slice, without a by-value array on the
+    /// way that nothing would zero. `None` unless it is exactly `DEK_LEN`.
+    pub fn from_slice(bytes: &[u8]) -> Option<Self> {
+        let bytes: &[u8; DEK_LEN] = bytes.try_into().ok()?;
+        Some(Self::copy_from(bytes))
+    }
+
+    /// The same from a borrowed array: the caller's copy stays the only
+    /// other one, and it is the caller's to wipe.
+    pub fn copy_from(bytes: &[u8; DEK_LEN]) -> Self {
+        let mut dek = Self {
+            bytes: [0u8; DEK_LEN],
+        };
+        dek.bytes.copy_from_slice(bytes);
+        dek
+    }
+
     pub(crate) fn bytes(&self) -> &[u8; DEK_LEN] {
         &self.bytes
     }

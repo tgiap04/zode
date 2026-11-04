@@ -1,0 +1,53 @@
+[package]
+name = "zode_team_vault"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[features]
+test-support = []
+
+[lib]
+path = "src/zode_team_vault.rs"
+doctest = false
+
+[dependencies]
+# Held to the same graph rule as `zode_account`, `zode_sync` and
+# `zode_env_sync`: no `client`, no `workspace`, no `telemetry`, no remote-server
+# crates. It holds every team key a member has. `script/check-account-no-telemetry`
+# asserts it rather than trusting this comment.
+#
+# `remote_relay_protocol` is a pure protocol crate (no I/O); it is named for its
+# X25519 keypair and its low-order point check, so the one copy of each stays
+# the one copy.
+anyhow.workspace = true
+base64.workspace = true
+db.workspace = true
+futures.workspace = true
+gpui.workspace = true
+log.workspace = true
+remote_relay_protocol.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+snow.workspace = true
+zeroize.workspace = true
+zode_account.workspace = true
+zode_env_sync.workspace = true
+zode_sync.workspace = true
+
+[dev-dependencies]
+credentials_provider.workspace = true
+db = { workspace = true, features = ["test-support"] }
+futures.workspace = true
+gpui = { workspace = true, features = ["test-support"] }
+http_client = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true
+sha2.workspace = true
+zode_account = { workspace = true, features = ["test-support"] }
+zode_team_vault = { path = ".", features = ["test-support"] }

@@ -27,6 +27,15 @@ pub struct RemoteControlIndicator {
     _subscriptions: Vec<Subscription>,
 }
 
+/// Whether stopping in `state` is something a larger plan answers. Only the
+/// relay's daily allowance is; every other stop has a different way out.
+pub(crate) fn upgrade_offered(state: &HostState) -> bool {
+    matches!(
+        state,
+        HostState::Halted(remote_relay_client::StopReason::QuotaExceeded)
+    )
+}
+
 /// "Controlled by Ada's laptop", "Controlled by 2 devices".
 pub(crate) fn controlled_by(sessions: &[SessionInfo]) -> String {
     match sessions {
@@ -213,12 +222,17 @@ impl RemoteControlIndicator {
         }
         let host = self.host.clone();
         let message = message.to_string();
+        let upgrade = upgrade_offered(self.host.read(cx).state());
         self.workspace
             .update(cx, |workspace, cx| {
                 let toast = Toast::new(NotificationId::unique::<ProblemToast>(), message);
                 let toast = if retry {
                     toast.on_click("Try again", move |_window, cx| {
                         host.update(cx, |host, cx| host.retry(cx));
+                    })
+                } else if upgrade {
+                    toast.on_click("Upgrade\u{2026}", |_window, cx| {
+                        cx.open_url(&zode_account::pricing_url());
                     })
                 } else {
                     toast
@@ -288,10 +302,17 @@ impl RemoteControlIndicator {
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<ContextMenu> {
+        let upgrade = upgrade_offered(host.read(cx).state());
         ContextMenu::build(window, cx, move |menu, _window, _cx| {
             let disconnect_host = host.clone();
             let manage_host = host.clone();
-            menu.when(anyone_connected, |menu| {
+            menu.when(upgrade, |menu| {
+                menu.entry("Upgrade\u{2026}", None, |_window, cx| {
+                    cx.open_url(&zode_account::pricing_url());
+                })
+                .separator()
+            })
+            .when(anyone_connected, |menu| {
                 menu.entry("Disconnect All Devices", None, move |_window, cx| {
                     disconnect_host.update(cx, |host, cx| host.disconnect_all(cx));
                 })
@@ -476,6 +497,27 @@ mod tests {
         .expect("shown");
         assert_eq!(color, Color::Error);
         assert!(tooltip.contains("allowance"));
+        assert!(tooltip.contains("resets 00:00 UTC"), "{tooltip}");
+        assert!(tooltip.contains("Pro raises it"), "{tooltip}");
+    }
+
+    #[test]
+    fn only_the_relay_allowance_offers_an_upgrade() {
+        use remote_relay_client::StopReason;
+        assert!(upgrade_offered(&HostState::Halted(
+            StopReason::QuotaExceeded
+        )));
+        for state in [
+            HostState::Disabled,
+            HostState::Online,
+            HostState::SignedOut,
+            HostState::Halted(StopReason::Revoked),
+            HostState::Halted(StopReason::SessionEnded),
+            HostState::Halted(StopReason::Replaced),
+            HostState::Failed("no keychain".into()),
+        ] {
+            assert!(!upgrade_offered(&state), "{state:?}");
+        }
     }
 
     #[test]

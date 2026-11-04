@@ -12,6 +12,7 @@ use http_client::{AsyncBody, HttpClient, Request};
 use serde::Deserialize;
 
 use crate::device_flow::{self, DeviceFlowError};
+use crate::plan::PlanSummary;
 use crate::storage;
 use crate::tokens::StoredTokens;
 
@@ -180,6 +181,10 @@ pub struct Account {
     /// Registered while `unsaved_rotation` is set, so quitting can write the
     /// session or, failing that, remove the entry.
     quit_flush: Option<Subscription>,
+    /// In memory only. See [`Self::plan`].
+    plan: Option<PlanSummary>,
+    /// The plan read in flight, joined by every trigger that arrives meanwhile.
+    plan_request: Option<Task<()>>,
 }
 
 impl EventEmitter<AccountStatusChanged> for Account {}
@@ -210,6 +215,8 @@ impl Account {
             session_generation: 0,
             unsaved_rotation: None,
             quit_flush: None,
+            plan: None,
+            plan_request: None,
         }
     }
 
@@ -239,6 +246,8 @@ impl Account {
             session_generation: 0,
             unsaved_rotation: None,
             quit_flush: None,
+            plan: None,
+            plan_request: None,
         }
     }
 
@@ -264,11 +273,80 @@ impl Account {
             session_generation: 0,
             unsaved_rotation: None,
             quit_flush: None,
+            plan: None,
+            plan_request: None,
         }
     }
 
     pub fn status(&self) -> &AccountStatus {
         &self.status
+    }
+
+    /// The plan as the server last stated it, if it has been read this
+    /// session. `None` until then, and again after signing out.
+    pub fn plan(&self) -> Option<&PlanSummary> {
+        self.plan.as_ref()
+    }
+
+    /// Whether a plan read is on the wire. A caller waiting for the plan
+    /// observes the account and, once this is false with no plan, knows the
+    /// read failed rather than waiting for ever.
+    pub fn is_reading_plan(&self) -> bool {
+        self.plan_request.is_some()
+    }
+
+    /// Reads the plan from the server.
+    ///
+    /// Called only where the user did something: signing in, opening the
+    /// account menu or a sync window, a request the plan just refused, and
+    /// team sharing finding the membership gone.
+    /// Never at restore and never on a timer -- the README lists this request
+    /// with exactly those triggers, and `offline_invariants.rs` holds it to
+    /// them. Signed out, it sends nothing. A read already in flight is joined
+    /// rather than repeated.
+    pub fn refresh_plan(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.tokens.is_none() || !self.status.is_signed_in() || self.plan_request.is_some() {
+            return;
+        }
+        let credential = self.api_credential(cx);
+        let http_client = self.http_client.clone();
+        let api_url = self.api_url.clone();
+        let web_url = crate::web_url();
+        let generation = self.session_generation;
+
+        self.plan_request = Some(cx.spawn(async move |this, cx| {
+            let fetched = match credential.await {
+                Some(credential) => {
+                    fetch_plan(&http_client, &api_url, &credential.access_token, &web_url).await
+                }
+                None => Ok(None),
+            };
+            let applied = this.update(cx, |this, cx| {
+                // A sign-out while this was on the wire has already cleared the
+                // plan; this answer belongs to a session that is over.
+                if this.session_generation != generation {
+                    return;
+                }
+                this.plan_request = None;
+                match fetched {
+                    Ok(Some(plan)) => {
+                        this.plan = Some(plan);
+                        cx.emit(AccountStatusChanged);
+                        cx.notify();
+                    }
+                    // No event: nothing about the account changed. A notify, so
+                    // whoever waits on this read sees it end.
+                    Ok(None) => cx.notify(),
+                    Err(error) => {
+                        log::warn!("could not read the plan: {error}");
+                        cx.notify();
+                    }
+                }
+            });
+            if let Err(error) = applied {
+                log::debug!("the account closed before its plan arrived: {error}");
+            }
+        }));
     }
 
     /// Gives the account a credential that is valid but meaningless.
@@ -642,6 +720,9 @@ impl Account {
                     _ = this.update(cx, |this, cx| {
                         this.tokens = Some(tokens);
                         this.set_status(AccountStatus::SignedIn(user), cx);
+                        // Signing in is one of the moments the plan is read;
+                        // restoring a saved session is not.
+                        this.refresh_plan(cx);
                     });
                 }
                 Err(error) => {
@@ -709,6 +790,8 @@ impl Account {
         self.refreshing = None;
         self.unsaved_rotation = None;
         self.quit_flush = None;
+        self.plan = None;
+        self.plan_request = None;
     }
 
     /// Notes how the last attempt to keep the keychain current went.
@@ -910,6 +993,37 @@ impl std::fmt::Display for IdentityError {
             Self::Unreachable(detail) => write!(f, "{detail}"),
         }
     }
+}
+
+/// `GET {api_url}/account/plan`. `Ok(None)` when the server has no such route,
+/// which is an older backend rather than a fault.
+///
+/// A 401 or 403 here is logged and nothing more. Signing someone out is the
+/// credential path's decision, made on the refresh it already performed; a plan
+/// read that disagrees is not a second opinion worth acting on.
+async fn fetch_plan(
+    http_client: &Arc<dyn HttpClient>,
+    api_url: &str,
+    access_token: &str,
+    web_url: &str,
+) -> anyhow::Result<Option<PlanSummary>> {
+    let request = Request::builder()
+        .uri(format!("{api_url}/account/plan"))
+        .header("Accept", "application/json")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .body(AsyncBody::default())?;
+    let mut response = http_client.send(request).await?;
+
+    let status = response.status().as_u16();
+    if status == 404 {
+        return Ok(None);
+    }
+    if !response.status().is_success() {
+        anyhow::bail!("the account service answered {status}");
+    }
+    let mut body = String::new();
+    response.body_mut().read_to_string(&mut body).await?;
+    PlanSummary::parse(&body, web_url).map(Some)
 }
 
 async fn fetch_identity(

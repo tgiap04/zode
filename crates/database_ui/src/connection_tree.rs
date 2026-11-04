@@ -12,6 +12,10 @@ pub(crate) const INDENT_STEP: Pixels = px(16.);
 /// Flat rather than nested because the list is virtualised: `uniform_list` asks
 /// for row `n`, and a nested model would have to walk the tree to answer that.
 pub(crate) enum Row {
+    /// "Team · Acme", above the connections the team shares.
+    TeamHeader {
+        name: SharedString,
+    },
     Connection {
         index: usize,
     },
@@ -47,7 +51,15 @@ pub(crate) enum Row {
 impl DatabasePanel {
     pub(crate) fn rows(&self) -> Vec<Row> {
         let mut rows = Vec::new();
+        let first_team = self
+            .connections
+            .iter()
+            .position(|node| node.team.is_some())
+            .unwrap_or(self.connections.len());
         for (index, node) in self.connections.iter().enumerate() {
+            if index == first_team {
+                self.push_team_header(&mut rows);
+            }
             rows.push(Row::Connection { index });
             if !node.expanded || !matches!(node.state, NodeState::Connected(_)) {
                 continue;
@@ -118,7 +130,20 @@ impl DatabasePanel {
                 }
             }
         }
+        if first_team == self.connections.len() {
+            self.push_team_header(&mut rows);
+        }
         rows
+    }
+
+    fn push_team_header(&self, rows: &mut Vec<Row>) {
+        let Some(name) = self.team_group.name.clone() else {
+            return;
+        };
+        rows.push(Row::TeamHeader { name });
+        if let Some(text) = self.team_group.note.clone() {
+            rows.push(Row::Note { text, depth: 0 });
+        }
     }
 
     pub(crate) fn render_row(
@@ -129,6 +154,33 @@ impl DatabasePanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match row {
+            Row::TeamHeader { name } => tree_row(("database-team-header", position), 0)
+                .selectable(false)
+                .child(
+                    row_content()
+                        .child(
+                            Icon::new(IconName::Person)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new(format!("Team · {name}"))
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .truncate(),
+                        ),
+                )
+                .end_slot(
+                    IconButton::new("database-team-reload", IconName::RotateCw)
+                        .icon_size(IconSize::Small)
+                        .tooltip(|_window, cx| {
+                            Tooltip::simple("Load the connections your team shares", cx)
+                        })
+                        .on_click(
+                            cx.listener(|this, _event, _window, cx| this.load_team_connections(cx)),
+                        ),
+                )
+                .into_any_element(),
             Row::Connection { index } => self.render_connection(*index, cx),
             Row::Schema {
                 index,

@@ -7,7 +7,7 @@
 mod fake_store;
 
 use fake_store::{FakeStore, Sandbox, USER, block, context};
-use zode_sync::rotate::{RotationOutcome, plan, rotate};
+use zode_sync::rotate::{RotationOutcome, Slot, plan, rotate};
 use zode_sync::{Dek, Kind};
 
 fn old_key() -> Dek {
@@ -137,7 +137,7 @@ fn rotating_with_nothing_stored_succeeds() {
     let (old, new) = (old_key(), new_key());
 
     let planned = block(plan(&context(&store), &old, &new)).unwrap();
-    assert_eq!(planned.absent.len(), 3);
+    assert_eq!(planned.absent.len(), Slot::ALL.len());
 
     let mut persisted = 0;
     let outcome = block(rotate(
@@ -173,9 +173,18 @@ fn an_unreadable_blob_is_left_untouched() {
     // Settings is stored but appears in none of the three lists: not pending
     // (the old key does not open it), not done (nor does the new one), and not
     // absent (it is there). Rotation simply passes over it.
-    assert!(!planned.pending.contains(&Kind::Settings), "{planned:?}");
-    assert!(!planned.done.contains(&Kind::Settings), "{planned:?}");
-    assert!(!planned.absent.contains(&Kind::Settings), "{planned:?}");
+    assert!(
+        !planned.pending.contains(&Kind::Settings.into()),
+        "{planned:?}"
+    );
+    assert!(
+        !planned.done.contains(&Kind::Settings.into()),
+        "{planned:?}"
+    );
+    assert!(
+        !planned.absent.contains(&Kind::Settings.into()),
+        "{planned:?}"
+    );
 
     // Still readable by whoever holds the third key.
     assert_eq!(

@@ -91,6 +91,57 @@ already downloaded. To cut that off, use **Account → Rotate Recovery Key…**,
 which replaces the key and re-encrypts everything stored under it. Every other
 machine will then ask for the new key.
 
+"Everything" includes the two keys sealed under your recovery key: the `.env`
+sync key (`env-key`) and your team sharing key (`sharing-key`). They are
+re-sealed as they are, never replaced, so your `.env` files and every team you
+belong to stay readable with the new recovery key. Each item is rewritten only
+if nobody else changed it since it was read.
+
+The order is chosen so nothing can be stranded:
+
+- Both keys, old and new, are kept in your keychain before anything is
+  rewritten, and the old one is forgotten only once everything is under the
+  new one.
+- The two key slots go first, together. If either cannot be rewritten (the
+  network drops, another machine writes at the same moment, or the service
+  refuses it), the one already rewritten is put back under the old key and
+  this machine keeps using the old key.
+- Only once both key slots are under the new key does it become this
+  machine's recovery key. Your settings, keymap and extension list follow.
+
+If it stops partway, the window says what is left, and shows the new recovery
+key to write down if it is already in use. Choosing **Rotate Recovery Key…**
+again continues with that same new key rather than making a third, and
+finishes the job.
+
+## Your plan
+
+Sync, `.env` sync and remote control run on Zode's hosted service, and how much
+of it an account can use depends on its plan. The account menu names the plan —
+for example *Plan: Free · 2 of 2 synced devices* or *Plan: Pro (renews 3 Dec)* —
+with **Upgrade…** or **Manage Plan…** beside it. Both open the website in your
+browser. Paying happens there, through Polar; the editor never sees a card or a
+payment.
+
+The editor reads the plan from `api.zodekit.site` at three moments only: when
+you sign in, when you open the account menu or a sync window, and right after a
+request your plan refused. Never at startup and never on a timer. The answer
+holds the tier, its limits and your team's name, and it is kept in memory only.
+Nothing about how you use the editor is sent to get it.
+
+When the plan does not cover something, the window says what happened and what
+to do instead of failing with a code:
+
+- **A third device on Free** does not sync, and the window says so. Revoke a
+  device on the web, or upgrade.
+- **`.env` sync on Free** uploads nothing. Files already stored stay readable
+  and removable.
+- **Remote control** pauses when the day's relay allowance is used up. It resets
+  at 00:00 UTC; Pro raises it.
+
+Nothing in the editor is switched off because of the plan. The server decides,
+so a plan you changed a minute ago takes effect at once.
+
 ## What is never sent
 
 - Telemetry. The account crates cannot even reach the telemetry code — it is

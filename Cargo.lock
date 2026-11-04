@@ -3384,7 +3384,10 @@ dependencies = [
  "workspace",
  "zed_actions",
  "zed_credentials_provider",
+ "zeroize",
  "zode_account",
+ "zode_env_sync",
+ "zode_team_vault",
 ]
 
 [[package]]
@@ -20440,6 +20443,7 @@ dependencies = [
  "menu",
  "notifications",
  "os_auth",
+ "paths",
  "project",
  "settings",
  "theme",
@@ -20449,9 +20453,11 @@ dependencies = [
  "util",
  "workspace",
  "zed_actions",
+ "zeroize",
  "zode_account",
  "zode_env_sync",
  "zode_sync",
+ "zode_team_vault",
 ]
 
 [[package]]
@@ -20474,6 +20480,31 @@ dependencies = [
  "zeroize",
  "zode_account",
  "zode_sync",
+]
+
+[[package]]
+name = "zode_team_vault"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "credentials_provider",
+ "db",
+ "futures 0.3.32",
+ "gpui",
+ "http_client",
+ "log",
+ "remote_relay_protocol",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "snow",
+ "zeroize",
+ "zode_account",
+ "zode_env_sync",
+ "zode_sync",
+ "zode_team_vault",
 ]
 
 [[package]]

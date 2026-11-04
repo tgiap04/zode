@@ -3,6 +3,7 @@ use std::sync::Arc;
 use futures::AsyncReadExt as _;
 use http_client::{AsyncBody, HttpClient, Request};
 use serde::{Deserialize, Serialize};
+use zode_account::PlanLimit;
 
 use crate::envelope::Resource;
 
@@ -26,6 +27,12 @@ pub enum ClientError {
     /// The session was refused. The caller should stop rather than retry.
     Unauthorized,
     Rejected(String),
+    /// The account's plan does not cover this request (HTTP 402).
+    ///
+    /// Kept apart from `Unauthorized` on purpose: that one means "sign in
+    /// again", and sending someone to sign in because their plan is Free would
+    /// be both wrong and useless — they would come back to the same answer.
+    PlanLimit(PlanLimit),
 }
 
 impl std::fmt::Display for ClientError {
@@ -34,6 +41,7 @@ impl std::fmt::Display for ClientError {
             Self::Unreachable(detail) => write!(f, "the sync service is unreachable: {detail}"),
             Self::Unauthorized => write!(f, "the sync service refused this session"),
             Self::Rejected(detail) => write!(f, "the sync service rejected the request: {detail}"),
+            Self::PlanLimit(limit) => write!(f, "{limit}"),
         }
     }
 }
@@ -188,6 +196,38 @@ pub async fn forget(
     classify(status, &body)
 }
 
+/// Sends one request and hands back the status and body, unclassified.
+///
+/// For routes whose 404 or 409 carries a route-specific answer (`key_pending`,
+/// `key_version_stale`) that the caller must read before anything else does.
+/// Whatever the caller does not interpret itself goes through [`classify`], so
+/// a 401 or a 402 still means the same thing on every route.
+pub async fn request(
+    http_client: &Arc<dyn HttpClient>,
+    api_url: &str,
+    access_token: &str,
+    resource: &Resource,
+    method: &str,
+    json_body: Option<&str>,
+    headers: &[(&str, &str)],
+) -> Result<(u16, String), ClientError> {
+    let mut builder = build(api_url, access_token, resource, method)?;
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let body = match json_body {
+        Some(json) => {
+            builder = builder.header("Content-Type", "application/json");
+            AsyncBody::from(json.to_string())
+        }
+        None => AsyncBody::default(),
+    };
+    let request = builder
+        .body(body)
+        .map_err(|_| ClientError::Unreachable("the request could not be built".into()))?;
+    send(http_client, request).await
+}
+
 fn build(
     api_url: &str,
     access_token: &str,
@@ -224,12 +264,19 @@ async fn send(
     Ok((status, body))
 }
 
-fn classify(status: u16, body: &str) -> Result<(), ClientError> {
+/// The one mapping from an HTTP answer to a [`ClientError`].
+pub fn classify(status: u16, body: &str) -> Result<(), ClientError> {
     if (200..300).contains(&status) {
         return Ok(());
     }
     if status == 401 || status == 403 {
         return Err(ClientError::Unauthorized);
+    }
+    if status == 402 {
+        return Err(ClientError::PlanLimit(PlanLimit::from_body(
+            body,
+            &zode_account::web_url(),
+        )));
     }
     if status >= 500 {
         return Err(ClientError::Unreachable(format!(
@@ -248,4 +295,137 @@ fn classify(status: u16, body: &str) -> Result<(), ClientError> {
         .map(|parsed| parsed.error)
         .unwrap_or_else(|_| format!("http_{status}"));
     Err(ClientError::Rejected(slug))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zode_account::PlanLimitReason;
+
+    fn plan_refusal(body: &str) -> PlanLimit {
+        match classify(402, body) {
+            Err(ClientError::PlanLimit(limit)) => limit,
+            other => panic!("402 must be a plan refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_402_is_a_plan_refusal_with_its_reason_and_numbers() {
+        for (slug, reason) in [
+            ("sync_device_limit", PlanLimitReason::SyncDeviceLimit),
+            ("env_sync_not_in_plan", PlanLimitReason::EnvSyncNotInPlan),
+            (
+                "team_vault_not_in_plan",
+                PlanLimitReason::TeamVaultNotInPlan,
+            ),
+            ("team_inactive", PlanLimitReason::TeamInactive),
+        ] {
+            let body = serde_json::json!({
+                "error": slug,
+                "limit": 2,
+                "used": 3,
+                "tier": "free",
+                "upgradeUrl": zode_account::pricing_url(),
+            });
+            let limit = plan_refusal(&body.to_string());
+            assert_eq!(limit.reason, reason, "{slug}");
+            assert_eq!(limit.limit, Some(2), "{slug}");
+            assert_eq!(limit.used, Some(3), "{slug}");
+            assert_eq!(limit.upgrade_url, zode_account::pricing_url());
+        }
+    }
+
+    #[test]
+    fn a_402_from_an_older_server_or_with_no_body_is_still_a_plan_refusal() {
+        assert_eq!(
+            plan_refusal(r#"{"error":"sync_device_limit"}"#).reason,
+            PlanLimitReason::SyncDeviceLimit
+        );
+        for garbled in ["", "<html>402</html>", "{"] {
+            assert_eq!(
+                plan_refusal(garbled).reason,
+                PlanLimitReason::Other("http_402".into()),
+                "{garbled:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_plan_refusal_displays_its_sentence_not_a_slug() {
+        let limit = plan_refusal(r#"{"error":"env_sync_not_in_plan"}"#);
+        assert_eq!(
+            ClientError::PlanLimit(limit.clone()).to_string(),
+            limit.sentence()
+        );
+    }
+
+    /// Every other mapping is exactly what it was before 402 existed.
+    #[test]
+    fn every_other_status_keeps_its_meaning() {
+        assert_eq!(classify(200, ""), Ok(()));
+        assert_eq!(classify(204, ""), Ok(()));
+        assert_eq!(classify(401, ""), Err(ClientError::Unauthorized));
+        assert_eq!(
+            classify(403, r#"{"error":"sync_device_limit"}"#),
+            Err(ClientError::Unauthorized),
+            "403 stays 'sign in again', whatever its body says"
+        );
+        assert_eq!(
+            classify(404, r#"{"error":"not_found"}"#),
+            Err(ClientError::Rejected("not_found".into()))
+        );
+        assert_eq!(
+            classify(409, ""),
+            Err(ClientError::Rejected("http_409".into()))
+        );
+        assert_eq!(
+            classify(429, r#"{"error":"quota_exceeded","tier":"free"}"#),
+            Err(ClientError::Rejected("quota_exceeded".into()))
+        );
+        assert_eq!(
+            classify(500, ""),
+            Err(ClientError::Unreachable("the server answered 500".into()))
+        );
+        assert_eq!(
+            classify(503, r#"{"error":"sync_device_limit"}"#),
+            Err(ClientError::Unreachable("the server answered 503".into()))
+        );
+    }
+
+    /// Through the real request path, not just `classify`: a read and a write
+    /// refused by the plan both come back as the plan refusal.
+    #[test]
+    fn requests_refused_by_the_plan_surface_the_refusal() {
+        let client: Arc<dyn HttpClient> = http_client::FakeHttpClient::create(|_request| async {
+            Ok(http_client::Response::builder()
+                .status(402)
+                .body(r#"{"error":"sync_device_limit","limit":2,"used":3}"#.into())
+                .expect("a well-formed response"))
+        });
+        let resource = Resource::sync(crate::Kind::Settings);
+
+        let read = futures::executor::block_on(fetch(
+            &client,
+            "https://zodekit.site/api",
+            "token",
+            &resource,
+        ));
+        assert!(
+            matches!(&read, Err(ClientError::PlanLimit(limit)) if limit.reason == PlanLimitReason::SyncDeviceLimit),
+            "{read:?}"
+        );
+
+        let write = futures::executor::block_on(store(
+            &client,
+            "https://zodekit.site/api",
+            "token",
+            &resource,
+            "blob",
+            Precondition::Create,
+        ));
+        assert!(
+            matches!(write, Err(ClientError::PlanLimit(_))),
+            "a refused write must not look stored"
+        );
+    }
 }

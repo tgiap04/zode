@@ -24,6 +24,7 @@ mod render;
 mod result_grid;
 mod session;
 mod standalone;
+mod team_connections;
 
 pub use connection_store::{ConnectionConfig, DatabaseSettings};
 pub use database_panel::DatabasePanel;

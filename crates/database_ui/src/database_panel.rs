@@ -44,6 +44,8 @@ pub(crate) struct ConnectionNode {
     /// Set when the driver says it has only one schema worth showing (SQLite),
     /// so the tree does not spend a level on a lone `main` node.
     pub(crate) collapse_schema_level: bool,
+    /// Set for a connection shared by the team. Never written to settings.
+    pub(crate) team: Option<crate::team_connections::TeamOrigin>,
 }
 
 /// The table whose columns are showing, if any.
@@ -106,6 +108,8 @@ pub struct DatabasePanel {
     /// drag can move a region by the distance travelled rather than by where in
     /// the window the pointer happens to be.
     pub(crate) split_drag: Option<(Split, Pixels)>,
+    /// The "Team" group: its header, and what it says when it lists nothing.
+    pub(crate) team_group: crate::team_connections::TeamGroup,
     _settings_observer: gpui::Subscription,
 }
 
@@ -178,9 +182,11 @@ impl DatabasePanel {
             sql_height: panel_layout::DEFAULT_SQL_HEIGHT,
             tree_width: panel_layout::DEFAULT_TREE_WIDTH,
             split_drag: None,
+            team_group: Default::default(),
             _settings_observer: settings_observer,
         };
         panel.reload_connections(cx);
+        panel.watch_team(cx);
         panel
     }
 
@@ -281,7 +287,7 @@ impl DatabasePanel {
             .map(|config| {
                 match existing
                     .iter()
-                    .position(|node| node.config.name == config.name)
+                    .position(|node| node.team.is_none() && node.config.name == config.name)
                 {
                     // Same name, same url: leave the open session alone.
                     Some(index) if existing[index].config.url == config.url => {
@@ -297,10 +303,15 @@ impl DatabasePanel {
                         expanded: false,
                         schemas: Vec::new(),
                         collapse_schema_level: false,
+                        team: None,
                     },
                 }
             })
             .collect();
+        // Team connections come from the team, not from settings, and stay
+        // after the personal ones.
+        self.connections
+            .extend(existing.into_iter().filter(|node| node.team.is_some()));
         cx.notify();
     }
 

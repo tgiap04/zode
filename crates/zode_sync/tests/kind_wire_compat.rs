@@ -212,3 +212,101 @@ fn the_three_kinds_carry_no_discriminator() {
         Some("0123456789abcdef0123456789abcdef"),
     );
 }
+
+const TEAM: &str = "68b1f0c2a4d3e5f607182900";
+const OTHER_TEAM: &str = "68b1f0c2a4d3e5f607182911";
+const ENTRY: &str = "0123456789abcdef0123456789abcdef";
+
+#[test]
+fn the_team_resources_address_the_phase_06_routes() {
+    use zode_sync::TeamRoute;
+
+    assert_eq!(
+        Resource::team_entry(TEAM, ENTRY).unwrap().path(),
+        format!("teams/{TEAM}/vault/{ENTRY}")
+    );
+    assert_eq!(
+        Resource::team_listing(TEAM).unwrap().path(),
+        format!("teams/{TEAM}/vault")
+    );
+    for (route, tail) in [
+        (TeamRoute::Key, "key"),
+        (TeamRoute::MemberKeys, "members/keys"),
+        (TeamRoute::KeyEnvelopes, "key/envelopes"),
+        (TeamRoute::KeyRotate, "key/rotate"),
+    ] {
+        assert_eq!(
+            Resource::team_route(TEAM, route).unwrap().path(),
+            format!("teams/{TEAM}/{tail}")
+        );
+    }
+    assert_eq!(Resource::sharing_key().path(), "sync/sharing-key");
+    assert_eq!(
+        Resource::account_sharing_key().path(),
+        "account/sharing-key"
+    );
+}
+
+#[test]
+fn a_team_id_cannot_reshape_the_url_either() {
+    for bad in ["..", "a/b", "UPPER", "", "x/../../admin"] {
+        assert!(Resource::team_entry(bad, ENTRY).is_err(), "{bad:?}");
+        assert!(Resource::team_entry(TEAM, bad).is_err(), "{bad:?}");
+        assert!(Resource::team_listing(bad).is_err(), "{bad:?}");
+        assert!(
+            Resource::team_route(bad, zode_sync::TeamRoute::Key).is_err(),
+            "{bad:?}"
+        );
+    }
+}
+
+/// The hole the team in the discriminator closes: the sealing code passes the
+/// team id as the owner field, but the binding must not depend on it. With the
+/// same owner field and the same entry id, a blob moved to another team's slot
+/// must still fail.
+#[test]
+fn a_team_entry_binds_its_team_and_its_id() {
+    use zode_sync::{SyncCryptoError, decrypt_at, encrypt_at};
+
+    let dek = frozen_key();
+    let here = Resource::team_entry(TEAM, ENTRY).unwrap();
+    let sealed = encrypt_at(&dek, TEAM, &here, b"DATABASE_URL=postgres://...").unwrap();
+    assert!(decrypt_at(&dek, TEAM, &here, &sealed).is_ok());
+
+    let other_team = Resource::team_entry(OTHER_TEAM, ENTRY).unwrap();
+    assert!(
+        matches!(
+            decrypt_at(&dek, TEAM, &other_team, &sealed),
+            Err(SyncCryptoError::WrongKey)
+        ),
+        "a team entry opened in another team's slot",
+    );
+
+    let other_entry = Resource::team_entry(TEAM, "fedcba9876543210fedcba9876543210").unwrap();
+    assert!(matches!(
+        decrypt_at(&dek, TEAM, &other_entry, &sealed),
+        Err(SyncCryptoError::WrongKey)
+    ));
+}
+
+#[test]
+fn the_sharing_key_is_its_own_singleton() {
+    use zode_sync::{decrypt_at, encrypt_at};
+
+    // Same shape as `env-key`, different label: a sealed sharing key served
+    // from the env-key slot (or the reverse) does not open.
+    let dek = frozen_key();
+    let sealed = encrypt_at(&dek, USER, &Resource::sharing_key(), &[7u8; 32]).unwrap();
+    assert_eq!(Resource::sharing_key().aad_discriminator(), None);
+    assert!(decrypt_at(&dek, USER, &Resource::sharing_key(), &sealed).is_ok());
+    assert!(
+        decrypt_at(
+            &dek,
+            USER,
+            &Resource::env_singleton("env-key").unwrap(),
+            &sealed
+        )
+        .is_err()
+    );
+    assert_eq!(zode_sync::SHARING_KEY_RESOURCE, "sharing-key");
+}

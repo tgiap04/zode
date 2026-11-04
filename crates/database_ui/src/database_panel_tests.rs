@@ -1543,3 +1543,257 @@ async fn a_long_driver_error_leaves_the_failure_title_in_view(cx: &mut TestAppCo
         frame.bottom()
     );
 }
+
+fn team_session_global(cx: &mut gpui::VisualTestContext) {
+    cx.update(|_window, cx| {
+        let account = cx.new(|_| {
+            zode_account::Account::for_test(zode_account::AccountStatus::SignedIn(
+                zode_account::AccountUser {
+                    id: "u-ada".into(),
+                    email: "ada@example.com".into(),
+                    name: None,
+                    avatar_url: None,
+                },
+            ))
+        });
+        let team = cx.new(|cx| zode_team_vault::TeamVaultSession::new(account, cx));
+        zode_team_vault::TeamVaultSession::set_global(team, cx);
+    });
+}
+
+/// A team connection as `sync_team_connections` leaves it once pulled.
+fn push_team_node(
+    panel: &mut DatabasePanel,
+    byte: u8,
+    name: &str,
+    fetched: bool,
+    password: Option<&str>,
+) {
+    use crate::database_panel::{ConnectionNode, NodeState};
+    use crate::team_connections::TeamOrigin;
+
+    panel.team_group.name = Some("Acme".into());
+    panel.connections.push(ConnectionNode {
+        config: crate::ConnectionConfig {
+            name: name.into(),
+            driver: if fetched {
+                "postgres".into()
+            } else {
+                String::new()
+            },
+            url: if fetched {
+                format!("postgres://app@{name}.internal/app")
+            } else {
+                String::new()
+            },
+        },
+        state: NodeState::Idle,
+        expanded: false,
+        schemas: Vec::new(),
+        collapse_schema_level: false,
+        team: Some(TeamOrigin {
+            entry: zode_env_sync::EntryId::parse(&format!("{byte:02x}").repeat(16))
+                .expect("a valid id"),
+            revision: "1".into(),
+            fetched,
+            shared_password: password.map(|password| zeroize::Zeroizing::new(password.into())),
+        }),
+    });
+}
+
+/// Settings fire on every keystroke in the settings file. A team connection
+/// is not in settings, so a reload must neither drop it nor mistake it for a
+/// personal connection of the same name.
+#[gpui::test]
+async fn team_connections_survive_a_settings_reload_under_their_own_header(
+    cx: &mut TestAppContext,
+) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    set_connections(cx, &[("staging", "/tmp/staging.sqlite")]);
+    panel.update(cx, |panel, _cx| {
+        push_team_node(panel, 0xa1, "staging", true, None);
+    });
+
+    set_connections(
+        cx,
+        &[
+            ("staging", "/tmp/staging.sqlite"),
+            ("local", "/tmp/local.sqlite"),
+        ],
+    );
+
+    panel.update(cx, |panel, _cx| {
+        assert_eq!(
+            panel.connection_names(),
+            vec!["staging", "local", "staging"],
+            "personal connections first, the team's after them, the same name kept apart"
+        );
+        assert!(panel.connections[0].team.is_none());
+        assert!(panel.connections[2].team.is_some());
+
+        let rows = panel.rows();
+        let header = rows
+            .iter()
+            .position(|row| matches!(row, crate::connection_tree::Row::TeamHeader { .. }))
+            .expect("the team's connections sit under a header");
+        assert!(
+            matches!(
+                rows.get(header + 1),
+                Some(crate::connection_tree::Row::Connection { index: 2 })
+            ),
+            "the header comes right before the first team connection"
+        );
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+/// A team that shares nothing, or has not been loaded, still shows where its
+/// connections would be, with the button that loads them.
+#[gpui::test]
+async fn an_empty_team_group_draws_its_header_and_note(cx: &mut TestAppContext) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    panel.update(cx, |panel, _cx| {
+        panel.team_group.name = Some("Acme".into());
+        panel.team_group.note = Some("Press reload to load shared connections".into());
+        let rows = panel.rows();
+        assert!(matches!(
+            rows.first(),
+            Some(crate::connection_tree::Row::TeamHeader { .. })
+        ));
+        assert!(matches!(
+            rows.get(1),
+            Some(crate::connection_tree::Row::Note { .. })
+        ));
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+/// The shared password goes into the keychain once, after it worked, under
+/// the same key `Set Password…` uses -- and the copy in memory goes with it,
+/// so every later open reads the keychain like any personal connection.
+#[gpui::test]
+async fn a_shared_password_is_stored_once_and_then_forgotten(cx: &mut TestAppContext) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    let store = std::sync::Arc::new(MemoryCredentials::default());
+    cx.update(|_window, cx| {
+        cx.set_global(zed_credentials_provider::ZedCredentialsProvider(
+            store.clone(),
+        ));
+    });
+    panel.update(cx, |panel, _cx| {
+        push_team_node(panel, 0xa1, "staging", true, Some("hunter2"));
+    });
+
+    panel.update(cx, |panel, cx| {
+        let shared = panel.connections[0]
+            .team
+            .as_ref()
+            .and_then(|team| team.shared_password.clone())
+            .expect("the fixture shares a password");
+        // What a successful open hands over: the keychain had nothing.
+        let choice = crate::team_connections::choose_secret(None, Some(shared));
+        assert_eq!(choice.secret.as_deref(), Some("hunter2"));
+        let remember = choice.remember.expect("kept after it worked");
+        panel.remember_shared_password(0, remember, cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        store.entry("postgres://app@staging.internal/app"),
+        Some(("staging".to_string(), b"hunter2".to_vec())),
+        "stored under the URL, as Set Password… does"
+    );
+    panel.update(cx, |panel, _cx| {
+        assert!(
+            panel.connections[0]
+                .team
+                .as_ref()
+                .is_some_and(|team| team.shared_password.is_none()),
+            "the in-memory copy is dropped once the keychain has it"
+        );
+        let next = crate::team_connections::choose_secret(
+            Some("hunter2".into()),
+            panel.connections[0]
+                .team
+                .as_ref()
+                .and_then(|team| team.shared_password.clone()),
+        );
+        assert_eq!(next.remember, None, "the next open stores nothing again");
+    });
+}
+
+/// A team connection's settings live sealed in the team vault, so opening it
+/// pulls them first -- and with no team key here, it says so rather than
+/// starting a driver with an empty URL.
+#[gpui::test]
+async fn opening_an_unfetched_team_connection_pulls_it_first(cx: &mut TestAppContext) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    team_session_global(cx);
+    cx.update(|_window, cx| crate::driver_registry::install_for_test("postgres", cx));
+    panel.update(cx, |panel, _cx| {
+        push_team_node(panel, 0xa1, "staging", false, None);
+    });
+
+    panel.update_in(cx, |panel, window, cx| {
+        panel.toggle_connection(0, window, cx);
+        assert!(
+            panel.is_reaching_for_a_driver(0),
+            "the row shows it is working while the entry is fetched"
+        );
+    });
+    cx.run_until_parked();
+
+    panel.update(cx, |panel, _cx| {
+        let failure = panel
+            .failure(0)
+            .expect("without the team key the pull fails");
+        assert!(failure.contains("team key"), "{failure}");
+        assert!(
+            panel.connections[0]
+                .team
+                .as_ref()
+                .is_some_and(|team| !team.fetched),
+            "nothing was opened with settings it never received"
+        );
+    });
+}
+
+/// Sharing a connection leaves the password at home unless asked.
+#[gpui::test]
+async fn sharing_a_connection_starts_without_its_password(cx: &mut TestAppContext) {
+    let (workspace, panel, cx) = workspace_with_panel(cx).await;
+    team_session_global(cx);
+    set_connections(cx, &[("staging", "/tmp/staging.sqlite")]);
+
+    panel.update_in(cx, |panel, window, cx| panel.share_with_team(0, window, cx));
+    draw_again(cx);
+
+    let modal = workspace
+        .read_with(cx, |workspace, cx| {
+            workspace.active_modal::<crate::team_connections::ShareConnectionModal>(cx)
+        })
+        .expect("the share window must be showing");
+    modal.read_with(cx, |modal, _cx| {
+        assert!(!modal.include_password, "the password box starts unticked");
+    });
+    assert!(cx.debug_bounds("database-share-connection").is_some());
+}
+
+/// A team connection is not in settings: it has no pin to offer, and the menu
+/// still opens on it.
+#[gpui::test]
+async fn right_clicking_a_team_connection_opens_its_menu(cx: &mut TestAppContext) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    panel.update(cx, |panel, _cx| {
+        push_team_node(panel, 0xa1, "staging", true, None);
+    });
+    panel.update_in(cx, |panel, window, cx| {
+        panel.deploy_connection_menu(0, gpui::point(gpui::px(10.), gpui::px(10.)), window, cx);
+        assert!(panel.context_menu.is_some());
+    });
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
