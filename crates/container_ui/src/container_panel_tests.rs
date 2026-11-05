@@ -2672,8 +2672,8 @@ mod on_the_project_s_host {
     use std::rc::Rc;
     use std::sync::Arc;
 
+    use container::ContainerError;
     use container::backend_test_suite::RecordingHost;
-    use container::{ContainerError, ResourceKind};
     use futures::channel::oneshot;
     use gpui::{AppContext as _, Task, TestAppContext};
     use util::command::CommandHost;
@@ -2869,7 +2869,7 @@ mod on_the_project_s_host {
                 .collect();
             assert_eq!(names, ["dev", "prod"]);
             assert!(panel.offers_config_picker());
-            assert_eq!(panel.active_kind, ResourceKind::Pod);
+            assert_eq!(panel.active_kind, container::ResourceKind::Pod);
         });
         assert!(
             programs(&remote).contains(&"kubectl config view -o json".to_string()),

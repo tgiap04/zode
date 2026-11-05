@@ -638,13 +638,13 @@ mod tests {
     /// backend instead of a release asset.
     #[test]
     fn the_drivers_uploaded_to_the_web_are_the_ones_the_app_knows() {
-        let registry = repo_file("crates/database_ui/src/driver_registry.rs");
+        let registry = repo_file("crates/database/src/install/store.rs");
         let built_in = registry
-            .split_once("const BUILT_IN: &[(&str, &str)] = &[")
-            .expect("`BUILT_IN` must still be the app's list of shipped drivers")
+            .split_once("pub const PUBLISHED_DRIVERS: &[(&str, &str)] = &[")
+            .expect("`PUBLISHED_DRIVERS` must still be the app's list of shipped drivers")
             .1
             .split_once("];")
-            .expect("an unterminated BUILT_IN")
+            .expect("an unterminated PUBLISHED_DRIVERS")
             .0;
 
         for id in assets::DRIVER_IDS {

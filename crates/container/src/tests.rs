@@ -1740,22 +1740,27 @@ mod through_the_host {
                 )),
             ]
         };
-        let mut hosts = vec![(
+        let hosts = vec![(
             "missing wrapper",
             Arc::new(RecordingHost::new("Ubuntu-22.04")),
         )];
+        // The ssh case scripts its failure with `sh`, which Windows lacks.
         #[cfg(unix)]
-        hosts.push((
-            "ssh exit 255",
-            Arc::new(RecordingHost::answering_with(
-                "build-box",
-                "sh",
-                &[
-                    "-c",
-                    "echo 'ssh: connect to host build-box: Connection refused' >&2; exit 255",
-                ],
-            )),
-        ));
+        let hosts = {
+            let mut hosts = hosts;
+            hosts.push((
+                "ssh exit 255",
+                Arc::new(RecordingHost::answering_with(
+                    "build-box",
+                    "sh",
+                    &[
+                        "-c",
+                        "echo 'ssh: connect to host build-box: Connection refused' >&2; exit 255",
+                    ],
+                )),
+            ));
+            hosts
+        };
 
         for (case, host) in hosts {
             for backend in backends(host.clone()) {
