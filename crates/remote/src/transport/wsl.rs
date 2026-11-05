@@ -45,6 +45,15 @@ impl From<settings::WslConnection> for WslConnectionOptions {
     }
 }
 
+impl WslConnectionOptions {
+    fn status_label(&self) -> String {
+        match &self.user {
+            Some(user) => format!("{user}@{}", self.distro_name),
+            None => self.distro_name.clone(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct WslRemoteConnection {
     remote_binary_path: Option<Arc<RelPath>>,
@@ -82,7 +91,15 @@ impl WslRemoteConnection {
             default_system_shell: String::from("/bin/sh"),
             has_wsl_interop: false,
         };
-        delegate.set_status(Some("Detecting WSL environment"), cx);
+        // The first `wsl.exe` call is what boots a stopped distro, which can
+        // take several seconds, so name that wait instead of "detecting".
+        delegate.set_status(
+            Some(&format!(
+                "Starting WSL ({})",
+                this.connection_options.status_label()
+            )),
+            cx,
+        );
         this.shell = this
             .detect_shell()
             .await
@@ -187,6 +204,14 @@ impl WslRemoteConnection {
         let dst_path =
             paths::remote_server_dir_relative().join(RelPath::unix(&binary_name).unwrap());
 
+        delegate.set_status(
+            Some(&format!(
+                "Checking Zode server in {}",
+                self.connection_options.status_label()
+            )),
+            cx,
+        );
+
         if let Some(parent) = dst_path.parent() {
             let parent = parent.display(PathStyle::Posix);
             let mkdir = self.shell_kind.prepend_command_prefix("mkdir");
@@ -258,7 +283,13 @@ impl WslRemoteConnection {
         delegate: &Arc<dyn RemoteClientDelegate>,
         cx: &mut AsyncApp,
     ) -> Result<()> {
-        delegate.set_status(Some("Uploading remote server"), cx);
+        delegate.set_status(
+            Some(&format!(
+                "Copying Zode server into {}",
+                self.connection_options.status_label()
+            )),
+            cx,
+        );
 
         if let Some(parent) = dst_path.parent() {
             let parent = parent.display(PathStyle::Posix);
@@ -307,7 +338,13 @@ impl WslRemoteConnection {
         delegate: &Arc<dyn RemoteClientDelegate>,
         cx: &mut AsyncApp,
     ) -> Result<()> {
-        delegate.set_status(Some("Extracting remote server"), cx);
+        delegate.set_status(
+            Some(&format!(
+                "Installing Zode server in {}",
+                self.connection_options.status_label()
+            )),
+            cx,
+        );
 
         let tmp_path_str = tmp_path.display(PathStyle::Posix);
         let dst_path_str = dst_path.display(PathStyle::Posix);
@@ -345,7 +382,13 @@ impl RemoteConnection for WslRemoteConnection {
         delegate: Arc<dyn RemoteClientDelegate>,
         cx: &mut AsyncApp,
     ) -> Task<Result<i32>> {
-        delegate.set_status(Some("Starting proxy"), cx);
+        delegate.set_status(
+            Some(&format!(
+                "Starting Zode server in {}",
+                self.connection_options.status_label()
+            )),
+            cx,
+        );
 
         let Some(remote_binary_path) = &self.remote_binary_path else {
             return Task::ready(Err(anyhow!("Remote binary path not set")));
@@ -866,5 +909,23 @@ mod tests {
                 "exec env /bin/bash -l",
             ])
         );
+    }
+
+    #[test]
+    fn status_label_names_the_distro() {
+        let options = WslConnectionOptions {
+            distro_name: "Ubuntu".to_string(),
+            user: None,
+        };
+        assert_eq!(options.status_label(), "Ubuntu");
+    }
+
+    #[test]
+    fn status_label_names_the_user_when_one_is_set() {
+        let options = WslConnectionOptions {
+            distro_name: "Ubuntu".to_string(),
+            user: Some("dev".to_string()),
+        };
+        assert_eq!(options.status_label(), "dev@Ubuntu");
     }
 }
