@@ -502,6 +502,7 @@ mod tests {
             }
         }
 
+        #[cfg(unix)]
         fn asked(&self) -> Vec<(String, Vec<String>, Option<std::path::PathBuf>)> {
             self.asked.lock().expect("not poisoned").clone()
         }

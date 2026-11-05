@@ -225,6 +225,7 @@ mod tests {
             }
         }
 
+        #[cfg(unix)]
         fn running(program: &str, args: &[&str]) -> Self {
             Self {
                 wrapper: CommandTemplate {
