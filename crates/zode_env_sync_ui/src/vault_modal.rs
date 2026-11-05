@@ -12,7 +12,7 @@ use ui_input::{ErasedEditorEvent, InputField};
 use util::ResultExt as _;
 use workspace::{ModalView, Workspace};
 use zode_account::{Account, PlanSummary};
-use zode_env_sync::{EntryId, EnvSession, EnvStatus, ProjectId};
+use zode_env_sync::{Checkout, EntryId, EnvSession, EnvStatus, ProjectId};
 
 use crate::team_vault_section::{self, TeamVaultSection};
 use crate::{ActiveEnvFile, EnvDiffModal, WirePanel};
@@ -26,7 +26,7 @@ enum Purpose {
     /// Browsing everything on the account.
     Browse,
     /// Answering "which project is this checkout?".
-    Bind { worktree_root: PathBuf },
+    Bind { checkout: Checkout },
     /// Opened from an environment file that is not in the catalogue yet: pick
     /// the project it belongs to, and send it.
     Send { file: ActiveEnvFile },
@@ -89,17 +89,11 @@ impl VaultModal {
     pub fn binding(
         session: Entity<EnvSession>,
         workspace: WeakEntity<Workspace>,
-        worktree_root: PathBuf,
+        checkout: Checkout,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::with_purpose(
-            session,
-            workspace,
-            Purpose::Bind { worktree_root },
-            window,
-            cx,
-        )
+        Self::with_purpose(session, workspace, Purpose::Bind { checkout }, window, cx)
     }
 
     /// The same window, opened from an environment file that has no entry yet.
@@ -200,10 +194,11 @@ impl VaultModal {
     fn choose(&mut self, project: ProjectId, window: &mut Window, cx: &mut Context<Self>) {
         match &self.purpose {
             Purpose::Browse => {}
-            Purpose::Bind { worktree_root } => {
-                let root = worktree_root.clone();
-                self.session
-                    .update(cx, |session, cx| session.bind(root, project, cx));
+            Purpose::Bind { checkout } => {
+                let checkout = checkout.clone();
+                self.session.update(cx, |session, cx| {
+                    session.bind_checkout(&checkout, project, cx)
+                });
                 cx.emit(DismissEvent);
             }
             Purpose::Send { file } => {
@@ -228,10 +223,10 @@ impl VaultModal {
             // recorded is what lets the catalogue store `services/api/.env`
             // instead of a bare `.env`, so a pull on the next machine lands in
             // the right directory. It is local and never sent.
-            if session.project_for(&file.worktree_root).is_none() {
-                session.bind(file.worktree_root.clone(), project, cx);
+            if session.project_for_checkout(&file.checkout).is_none() {
+                session.bind_checkout(&file.checkout, project, cx);
             }
-            session.add_file(project, file.absolute.clone(), cx)
+            session.add_file_in(project, &file.checkout, file.absolute.clone(), cx)
         });
         // `add_file` has already put the reason on the status line.
         let Some(entry) = entry else {
@@ -252,9 +247,29 @@ impl VaultModal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.session.update(cx, |session, cx| {
-            session.prepare(entry, file.absolute.clone(), cx)
+        if let Some(local_path) = file.file.local_path() {
+            let local_path = local_path.to_path_buf();
+            self.session
+                .update(cx, |session, cx| session.prepare(entry, local_path, cx));
+            self.hand_off_prepared(entry, window, cx);
+            return;
+        }
+        // A remote file is read over the connection first, so the hand-off
+        // waits for that read.
+        let prepared = self.session.update(cx, |session, cx| {
+            session.prepare_file(entry, file.file.clone(), file.absolute.clone(), cx)
         });
+        cx.spawn_in(window, async move |this, cx| {
+            prepared.await;
+            this.update_in(cx, |this, window, cx| {
+                this.hand_off_prepared(entry, window, cx)
+            })
+            .log_err();
+        })
+        .detach();
+    }
+
+    fn hand_off_prepared(&mut self, entry: EntryId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(wire) = self.session.read(cx).prepared().cloned() else {
             // Nothing to send, or it failed to build. The status line says
             // which, so the window stays open to show it.
@@ -502,10 +517,7 @@ impl VaultModal {
                     .find(|root| path.starts_with(root))
                     .or_else(|| path.parent().map(Path::to_path_buf))
                     .unwrap_or_else(|| path.clone());
-                let file = ActiveEnvFile {
-                    worktree_root,
-                    absolute: path.clone(),
-                };
+                let file = ActiveEnvFile::local(worktree_root, path.clone());
                 this.show_push(entry, file, window, cx);
             });
         })
@@ -568,7 +580,7 @@ impl Render for VaultModal {
         // Read out of the purpose before the session borrow, so the row
         // closures below do not have to hold on to `self`.
         let bind_root = match &self.purpose {
-            Purpose::Bind { worktree_root } => Some(worktree_root.clone()),
+            Purpose::Bind { checkout } => Some(checkout.clone()),
             _ => None,
         };
         let picking = !matches!(self.purpose, Purpose::Browse);
@@ -673,7 +685,7 @@ impl Render for VaultModal {
             let file_count = project.entries.len();
             let bound_here = bind_root
                 .as_ref()
-                .is_some_and(|root| session.project_for(root) == Some(project_id));
+                .is_some_and(|checkout| session.project_for_checkout(checkout) == Some(project_id));
 
             let mut header = ListItem::new(SharedString::from(format!(
                 "env-vault-project-{}",
@@ -1081,6 +1093,7 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
     use zode_account::{Account, AccountStatus, AccountUser};
     use zode_env_sync::manifest::{Manifest, ManifestEntry, ManifestProject};
 
@@ -1134,9 +1147,40 @@ mod tests {
     }
 
     fn a_file() -> ActiveEnvFile {
-        ActiveEnvFile {
-            worktree_root: PathBuf::from("/checkout"),
-            absolute: PathBuf::from("/checkout/services/api/.env"),
+        ActiveEnvFile::local(
+            PathBuf::from("/checkout"),
+            PathBuf::from("/checkout/services/api/.env"),
+        )
+    }
+
+    const WSL_HOST: &str = r#"["wsl","Ubuntu",null]"#;
+
+    /// A file on a remote host, counting how often it is read there.
+    #[derive(Default)]
+    struct HostFile {
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl zode_env_sync::EnvFile for HostFile {
+        fn read(&self) -> zode_env_sync::EnvFileFuture<'_, Option<Vec<u8>>> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(Some(b"API_KEY=on_the_host\n".to_vec())) })
+        }
+
+        fn write_atomic(&self, _contents: Vec<u8>) -> zode_env_sync::EnvFileFuture<'_, ()> {
+            Box::pin(async {
+                Err(zode_env_sync::EnvSyncError::Io(
+                    "sending must never write".into(),
+                ))
+            })
+        }
+    }
+
+    struct Directory(PathBuf);
+
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
         }
     }
 
@@ -1345,7 +1389,13 @@ mod tests {
         // checkout, opening the vault, making a project and then finding the
         // file picker. One name is now enough.
         init_theme(cx);
+        let directory = Directory(
+            std::env::temp_dir().join(format!("zode-env-vault-local-send-{}", std::process::id())),
+        );
         let session = session(None, cx);
+        session.update(cx, |session, _cx| {
+            session.keep_files_in_for_test(&directory.0)
+        });
         let (modal, cx) = cx.add_window_view({
             let session = session.clone();
             |window, cx| {
@@ -1548,6 +1598,74 @@ mod tests {
         });
         cx.run_until_parked();
         modal.update(cx, |modal, cx| assert!(modal.status_line(cx).is_none()));
+    }
+
+    #[gpui::test]
+    fn sending_a_remote_file_binds_its_host_checkout_and_reads_it_there(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let directory = Directory(
+            std::env::temp_dir().join(format!("zode-env-vault-remote-send-{}", std::process::id())),
+        );
+        std::fs::create_dir_all(&directory.0).expect("the fixture directory");
+        let session = session(None, cx);
+        session.update(cx, |session, _cx| {
+            session.keep_files_in_for_test(&directory.0);
+            session.unlock_for_test(zode_env_sync::EnvDek::from_bytes(
+                [0x33; zode_sync::DEK_LEN],
+            ));
+        });
+        let host_file = Arc::new(HostFile::default());
+        let checkout = Checkout::remote(WSL_HOST, "/home/me/acme");
+        // A path on the host. Nothing is there on this machine, so a read of
+        // it here would find no file and build nothing to send.
+        let file = ActiveEnvFile {
+            file: host_file.clone(),
+            checkout: checkout.clone(),
+            absolute: PathBuf::from("/home/me/acme/services/api/.env"),
+        };
+        let (modal, cx) = cx.add_window_view({
+            let session = session.clone();
+            |window, cx| VaultModal::sending(session, WeakEntity::new_invalid(), file, window, cx)
+        });
+        cx.run_until_parked();
+
+        modal.update_in(cx, |modal, window, cx| {
+            modal.naming = true;
+            modal
+                .name_input
+                .update(cx, |field, cx| field.set_text("acme-api", window, cx));
+            modal.create_project(window, cx);
+        });
+        cx.run_until_parked();
+
+        session.read_with(cx, |session, _cx| {
+            let project = session
+                .project_for_checkout(&checkout)
+                .expect("the host's checkout is bound by the same choice");
+            assert_eq!(
+                session.project_for(Path::new("/home/me/acme")),
+                None,
+                "the host's directory was bound as one on this machine"
+            );
+            let entries = &session.manifest().projects[&project].entries;
+            assert_eq!(
+                entries
+                    .values()
+                    .map(|entry| entry.path.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["services/api/.env"],
+                "the path must be relative to the host's checkout"
+            );
+            assert!(
+                session.prepared().is_some(),
+                "the push must be built from what the host holds"
+            );
+        });
+        assert_eq!(
+            host_file.reads.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the file is read on its host, once"
+        );
     }
 
     #[gpui::test]

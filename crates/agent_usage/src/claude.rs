@@ -9,7 +9,13 @@
 //! undocumented endpoint moved.
 //!
 //! The token is read fresh for each fetch and never stored, never logged, and
-//! never written anywhere.
+//! never written anywhere. The buffers this module reads it into, and the
+//! copies it makes, are wiped when the fetch lets go of them; what the OS, the
+//! JSON parser and the HTTP stack copy along the way is beyond its reach.
+//!
+//! For a project on a remote host the token is the one Claude Code holds on
+//! that host, read through the project's [`CommandHost`]: the agents there
+//! spend that account, so this machine's would be the wrong one to show.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,6 +25,8 @@ use futures::AsyncReadExt as _;
 use gpui::{BackgroundExecutor, SharedString};
 use http_client::{AsyncBody, HttpClient, Request};
 use serde::Deserialize;
+use util::command::{CommandHost, Stdio};
+use zeroize::Zeroizing;
 
 use crate::{UsageWindow, WindowKind};
 
@@ -60,6 +68,34 @@ const RUNTIME_OVERRIDES: [&str; 3] = [
     "ANTHROPIC_API_KEY",
 ];
 
+/// Prints Claude Code's credential file on a remote host, where there is no
+/// keychain and the file is the only copy.
+///
+/// Constant, with nothing spliced in: the config directory reaches it as a
+/// variable. A wrapper that runs no login shell (`wsl.exe --exec`) does not
+/// load the user's `CLAUDE_CONFIG_DIR`, so the value the project's environment
+/// was loaded with is passed along explicitly.
+const HOST_CREDENTIALS_SCRIPT: &str = "file=\"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/.credentials.json\"; \
+     [ -r \"$file\" ] || exit 3; exec cat -- \"$file\"";
+
+/// The script's answer for "there is no credential file", told apart from a
+/// host that could not run it at all.
+const NO_CREDENTIALS_FILE_EXIT: i32 = 3;
+
+/// More than any credential file holds. Reading stops here rather than
+/// buffering whatever a host sends back.
+const MAX_CREDENTIALS_BYTES: usize = 64 * 1024;
+
+/// Room for the one byte past the limit that tells a file too large from one
+/// that fits, plus the 32 bytes `read_to_end` reserves whenever the buffer is
+/// full. Without them a file at the limit grows the buffer, and the
+/// allocation it leaves holds the file unwiped.
+const CREDENTIAL_BUFFER_CAPACITY: usize = MAX_CREDENTIALS_BYTES + 1 + 32;
+
+/// How long a remote host gets to print its credential file. Covers starting
+/// a stopped WSL distro, which takes seconds.
+const HOST_READ_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Why there is nothing to show, when there is nothing to show.
 ///
 /// Carried rather than collapsed to `None` so the indicator's tooltip can say
@@ -69,8 +105,15 @@ const RUNTIME_OVERRIDES: [&str; 3] = [
 pub enum Unavailable {
     /// An `ANTHROPIC_*` override is in force.
     RuntimeOverride,
-    /// Claude Code has never signed in on this machine.
+    /// Claude Code has never signed in on the machine that was asked.
     NoCredentials,
+    /// The remote host a project lives on could not be asked: it is not
+    /// connected, or the command reaching it failed.
+    HostUnavailable,
+    /// The remote host printed something that is not a credential file:
+    /// output from the user's shell startup files, or more than one could
+    /// hold. Not proof of being signed out, so it is not said as such.
+    CredentialsUnreadable,
     /// Signed in, but on a plan with no quota windows to report.
     UnsupportedPlan,
     /// The request or the parse failed. Carries a short reason, never a token.
@@ -98,8 +141,10 @@ struct Credentials {
 
 #[derive(Deserialize)]
 struct OauthCredentials {
+    /// Wrapped as it is parsed, so a file that fails to parse further on
+    /// still wipes the token it got through.
     #[serde(rename = "accessToken")]
-    access_token: Option<String>,
+    access_token: Option<Zeroizing<String>>,
     #[serde(rename = "subscriptionType", default)]
     subscription_type: Option<String>,
     #[serde(rename = "rateLimitTier", default)]
@@ -265,10 +310,11 @@ async fn read_credentials(executor: &BackgroundExecutor) -> Option<Credentials> 
                     .output()
                     .await
                     .ok()?;
+                let stdout = Zeroizing::new(output.stdout);
                 if !output.status.success() {
                     return None;
                 }
-                serde_json::from_slice::<Credentials>(&output.stdout).ok()
+                serde_json::from_slice::<Credentials>(&stdout).ok()
             })
             .await
     } else {
@@ -284,7 +330,7 @@ async fn read_credentials(executor: &BackgroundExecutor) -> Option<Credentials> 
         .join(".credentials.json");
     executor
         .spawn(async move {
-            let contents = smol::fs::read(path).await.ok()?;
+            let contents = Zeroizing::new(smol::fs::read(path).await.ok()?);
             serde_json::from_slice::<Credentials>(&contents).ok()
         })
         .await
@@ -306,16 +352,128 @@ pub async fn fetch(
     let credentials = read_credentials(&executor)
         .await
         .ok_or(Unavailable::NoCredentials)?;
+    let token = access_token(credentials)?;
+
+    fetch_with_token(http_client, executor, &token).await
+}
+
+/// [`fetch`] for the account Claude Code is signed into on `host`.
+///
+/// Never falls back to this machine's keychain or file: a remote host that
+/// cannot be read shows nothing, because this machine's numbers would be
+/// another account's.
+pub async fn fetch_on_host(
+    http_client: Arc<dyn HttpClient>,
+    executor: BackgroundExecutor,
+    host: Arc<dyn CommandHost>,
+) -> Result<Vec<UsageWindow>, Unavailable> {
+    if runtime_override_present(|key| host.environment_variable(key)) {
+        return Err(Unavailable::RuntimeOverride);
+    }
+
+    let deadline = async {
+        executor.timer(HOST_READ_TIMEOUT).await;
+        log::warn!("claude usage: the project's host did not print its credentials in time");
+        Err(Unavailable::HostUnavailable)
+    };
+    let credentials = smol::future::or(read_credentials_on_host(host.as_ref()), deadline).await?;
+    let token = access_token(credentials)?;
+
+    fetch_with_token(http_client, executor, &token).await
+}
+
+/// The token in `credentials`, once the plan is known to have quota windows.
+fn access_token(credentials: Credentials) -> Result<Zeroizing<String>, Unavailable> {
     let oauth = credentials.oauth.ok_or(Unavailable::NoCredentials)?;
     if !plan_is_supported(&oauth) {
         return Err(Unavailable::UnsupportedPlan);
     }
-    let token = oauth
+    oauth
         .access_token
         .filter(|token| !token.trim().is_empty())
-        .ok_or(Unavailable::NoCredentials)?;
+        .ok_or(Unavailable::NoCredentials)
+}
 
-    fetch_with_token(http_client, executor, &token).await
+/// Claude Code's credential file on `host`, printed by
+/// [`HOST_CREDENTIALS_SCRIPT`] and held in memory only.
+async fn read_credentials_on_host(host: &dyn CommandHost) -> Result<Credentials, Unavailable> {
+    let host_name = host
+        .remote_name()
+        .unwrap_or_else(|| "this machine".to_string());
+    let config_dir = host
+        .environment_variable("CLAUDE_CONFIG_DIR")
+        .filter(|directory| !directory.trim().is_empty());
+    let env: Vec<(&str, &str)> = config_dir
+        .as_deref()
+        .map(|directory| ("CLAUDE_CONFIG_DIR", directory))
+        .into_iter()
+        .collect();
+
+    let unavailable = |what: &str, error: &dyn std::fmt::Display| {
+        log::warn!("claude usage: {what} on {host_name}: {error:#}");
+        Unavailable::HostUnavailable
+    };
+    let mut command = host
+        .command("sh", &["-c", HOST_CREDENTIALS_SCRIPT], &env, None)
+        .map_err(|error| unavailable("the credentials could not be read", &error))?;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| unavailable("the credential read would not start", &error))?;
+
+    let mut contents = credential_buffer();
+    let read = match child.stdout.take() {
+        Some(stdout) => read_bounded(stdout, &mut contents).await,
+        None => Ok(0),
+    };
+    let too_large = contents.len() > MAX_CREDENTIALS_BYTES;
+    if read.is_err() || too_large {
+        if let Err(error) = child.kill() {
+            log::debug!("claude usage: could not stop the credential read on {host_name}: {error}");
+        }
+    }
+    let status = child
+        .status()
+        .await
+        .map_err(|error| unavailable("the credential read could not be awaited", &error))?;
+
+    if let Err(error) = read {
+        return Err(unavailable("the credentials could not be read", &error));
+    }
+    if too_large {
+        log::warn!("claude usage: the credential file on {host_name} is too large to be one");
+        return Err(Unavailable::CredentialsUnreadable);
+    }
+    match status.code() {
+        Some(0) => {}
+        Some(NO_CREDENTIALS_FILE_EXIT) => return Err(Unavailable::NoCredentials),
+        _ => return Err(unavailable("the credential read failed", &status)),
+    }
+    // The parser's error is dropped unread: it quotes the value it choked on,
+    // which can be the token.
+    serde_json::from_slice::<Credentials>(&contents).map_err(|_| {
+        log::warn!("claude usage: the credential file on {host_name} could not be parsed");
+        Unavailable::CredentialsUnreadable
+    })
+}
+
+/// What a remote host's credential file is read into.
+fn credential_buffer() -> Zeroizing<Vec<u8>> {
+    Zeroizing::new(Vec::with_capacity(CREDENTIAL_BUFFER_CAPACITY))
+}
+
+/// Reads at most one byte more than [`MAX_CREDENTIALS_BYTES`], so a caller can
+/// tell a file that fits from one that does not.
+async fn read_bounded(
+    reader: impl futures::AsyncRead + Unpin,
+    contents: &mut Vec<u8>,
+) -> std::io::Result<usize> {
+    futures::AsyncReadExt::take(reader, MAX_CREDENTIALS_BYTES as u64 + 1)
+        .read_to_end(contents)
+        .await
 }
 
 /// The request-and-retry half of [`fetch`], with the credential already in hand.
@@ -386,10 +544,18 @@ enum Attempt {
 }
 
 async fn request_once(http_client: &Arc<dyn HttpClient>, token: &str) -> Attempt {
+    let authorization = Zeroizing::new(format!("Bearer {token}"));
+    let Ok(mut authorization) = http_client::http::HeaderValue::from_str(&authorization) else {
+        return Attempt::Fatal(Unavailable::Request(
+            "the access token is not a valid header".into(),
+        ));
+    };
+    // Keeps the token out of any header dump the HTTP layer logs.
+    authorization.set_sensitive(true);
     let request = match Request::builder()
         .uri(USAGE_URL)
         .header("Accept", "application/json")
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", authorization)
         .header("anthropic-beta", OAUTH_BETA)
         .body(AsyncBody::default())
     {
@@ -822,7 +988,7 @@ mod tests {
     #[test]
     fn a_plan_with_no_quota_is_recognised() {
         let plan = |subscription: &str, tier: &str| OauthCredentials {
-            access_token: Some("unused".into()),
+            access_token: Some(Zeroizing::new("unused".to_string())),
             subscription_type: Some(subscription.into()),
             rate_limit_tier: Some(tier.into()),
         };
@@ -836,5 +1002,335 @@ mod tests {
         assert!(!plan_is_supported(&plan("free", "")));
         assert!(!plan_is_supported(&plan("none", "")));
         assert!(!plan_is_supported(&plan("", "")));
+    }
+
+    #[cfg(unix)]
+    const REMOTE_TOKEN: &str = "sk-ant-oat01-remote-account-secret";
+
+    #[cfg(unix)]
+    fn credential_file(token: &str) -> String {
+        format!(
+            r#"{{"claudeAiOauth":{{"accessToken":"{token}","subscriptionType":"max","rateLimitTier":"default_claude_max_5x"}}}}"#
+        )
+    }
+
+    /// A host that prints `contents` the way the credential script would.
+    #[cfg(unix)]
+    fn host_printing(contents: &str) -> crate::test_support::RecordingHost {
+        crate::test_support::RecordingHost::running(&format!("printf '%s' '{contents}'"))
+    }
+
+    /// A client that records the `Authorization` header of every request and
+    /// answers each with `status`.
+    fn recording_client(status: u16) -> (Arc<dyn HttpClient>, Arc<std::sync::Mutex<Vec<String>>>) {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let client = FakeHttpClient::create(move |request| {
+            let authorization = request
+                .headers()
+                .get("Authorization")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            record.lock().unwrap().push(authorization);
+            async move {
+                let body = if status == 200 {
+                    r#"{"limits": [{"kind": "session", "percent": 12, "resets_at": null}]}"#
+                } else {
+                    ""
+                };
+                Ok(Response::builder()
+                    .status(status)
+                    .body(body.to_string().into())
+                    .unwrap())
+            }
+        });
+        (client as Arc<dyn HttpClient>, seen)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_remote_project_s_credentials_are_read_through_its_host() {
+        let host = host_printing(&credential_file(REMOTE_TOKEN));
+
+        let credentials = smol::block_on(read_credentials_on_host(&host));
+        let token = credentials.and_then(access_token);
+
+        assert_eq!(
+            token.as_ref().map(|token| token.as_str()),
+            Ok(REMOTE_TOKEN),
+            "the token is the one the host printed"
+        );
+        let asked = host.asked();
+        assert_eq!(asked.len(), 1, "one command per read: {asked:?}");
+        assert_eq!(asked[0].program, "sh");
+        assert_eq!(asked[0].args, vec!["-c", HOST_CREDENTIALS_SCRIPT]);
+        assert!(
+            asked[0].env.is_empty(),
+            "nothing to pass when the host's shell sets no config directory"
+        );
+    }
+
+    /// The wrapper runs no login shell, so the directory the user set in their
+    /// shell has to be handed to the script, or it reads the default one.
+    #[cfg(unix)]
+    #[test]
+    fn the_host_s_claude_config_directory_reaches_the_script() {
+        let host = crate::test_support::RecordingHost::running(
+            "[ \"$CLAUDE_CONFIG_DIR\" = /home/me/.claude-work ] || exit 9; printf '{}'",
+        )
+        .with_environment("CLAUDE_CONFIG_DIR", "/home/me/.claude-work");
+
+        let read = smol::block_on(read_credentials_on_host(&host));
+
+        assert!(read.is_ok(), "the script saw the directory");
+        assert_eq!(
+            host.asked()[0].env,
+            vec![(
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/home/me/.claude-work".to_string()
+            )]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_host_with_no_sign_in_is_not_signed_in() {
+        for (script, what) in [
+            (
+                format!("exit {NO_CREDENTIALS_FILE_EXIT}"),
+                "no credential file",
+            ),
+            ("printf '{}'".to_string(), "a file with no sign-in in it"),
+        ] {
+            let host = crate::test_support::RecordingHost::running(&script);
+            let token = smol::block_on(read_credentials_on_host(&host)).and_then(access_token);
+            assert_eq!(
+                token.err(),
+                Some(Unavailable::NoCredentials),
+                "{what} means not signed in"
+            );
+        }
+    }
+
+    /// Prints the start of a credential file holding `token`, then pads it
+    /// past what one can hold.
+    #[cfg(unix)]
+    fn oversized_credential_file_script(token: &str) -> String {
+        format!(
+            r#"printf '%s' '{{"claudeAiOauth":{{"accessToken":"{token}'; head -c {} /dev/zero | tr '\0' a; printf '"}}}}'"#,
+            MAX_CREDENTIALS_BYTES + 16
+        )
+    }
+
+    /// What `rc` files print, a file that half parses, or one far too large
+    /// for a credential file: none of it says the user is signed out, and
+    /// telling them so would send them to sign in again for nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_credential_file_that_cannot_be_read_as_one_is_unreadable_not_signed_out() {
+        for (script, what) in [
+            (
+                format!("printf '%s' '{{\"claudeAiOauth\":{{\"accessToken\":\"{REMOTE_TOKEN}\"'"),
+                "a truncated file",
+            ),
+            ("printf 'not json'".to_string(), "a file that is not JSON"),
+            (
+                format!(
+                    "printf 'Welcome to Ubuntu\\n%s' '{}'",
+                    credential_file(REMOTE_TOKEN)
+                ),
+                "a greeting from the shell's startup files before the file",
+            ),
+            (
+                format!("printf '%s' '{{\"claudeAiOauth\":\"{REMOTE_TOKEN}\"}}'"),
+                "a sign-in of the wrong shape",
+            ),
+            (
+                oversized_credential_file_script(REMOTE_TOKEN),
+                "more than a credential file holds",
+            ),
+        ] {
+            let host = crate::test_support::RecordingHost::running(&script);
+            let token = smol::block_on(read_credentials_on_host(&host)).and_then(access_token);
+            assert_eq!(
+                token.err(),
+                Some(Unavailable::CredentialsUnreadable),
+                "{what} is unreadable, not signed out"
+            );
+        }
+    }
+
+    /// A file at the limit fills the buffer to its last byte, which is where
+    /// `read_to_end` grows it, leaving the old allocation unwiped.
+    #[test]
+    fn reading_a_full_credential_file_never_moves_the_buffer() {
+        let mut contents = credential_buffer();
+        let capacity = contents.capacity();
+        let oversized = vec![b'a'; MAX_CREDENTIALS_BYTES * 2];
+
+        let read = smol::block_on(read_bounded(
+            futures::io::Cursor::new(oversized),
+            &mut contents,
+        ));
+
+        assert_eq!(read.ok(), Some(MAX_CREDENTIALS_BYTES + 1));
+        assert_eq!(
+            contents.capacity(),
+            capacity,
+            "the buffer was reallocated during the read"
+        );
+    }
+
+    /// The `Authorization` header is marked sensitive, so no layer that dumps
+    /// headers prints it.
+    #[test]
+    fn the_authorization_header_is_marked_sensitive() {
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let client: Arc<dyn HttpClient> = FakeHttpClient::create(move |request| {
+            record.lock().unwrap().push(
+                request
+                    .headers()
+                    .get("Authorization")
+                    .map(|value| value.is_sensitive()),
+            );
+            async move {
+                Ok(Response::builder()
+                    .status(401)
+                    .body(String::new().into())
+                    .unwrap())
+            }
+        });
+
+        smol::block_on(request_once(&client, REMOTE_TOKEN_FOR_EVERY_PLATFORM));
+
+        assert_eq!(*seen.lock().unwrap(), vec![Some(true)]);
+    }
+
+    const REMOTE_TOKEN_FOR_EVERY_PLATFORM: &str = "sk-ant-oat01-header-secret";
+
+    #[cfg(unix)]
+    #[test]
+    fn a_host_that_cannot_run_the_read_is_unavailable_not_signed_out() {
+        for host in [
+            crate::test_support::RecordingHost::disconnected(),
+            crate::test_support::RecordingHost::running("exit 255"),
+        ] {
+            assert_eq!(
+                smol::block_on(read_credentials_on_host(&host)).err(),
+                Some(Unavailable::HostUnavailable)
+            );
+        }
+    }
+
+    /// The bug this guards: a remote read that fails reaching for this
+    /// machine's keychain, and showing this machine's account as the remote's.
+    #[gpui::test]
+    async fn a_remote_read_that_fails_never_falls_back_to_this_machine(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (client, seen) = recording_client(200);
+        let host = Arc::new(crate::test_support::RecordingHost::disconnected());
+
+        let result = fetch_on_host(client, cx.executor(), host.clone()).await;
+
+        assert_eq!(result, Err(Unavailable::HostUnavailable));
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "no request may go out with any other account's token"
+        );
+        assert_eq!(host.asked().len(), 1, "the host was asked, once");
+    }
+
+    /// The override check reads the host's environment, where the CLI that
+    /// spends the quota runs, and stops before any credential is read.
+    #[gpui::test]
+    async fn an_override_on_the_host_disqualifies_its_display(cx: &mut gpui::TestAppContext) {
+        let (client, seen) = recording_client(200);
+        let host = Arc::new(
+            crate::test_support::RecordingHost::running("exit 0")
+                .with_environment("ANTHROPIC_API_KEY", "set"),
+        );
+
+        let result = fetch_on_host(client, cx.executor(), host.clone()).await;
+
+        assert_eq!(result, Err(Unavailable::RuntimeOverride));
+        assert!(host.asked().is_empty(), "the credentials were never read");
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn the_remote_account_s_token_is_the_one_the_endpoint_sees(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        let (client, seen) = recording_client(200);
+        let host = Arc::new(host_printing(&credential_file(REMOTE_TOKEN)));
+
+        let windows = fetch_on_host(client, cx.executor(), host).await;
+
+        assert_eq!(windows.map(|windows| windows.len()), Ok(1));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![format!("Bearer {REMOTE_TOKEN}")]
+        );
+    }
+
+    /// The error paths a token is likeliest to leak on: the endpoint refusing
+    /// it, a credential file that half parses or holds the token where an
+    /// object belongs, one too large, and a read that exits with an error.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn the_remote_token_never_reaches_a_log_or_an_error(cx: &mut gpui::TestAppContext) {
+        crate::test_support::install_log_capture();
+        cx.executor().allow_parking();
+        let (client, _) = recording_client(401);
+        let host = Arc::new(host_printing(&credential_file(REMOTE_TOKEN)));
+
+        let refused = fetch_on_host(client, cx.executor(), host).await;
+        let mut errors = vec![format!("{:?}", refused)];
+        for (script, expected) in [
+            (
+                format!("printf '%s' '{{\"claudeAiOauth\":{{\"accessToken\":\"{REMOTE_TOKEN}\"'"),
+                Unavailable::CredentialsUnreadable,
+            ),
+            // serde_json quotes the value of the wrong type in its error.
+            (
+                format!("printf '%s' '{{\"claudeAiOauth\":\"{REMOTE_TOKEN}\"}}'"),
+                Unavailable::CredentialsUnreadable,
+            ),
+            (
+                oversized_credential_file_script(REMOTE_TOKEN),
+                Unavailable::CredentialsUnreadable,
+            ),
+            (
+                format!("printf '%s' '{}'; exit 7", credential_file(REMOTE_TOKEN)),
+                Unavailable::HostUnavailable,
+            ),
+        ] {
+            let host = crate::test_support::RecordingHost::running(&script);
+            let read = smol::block_on(read_credentials_on_host(&host)).err();
+            assert_eq!(read, Some(expected), "{script:?} took another path");
+            errors.push(format!("{read:?}"));
+        }
+        let log = crate::test_support::captured_log();
+        assert!(
+            log.iter()
+                .any(|line| line.contains("claude usage") && line.contains("401")),
+            "the refusal was logged, so the capture saw this run: {log:?}"
+        );
+        assert!(
+            log.iter()
+                .any(|line| line.contains("claude usage") && line.contains("exit status: 7")),
+            "the failed read was logged: {log:?}"
+        );
+        for text in errors.iter().chain(log.iter()) {
+            assert!(
+                !text.contains(REMOTE_TOKEN) && !text.contains("remote-account-secret"),
+                "the token leaked into {text:?}"
+            );
+        }
     }
 }

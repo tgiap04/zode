@@ -376,24 +376,20 @@ impl WorktreePickerDelegate {
             .map(|wt| wt.path.clone())
             .collect();
 
-        // `try_global`, not `global`: opening this picker must not bring a
-        // process-wide session scan into existence just because its Delete
-        // action might get pressed. `None` here means an empty plan -- and
-        // today's exact prompt, unchanged.
-        let session_store = agent_ui::SessionStore::try_global(cx);
-        let plan = session_store
+        // `try_for_project`, not `for_project`: opening this picker must not
+        // bring a session scan into existence just because its Delete action
+        // might get pressed. `None` here means an empty plan -- and today's
+        // exact prompt, unchanged.
+        let session_store = agent_ui::SessionStore::try_for_project(&self.project, cx);
+        let index = session_store
             .as_ref()
-            .map(|store| {
-                checkout_deletion::plan_session_deletion(
-                    store.read(cx).index(),
-                    &path,
-                    &other_live_worktrees,
-                )
-            })
-            .unwrap_or(agent_ui::DeleteAll {
-                targets: Vec::new(),
-                total_bytes: 0,
-            });
+            .map(|store| store.read(cx).index().clone());
+        let plan = checkout_deletion::checkout_session_plan(
+            checkout_deletion::SessionsLiveOn::of(self.project.read(cx)),
+            index.as_deref(),
+            &path,
+            &other_live_worktrees,
+        );
 
         let detail = checkout_deletion::confirm_detail(&label, &path, &plan);
         let buttons = checkout_deletion::confirm_buttons(&plan);

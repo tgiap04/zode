@@ -5,6 +5,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, AtomicUsize},
     },
+    time::Duration,
 };
 
 use anyhow::{Context as _, Result, anyhow, bail};
@@ -1410,5 +1411,683 @@ impl WorktreeHandle {
             WorktreeHandle::Strong(handle) => Some(handle.clone()),
             WorktreeHandle::Weak(handle) => handle.upgrade(),
         }
+    }
+}
+
+/// What a remote project's file request says when its server predates it.
+pub const PRIVATE_FILE_SERVER_OUT_OF_DATE: &str = "Update the remote server to sync this file";
+
+/// The largest private file read or written over the connection. An `.env`
+/// is a few kilobytes; anything near this is not one, and refusing it keeps a
+/// misconfigured `private_files` glob from streaming a database dump.
+pub const PRIVATE_FILE_MAX_BYTES: usize = 1024 * 1024;
+
+const PRIVATE_FILE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Said after "the remote server did not answer within 30s;". A write that
+/// timed out may still land; trying again is safe, because the host refuses
+/// to replace a file that is no longer what was read.
+const PRIVATE_FILE_UNANSWERED: &str = "try again";
+
+impl WorktreeStore {
+    /// Lets the machine that opened this project read and write its private
+    /// files. Registered only by the remote server: a collaboration host
+    /// serving these would hand its `.env` to every guest.
+    pub fn init_private_files(client: &AnyProtoClient) {
+        client.add_entity_request_handler(Self::handle_load_private_file);
+        client.add_entity_request_handler(Self::handle_write_private_file);
+    }
+
+    /// A private file of a remote project, read and written on its host.
+    ///
+    /// `None` for a local project, whose files are read directly, and for a
+    /// collaboration guest, whose host must never be asked for one.
+    pub fn remote_private_file(
+        &self,
+        worktree_id: WorktreeId,
+        path: Arc<RelPath>,
+        cx: &App,
+    ) -> Option<RemotePrivateFile> {
+        let WorktreeStoreState::Remote {
+            upstream_client,
+            upstream_project_id,
+            ..
+        } = &self.state
+        else {
+            return None;
+        };
+        if upstream_client.is_via_collab() || *upstream_project_id != REMOTE_SERVER_PROJECT_ID {
+            return None;
+        }
+        Some(RemotePrivateFile {
+            client: upstream_client.clone(),
+            executor: cx.background_executor().clone(),
+            worktree_id,
+            path,
+            loaded_sha256: Arc::default(),
+        })
+    }
+
+    /// Whether this machine's settings call `path` private.
+    ///
+    /// For a remote project the host asks the same question before it hands
+    /// anything over, but with settings whose user layer this machine synced
+    /// to it, so the two agree by construction and neither is a boundary.
+    /// What limits a request is who may make it and that the path stays
+    /// inside the worktree.
+    pub fn is_path_private_here(&self, path: &ProjectPath, cx: &App) -> bool {
+        use settings::Settings as _;
+        worktree::WorktreeSettings::get(Some(path.into()), cx).is_path_private(&path.path)
+    }
+
+    pub async fn handle_load_private_file(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::LoadPrivateFile>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::LoadPrivateFileResponse> {
+        let payload = envelope.payload;
+        let location = this.update(&mut cx, |this, cx| {
+            this.private_file_location(payload.project_id, payload.worktree_id, &payload.path, cx)
+        })?;
+        let content = cx.background_spawn(async move { location.read() }).await?;
+        Ok(proto::LoadPrivateFileResponse { content })
+    }
+
+    pub async fn handle_write_private_file(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::WritePrivateFile>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::Ack> {
+        let payload = envelope.payload;
+        let location = this.update(&mut cx, |this, cx| {
+            this.private_file_location(payload.project_id, payload.worktree_id, &payload.path, cx)
+        })?;
+        cx.background_spawn(async move {
+            location.write(&payload.content, payload.replaces_sha256.as_deref())
+        })
+        .await?;
+        Ok(proto::Ack {})
+    }
+
+    /// Every check that needs the worktree.
+    ///
+    /// The private-files test uses the server's settings, whose user layer is
+    /// the client's synced copy: it keeps the server from serving arbitrary
+    /// files by accident, not a client that edits its own settings. The
+    /// boundary is that only the machine that opened the project is served,
+    /// that the path stays inside the worktree, and that the file is written
+    /// owner-only.
+    fn private_file_location(
+        &self,
+        project_id: u64,
+        worktree_id: u64,
+        path: &str,
+        cx: &App,
+    ) -> Result<PrivateFileLocation> {
+        let serves_its_owner = matches!(
+            self.downstream_client,
+            Some((_, downstream_id)) if downstream_id == REMOTE_SERVER_PROJECT_ID
+        );
+        if !serves_its_owner || project_id != REMOTE_SERVER_PROJECT_ID {
+            bail!("private files are only served to the machine that opened this project");
+        }
+        let relative = RelPath::from_proto(path)
+            .ok()
+            .filter(|relative| !relative.is_empty())
+            .filter(|_| !cfg!(windows) || names_a_path_inside_on_windows(path))
+            .with_context(|| format!("{path:?} does not name a file inside this project"))?;
+        let worktree = self
+            .worktree_for_id(WorktreeId::from_proto(worktree_id), cx)
+            .context("worktree not found")?;
+        let worktree = worktree.read(cx);
+        let local = worktree.as_local().context("worktree not found")?;
+        if !local.is_path_private(&relative) {
+            bail!("{} is not a private file", relative.as_unix_str());
+        }
+        Ok(PrivateFileLocation {
+            root: worktree.abs_path().to_path_buf(),
+            relative,
+            windows_drive_mounts: windows_drive_mounts(),
+        })
+    }
+}
+
+/// A private file of a remote project's worktree, reached through its host.
+///
+/// Only the file's bytes travel. Remembers what it last read so a write can
+/// say what it replaces: the caller backs that content up before writing, and
+/// a file that changed in between must not be overwritten without its copy.
+#[derive(Clone)]
+pub struct RemotePrivateFile {
+    client: AnyProtoClient,
+    executor: gpui::BackgroundExecutor,
+    worktree_id: WorktreeId,
+    path: Arc<RelPath>,
+    /// `None` until a load answers; then the hash of what it returned, or
+    /// `Some(None)` when there was no file.
+    loaded_sha256: Arc<parking_lot::Mutex<Option<Option<Vec<u8>>>>>,
+}
+
+impl RemotePrivateFile {
+    pub fn path(&self) -> &Arc<RelPath> {
+        &self.path
+    }
+
+    pub async fn load(&self) -> Result<Option<Vec<u8>>> {
+        let request = self.client.request(proto::LoadPrivateFile {
+            project_id: REMOTE_SERVER_PROJECT_ID,
+            worktree_id: self.worktree_id.to_proto(),
+            path: self.path.to_proto(),
+        });
+        let response =
+            private_file_request(request, self.executor.timer(PRIVATE_FILE_TIMEOUT)).await?;
+        *self.loaded_sha256.lock() = Some(response.content.as_deref().map(sha256));
+        Ok(response.content)
+    }
+
+    /// Replaces the file, provided it is still what [`Self::load`] last saw.
+    pub async fn write(&self, content: Vec<u8>) -> Result<()> {
+        if content.len() > PRIVATE_FILE_MAX_BYTES {
+            bail!(
+                "this file is {} bytes; the limit is {PRIVATE_FILE_MAX_BYTES}",
+                content.len()
+            );
+        }
+        let Some(replaces_sha256) = self.loaded_sha256.lock().clone() else {
+            bail!("the file must be read, and so backed up, before it is replaced");
+        };
+        let written_sha256 = sha256(&content);
+        let request = self.client.request(proto::WritePrivateFile {
+            project_id: REMOTE_SERVER_PROJECT_ID,
+            worktree_id: self.worktree_id.to_proto(),
+            path: self.path.to_proto(),
+            content,
+            replaces_sha256,
+        });
+        private_file_request(request, self.executor.timer(PRIVATE_FILE_TIMEOUT)).await?;
+        *self.loaded_sha256.lock() = Some(Some(written_sha256));
+        Ok(())
+    }
+}
+
+async fn private_file_request<T>(
+    request: impl Future<Output = Result<T>>,
+    timer: impl Future<Output = ()>,
+) -> Result<T> {
+    crate::agent_server_store::remote_request_within(
+        request,
+        timer,
+        PRIVATE_FILE_TIMEOUT,
+        PRIVATE_FILE_SERVER_OUT_OF_DATE,
+        PRIVATE_FILE_UNANSWERED,
+    )
+    .await
+}
+
+/// A path sent over the wire is slash-separated. A Windows host would read a
+/// backslash as a separator and a colon as a drive or a stream, so a path
+/// holding either names some other file than the one checked.
+fn names_a_path_inside_on_windows(path: &str) -> bool {
+    !path.contains(['\\', ':'])
+}
+
+/// Where this host mounts the Windows drives, when it is a WSL distro.
+///
+/// The default mount root only: one moved in `/etc/wsl.conf` is not noticed.
+/// Worked out once per process, since it is asked on the foreground thread
+/// for every request and the answer cannot change while the server runs.
+fn windows_drive_mounts() -> Option<PathBuf> {
+    static MOUNTS: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    MOUNTS
+        .get_or_init(|| {
+            if !cfg!(target_os = "linux") {
+                return None;
+            }
+            let inside_wsl = std::env::var_os("WSL_DISTRO_NAME").is_some()
+                || std::fs::read_to_string("/proc/sys/kernel/osrelease")
+                    .is_ok_and(|release| release.to_ascii_lowercase().contains("microsoft"));
+            inside_wsl.then(|| PathBuf::from("/mnt"))
+        })
+        .clone()
+}
+
+/// Whether `path` is under a drive letter directly below `mounts`, as
+/// `/mnt/c/Users/me` is.
+fn is_on_a_windows_drive(path: &Path, mounts: &Path) -> bool {
+    let Ok(below) = path.strip_prefix(mounts) else {
+        return false;
+    };
+    below
+        .components()
+        .next()
+        .and_then(|drive| drive.as_os_str().to_str())
+        .is_some_and(|drive| {
+            drive.len() == 1 && drive.chars().all(|letter| letter.is_ascii_alphabetic())
+        })
+}
+
+fn sha256(content: &[u8]) -> Vec<u8> {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(content).to_vec()
+}
+
+/// A private file as the server resolves it.
+///
+/// Reached below the worktree root without following any link, so a request
+/// can only ever touch a regular file inside the project.
+///
+/// A link at the file itself is refused for reading and for writing alike,
+/// even one pointing inside the project (`.env -> .env.development`):
+/// following it would write a file other than the one named, and replacing it
+/// would quietly turn the link into a copy.
+struct PrivateFileLocation {
+    root: PathBuf,
+    relative: Arc<RelPath>,
+    /// Where this host mounts Windows drives, when it is a WSL distro.
+    windows_drive_mounts: Option<PathBuf>,
+}
+
+impl PrivateFileLocation {
+    fn read(&self) -> Result<Option<Vec<u8>>> {
+        self.refuse_on_a_windows_drive()?;
+        let components = self.components();
+        let content =
+            util::fs::read_file_below(&self.root, &components, PRIVATE_FILE_MAX_BYTES as u64)
+                .map_err(|error| self.explain(error, "read"))?;
+        log::debug!(
+            "read private file {} ({} bytes)",
+            self.relative.as_unix_str(),
+            content.as_ref().map_or(0, Vec::len)
+        );
+        Ok(content)
+    }
+
+    /// Replaces the file, provided it still is what the writer read.
+    ///
+    /// The replacement is a new file: owner-only, owned by the user this
+    /// server runs as, and detached from any hard link the old one shared.
+    fn write(&self, content: &[u8], replaces_sha256: Option<&[u8]>) -> Result<()> {
+        if content.len() > PRIVATE_FILE_MAX_BYTES {
+            bail!(
+                "this file is {} bytes; the limit is {PRIVATE_FILE_MAX_BYTES}",
+                content.len()
+            );
+        }
+        self.refuse_on_a_windows_drive()?;
+        let shown = self.relative.as_unix_str();
+        let still_as_read = |current: Option<&[u8]>| -> Result<()> {
+            match (current, replaces_sha256) {
+                (None, None) => Ok(()),
+                (Some(current), Some(expected)) if sha256(current) == expected => Ok(()),
+                (None, Some(_)) => {
+                    bail!("{shown} was removed on the remote since it was read; pull again")
+                }
+                (Some(_), _) => {
+                    bail!("{shown} changed on the remote since it was read; pull again")
+                }
+            }
+        };
+        let components = self.components();
+        util::fs::replace_file_below(
+            &self.root,
+            &components,
+            content,
+            PRIVATE_FILE_MAX_BYTES as u64,
+            still_as_read,
+        )
+        .map_err(|error| match error.downcast::<util::fs::FileBelowError>() {
+            Ok(error) => self.explain(error, "write"),
+            Err(refused) => refused,
+        })?;
+        log::debug!("wrote private file {shown} ({} bytes)", content.len());
+        Ok(())
+    }
+
+    /// Reading or writing there touches the Windows machine, which opening
+    /// the project in WSL means not to do -- and modes are not kept there, so
+    /// a file written would be readable by every Windows user the drive allows.
+    fn refuse_on_a_windows_drive(&self) -> Result<()> {
+        if let Some(mounts) = &self.windows_drive_mounts
+            && is_on_a_windows_drive(&canonical_or_as_is(&self.root), &canonical_or_as_is(mounts))
+        {
+            bail!(
+                "{} lives on the Windows drive; open the project from the Linux filesystem",
+                self.relative.as_unix_str()
+            );
+        }
+        Ok(())
+    }
+
+    fn components(&self) -> Vec<&str> {
+        self.relative.components().collect()
+    }
+
+    fn explain(&self, error: util::fs::FileBelowError, doing: &str) -> anyhow::Error {
+        use util::fs::FileBelowError;
+
+        let shown = self.relative.as_unix_str();
+        match error {
+            FileBelowError::Link => anyhow!(
+                "{shown} is a symbolic link, or inside one; only a regular file in this project is synced"
+            ),
+            FileBelowError::NotAFile => anyhow!("{shown} is not a regular file"),
+            FileBelowError::TooLarge => {
+                anyhow!("{shown} is larger than {PRIVATE_FILE_MAX_BYTES} bytes")
+            }
+            FileBelowError::Io(error) => {
+                anyhow!(error).context(format!("could not {doing} {shown}"))
+            }
+        }
+    }
+}
+
+fn canonical_or_as_is(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod private_file_tests {
+    use super::*;
+
+    struct Sandbox(PathBuf);
+
+    impl Sandbox {
+        fn new(name: &str) -> Self {
+            let directory = std::env::temp_dir()
+                .join(format!("zode-private-file-{name}-{}", std::process::id()));
+            std::fs::remove_dir_all(&directory).ok();
+            std::fs::create_dir_all(directory.join("project")).expect("a sandbox");
+            std::fs::create_dir_all(directory.join("outside")).expect("a sandbox");
+            Self(directory)
+        }
+
+        fn project(&self) -> PathBuf {
+            self.0.join("project")
+        }
+
+        #[cfg(unix)]
+        fn outside(&self) -> PathBuf {
+            self.0.join("outside")
+        }
+
+        fn location(&self, relative: &str) -> PrivateFileLocation {
+            PrivateFileLocation {
+                root: self.project(),
+                relative: RelPath::from_proto(relative).expect("a relative path"),
+                windows_drive_mounts: None,
+            }
+        }
+    }
+
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    fn assert_refused<T>(result: Result<T>, expected: &str) {
+        let Err(error) = result else {
+            panic!("the request must be refused");
+        };
+        assert!(
+            format!("{error:#}").contains(expected),
+            "expected {expected:?}, got {error:#}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_out_of_the_project_is_neither_read_nor_written() {
+        let sandbox = Sandbox::new("link-out");
+        let secret = sandbox.outside().join("shadow");
+        std::fs::write(&secret, b"root:x").unwrap();
+        std::os::unix::fs::symlink(&secret, sandbox.project().join(".env")).unwrap();
+        let location = sandbox.location(".env");
+
+        assert_refused(location.read(), "is a symbolic link");
+        assert_refused(location.write(b"A=1", None), "is a symbolic link");
+        assert_refused(
+            location.write(b"A=1", Some(&sha256(b"root:x"))),
+            "is a symbolic link",
+        );
+        assert_eq!(std::fs::read(&secret).unwrap(), b"root:x");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_link_out_of_the_project_is_refused_even_for_a_missing_file() {
+        let sandbox = Sandbox::new("dir-link-out");
+        std::os::unix::fs::symlink(sandbox.outside(), sandbox.project().join("config")).unwrap();
+        let location = sandbox.location("config/.env");
+
+        assert_refused(location.read(), "is a symbolic link");
+        assert_refused(location.write(b"A=1", None), "is a symbolic link");
+        assert!(
+            !sandbox.outside().join(".env").exists(),
+            "a file was written outside the project"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_nowhere_is_refused() {
+        let sandbox = Sandbox::new("dangling");
+        std::os::unix::fs::symlink(
+            sandbox.outside().join("missing"),
+            sandbox.project().join(".env"),
+        )
+        .unwrap();
+
+        assert_refused(sandbox.location(".env").read(), "is a symbolic link");
+    }
+
+    #[test]
+    fn a_file_larger_than_the_cap_is_refused_both_ways() {
+        let sandbox = Sandbox::new("oversize");
+        let oversize = vec![b'A'; PRIVATE_FILE_MAX_BYTES + 1];
+        std::fs::write(sandbox.project().join(".env"), &oversize).unwrap();
+        let location = sandbox.location(".env");
+
+        assert_refused(location.read(), "larger than");
+        assert_refused(
+            location.write(&oversize, Some(&sha256(&oversize))),
+            "the limit is",
+        );
+    }
+
+    #[test]
+    fn a_file_that_appeared_since_it_was_read_is_not_replaced() {
+        // The writer read "no file", so it backed nothing up. Writing anyway
+        // would destroy content nobody has a copy of.
+        let sandbox = Sandbox::new("stale-absent");
+        let target = sandbox.project().join(".env");
+        std::fs::write(&target, b"CREATED=meanwhile").unwrap();
+
+        assert_refused(
+            sandbox.location(".env").write(b"A=1", None),
+            "changed on the remote since it was read",
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"CREATED=meanwhile");
+    }
+
+    #[test]
+    fn a_file_edited_since_it_was_read_is_not_replaced() {
+        let sandbox = Sandbox::new("stale-content");
+        let target = sandbox.project().join(".env");
+        std::fs::write(&target, b"EDITED=1").unwrap();
+
+        assert_refused(
+            sandbox
+                .location(".env")
+                .write(b"A=1", Some(&sha256(b"READ=1"))),
+            "changed on the remote since it was read",
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"EDITED=1");
+    }
+
+    #[test]
+    fn a_file_replaced_as_read_is_written_for_its_owner_only() {
+        let sandbox = Sandbox::new("replace");
+        let target = sandbox.project().join("services/api/.env");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"OLD=1").unwrap();
+        let location = sandbox.location("services/api/.env");
+
+        assert_eq!(location.read().unwrap(), Some(b"OLD=1".to_vec()));
+        location.write(b"NEW=1", Some(&sha256(b"OLD=1"))).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"NEW=1");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+    }
+
+    #[test]
+    fn a_missing_file_reads_as_absent_and_is_created_inside() {
+        let sandbox = Sandbox::new("create");
+        let location = sandbox.location("deploy/.env.production");
+
+        assert_eq!(location.read().unwrap(), None);
+        location.write(b"A=1", None).unwrap();
+        assert_eq!(
+            std::fs::read(sandbox.project().join("deploy/.env.production")).unwrap(),
+            b"A=1"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_write_the_host_refuses_leaves_the_file_as_it_was() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let sandbox = Sandbox::new("write-refused");
+        let directory = sandbox.project().join("locked");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join(".env"), b"OLD=1").unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        // Root, or anything else that overrides modes, writes into a 0500
+        // directory anyway, and then there is no refusal to observe.
+        let probe = directory.join("probe");
+        if std::fs::write(&probe, b"").is_ok() {
+            std::fs::remove_file(&probe).ok();
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+            eprintln!("skipped: this process can write where its mode says it cannot");
+            return;
+        }
+
+        let result = sandbox
+            .location("locked/.env")
+            .write(b"NEW=1", Some(&sha256(b"OLD=1")));
+
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_refused(result, "could not write locked/.env");
+        assert_eq!(std::fs::read(directory.join(".env")).unwrap(), b"OLD=1");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_inside_the_project_is_neither_read_nor_replaced() {
+        // Following it would write the target; replacing it would quietly
+        // turn the link into a copy. Either surprises whoever made the link.
+        let sandbox = Sandbox::new("link-inside");
+        let target = sandbox.project().join(".env.development");
+        std::fs::write(&target, b"DEV=1").unwrap();
+        std::os::unix::fs::symlink(".env.development", sandbox.project().join(".env")).unwrap();
+        let location = sandbox.location(".env");
+
+        assert_refused(location.read(), "is a symbolic link");
+        assert_refused(
+            location.write(b"A=1", Some(&sha256(b"DEV=1"))),
+            "is a symbolic link",
+        );
+        assert!(
+            std::fs::symlink_metadata(sandbox.project().join(".env"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link was replaced"
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), b"DEV=1");
+    }
+
+    #[test]
+    fn a_file_on_a_windows_drive_is_neither_read_nor_written() {
+        let sandbox = Sandbox::new("windows-drive");
+        let root = sandbox.0.join("c").join("Users").join("me").join("acme");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".env"), b"OLD=1").unwrap();
+        let location = PrivateFileLocation {
+            root: root.clone(),
+            relative: RelPath::from_proto(".env").expect("a relative path"),
+            windows_drive_mounts: Some(sandbox.0.clone()),
+        };
+
+        let refusal = ".env lives on the Windows drive; open the project from the Linux filesystem";
+        assert_refused(location.read(), refusal);
+        assert_refused(location.write(b"NEW=1", Some(&sha256(b"OLD=1"))), refusal);
+        assert_eq!(std::fs::read(root.join(".env")).unwrap(), b"OLD=1");
+    }
+
+    #[test]
+    fn only_a_single_letter_under_the_mounts_is_a_windows_drive() {
+        let mounts = Path::new("/mnt");
+        for drive in ["/mnt/c", "/mnt/c/Users/me/acme", "/mnt/D/work"] {
+            assert!(
+                is_on_a_windows_drive(Path::new(drive), mounts),
+                "{drive} is a Windows drive"
+            );
+        }
+        for linux in [
+            "/home/me/acme",
+            "/mnt/wsl/acme",
+            "/mnt/wslg",
+            "/mnt",
+            "/mnt/cc/acme",
+        ] {
+            assert!(
+                !is_on_a_windows_drive(Path::new(linux), mounts),
+                "{linux} is on the Linux filesystem"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_a_windows_host_would_read_as_another_file_is_refused() {
+        for path in [
+            r"..\outside\.env",
+            r"C:\Windows\win.ini",
+            "C:.env",
+            r"config\.env",
+        ] {
+            assert!(
+                !names_a_path_inside_on_windows(path),
+                "{path:?} must be refused on Windows"
+            );
+        }
+        for path in [".env", "services/api/.env.production"] {
+            assert!(names_a_path_inside_on_windows(path), "{path:?} is fine");
+        }
+    }
+
+    #[test]
+    fn a_host_that_never_answers_is_not_called_out_of_date() {
+        let result = futures::executor::block_on(private_file_request(
+            futures::future::pending::<Result<()>>(),
+            futures::future::ready(()),
+        ));
+
+        let Err(error) = result else {
+            panic!("a request nobody answered cannot succeed");
+        };
+        let message = format!("{error:#}");
+        assert!(message.contains("try again"), "{message}");
+        assert!(
+            !message.contains(PRIVATE_FILE_SERVER_OUT_OF_DATE),
+            "a timeout is not an old server: {message}"
+        );
     }
 }

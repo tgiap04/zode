@@ -438,6 +438,7 @@ impl BranchPanel {
     /// repository alone -- a panel showing one project has no standing to
     /// prune another's entries out of the shared record.
     fn prune_dead_checkouts(&self, cx: &mut Context<Self>) {
+        let host = self.bypass_host(cx);
         for repo in &self.repos {
             let live: Vec<PathBuf> = repo.worktrees.iter().map(|w| w.path.clone()).collect();
             let anchor = repo.anchor.clone();
@@ -445,9 +446,21 @@ impl BranchPanel {
                 .update(cx, |state, cx| state.prune(&anchor, &live, cx));
             // Same anchor, same live list: a checkout that stops existing should
             // not keep a permission bypass recorded against its path.
-            agent_ui::PermissionBypassStore::global(cx)
-                .update(cx, |store, cx| store.prune(&anchor, &live, cx));
+            if let Some(host) = &host {
+                agent_ui::PermissionBypassStore::global(cx)
+                    .update(cx, |store, cx| store.prune(host, &anchor, &live, cx));
+            }
         }
+    }
+
+    /// The host this panel's checkouts are directories on, which is what the
+    /// permission bypass is recorded against. `None` once the workspace is
+    /// gone, or for a collaboration guest, and then nothing is read or
+    /// written.
+    pub(crate) fn bypass_host(&self, cx: &App) -> Option<agent_ui::BypassHost> {
+        let workspace = self.workspace.upgrade()?;
+        let project = workspace.read(cx).project().read(cx);
+        agent_ui::BypassHost::for_project(project, cx)
     }
 
     /// Listens to every open agent tab, so renaming one redraws the row that
@@ -634,8 +647,10 @@ impl BranchPanel {
             .collect()
     }
 
-    /// Creates the shared session store the first time the panel is drawn, and
-    /// asks it for its one sweep.
+    /// Creates the session store for this panel's project the first time the
+    /// panel is drawn, and asks it for its one sweep: the process-wide one for
+    /// a project on this machine, the one for its host for a remote project,
+    /// so a checkout's agents are the ones that ran in it there.
     ///
     /// Not at construction: reading the agents' histories opens every
     /// transcript on disk. `AgentHistoryPanel` already carries the rule that
@@ -645,7 +660,11 @@ impl BranchPanel {
         if self.session_store.is_some() {
             return;
         }
-        let store = agent_ui::SessionStore::global(cx);
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        let project = workspace.read(cx).project().clone();
+        let store = agent_ui::SessionStore::for_project(&project, cx);
         // The sweep lands on the store, so the panel has to be told when it
         // does. Held in a field, never detached: a detached observe outlives
         // the panel and fires into a dropped handle.

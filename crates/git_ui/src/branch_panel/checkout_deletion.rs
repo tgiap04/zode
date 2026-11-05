@@ -43,12 +43,6 @@
 //! destructive operation can reach, which is the wrong direction to "fix"
 //! this in.
 
-// Nothing calls this module yet -- the checkout menu and the worktree picker
-// will wire it in once their own changes land. It ships now, fully tested, so
-// the rule that decides what a delete takes can be reviewed on its own,
-// before the change that lets it actually run anything.
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -66,6 +60,44 @@ use workspace::pane::SaveIntent;
 /// checkout's scope is the worktree being removed, stated plainly instead.
 const WORKTREE_SCOPE: &str = "Every session that ran in this worktree goes.";
 
+/// Where a project's agent sessions are, which decides who may plan -- and
+/// who carries out -- the deletion of a checkout's sessions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SessionsLiveOn {
+    /// A local project's: this machine's stores, deleted here.
+    ThisMachine,
+    /// A project opened over a remote server: that host's stores, deleted
+    /// there by agent and id.
+    RemoteHost,
+    /// A collaboration guest's: a collaborator's machine nothing here can ask.
+    Elsewhere,
+}
+
+impl SessionsLiveOn {
+    pub(crate) fn of(project: &project::Project) -> Self {
+        if project.is_local() {
+            Self::ThisMachine
+        } else if project.is_via_remote_server() {
+            Self::RemoteHost
+        } else {
+            Self::Elsewhere
+        }
+    }
+}
+
+/// The indexed sessions that ran inside `worktree` and inside none of
+/// `other_live_worktrees` (the nested-worktree guard above).
+fn sessions_in_checkout<'a>(
+    index: &'a SessionIndex,
+    worktree: &Path,
+    other_live_worktrees: &'a [PathBuf],
+) -> impl Iterator<Item = &'a agent_sessions::SessionSummary> {
+    let roots = [worktree.to_path_buf()];
+    index.sessions().iter().filter(move |session| {
+        session.is_within(&roots) && !session.is_within(other_live_worktrees)
+    })
+}
+
 /// Which indexed sessions deleting `worktree` would take.
 ///
 /// Selects every session whose real `cwd` is within `worktree` and within
@@ -74,25 +106,50 @@ const WORKTREE_SCOPE: &str = "Every session that ran in this worktree goes.";
 ///
 /// Providers are resolved once per [`AgentKind`] that actually appears in the
 /// scoped sessions, not once per session: two of the four canonicalise a path
-/// on construction, and a plan holding many sessions from one agent has no
-/// reason to pay that syscall on every row.
+/// when asked, and a plan holding many sessions from one agent has no reason
+/// to build a provider per row.
 pub(crate) fn plan_session_deletion(
     index: &SessionIndex,
     worktree: &Path,
     other_live_worktrees: &[PathBuf],
 ) -> agent_ui::DeleteAll {
-    let roots = [worktree.to_path_buf()];
     let mut providers: HashMap<AgentKind, Arc<dyn SessionProvider>> = HashMap::new();
-    let scoped = agent_ui::sessions_in_project(index.sessions().as_ref(), &roots)
-        .filter(|session| !session.is_within(other_live_worktrees))
-        .map(|session| {
-            let provider = providers
-                .entry(session.agent)
-                .or_insert_with(|| agent_sessions::provider_for(session.agent));
-            let deletion = provider.deletion(session);
-            (session, deletion)
-        });
+    let scoped = sessions_in_checkout(index, worktree, other_live_worktrees).map(|session| {
+        let provider = providers
+            .entry(session.agent)
+            .or_insert_with(|| agent_sessions::provider_for(session.agent));
+        let deletion = provider.deletion(session);
+        (session, deletion)
+    });
     agent_ui::plan_delete_all(scoped)
+}
+
+/// The sessions removing the checkout at `path` would take with it, from the
+/// index of the host they live on.
+///
+/// A remote project's plan names its sessions and nothing else: this machine
+/// has none of their files, and a path built here for one would be a local
+/// path that merely spells the remote one. The host decides what goes when
+/// the plan is carried out. A guest's plans nothing; the worktree itself is
+/// still removed, by git.
+pub(crate) fn checkout_session_plan(
+    lives_on: SessionsLiveOn,
+    index: Option<&agent_sessions::SessionIndex>,
+    path: &Path,
+    other_live_worktrees: &[PathBuf],
+) -> agent_ui::DeleteAll {
+    match (lives_on, index) {
+        (SessionsLiveOn::ThisMachine, Some(index)) => {
+            plan_session_deletion(index, path, other_live_worktrees)
+        }
+        (SessionsLiveOn::RemoteHost, Some(index)) => {
+            agent_ui::DeleteAll::on_host(sessions_in_checkout(index, path, other_live_worktrees))
+        }
+        _ => agent_ui::DeleteAll {
+            targets: Vec::new(),
+            total_bytes: 0,
+        },
+    }
 }
 
 /// Today's confirmation body, for a worktree deletion that reaches no
@@ -258,6 +315,82 @@ pub(crate) fn close_agent_tabs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session_in(cwd: &str) -> agent_sessions::SessionSummary {
+        let cwd = PathBuf::from(cwd);
+        agent_sessions::SessionSummary {
+            id: std::sync::Arc::from("a"),
+            agent: agent_sessions::AgentKind::Claude,
+            title: "a".to_string(),
+            preview: String::new(),
+            preview_speaker: None,
+            log_path: Some(cwd.join("a.jsonl")),
+            cwd,
+            branch: None,
+            model: None,
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
+            log_bytes: 1024,
+        }
+    }
+
+    /// The index is the host's, so a remote checkout's sessions are planned
+    /// -- by agent and id only, nested worktrees still guarded -- for the host
+    /// to delete. Nothing in the plan names a path on this machine.
+    #[test]
+    fn removing_a_remote_checkout_plans_its_sessions_for_the_host() {
+        let index = agent_sessions::SessionIndex::new(vec![
+            SessionSummary {
+                id: Arc::from("outer"),
+                ..session_in("/home/me/repo/wt")
+            },
+            SessionSummary {
+                id: Arc::from("inner"),
+                ..session_in("/home/me/repo/wt/inner")
+            },
+        ]);
+        let checkout = Path::new("/home/me/repo/wt");
+        let nested = [PathBuf::from("/home/me/repo/wt/inner")];
+
+        let plan =
+            checkout_session_plan(SessionsLiveOn::RemoteHost, Some(&index), checkout, &nested);
+
+        let planned: Vec<&str> = plan
+            .targets
+            .iter()
+            .map(|target| target.id.as_ref())
+            .collect();
+        assert_eq!(planned, vec!["outer"]);
+        assert!(
+            plan.targets.iter().all(agent_ui::DeleteTarget::is_on_host),
+            "a remote target carries no path or command of this machine's"
+        );
+        assert_eq!(
+            plan.trashed(),
+            1,
+            "the host moves its transcript to its trash"
+        );
+        assert_eq!(plan.total_bytes, 1024);
+    }
+
+    #[test]
+    fn a_guest_checkout_plans_no_session_deletion() {
+        let index = agent_sessions::SessionIndex::new(vec![session_in("/home/me/repo/wt")]);
+        let checkout = Path::new("/home/me/repo/wt");
+
+        let local = checkout_session_plan(SessionsLiveOn::ThisMachine, Some(&index), checkout, &[]);
+        assert_eq!(
+            local.count(),
+            1,
+            "the fixture must be one a local plan takes"
+        );
+
+        let guest = checkout_session_plan(SessionsLiveOn::Elsewhere, Some(&index), checkout, &[]);
+        assert!(
+            guest.is_empty(),
+            "sessions on a collaborator's machine are nobody's here to delete"
+        );
+    }
+
     use agent_sessions::SessionSummary;
     use std::time::SystemTime;
 

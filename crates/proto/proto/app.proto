@@ -90,3 +90,47 @@ message RemoteProfilingLocation {
   uint32 line = 2;
   uint32 column = 3;
 }
+
+// Asks the host a project lives on for a database driver of its own: resolved
+// in that host's store and environment, and downloaded for that host's
+// platform when `install` is set. The client never runs a driver from its own
+// machine for such a project.
+message EnsureDatabaseDriver {
+  uint64 project_id = 1;
+  string driver_id = 2;
+  bool install = 3;
+  // Where the client downloads drivers from. The host checks what it fetches
+  // against the signing key built into it, so this names a mirror, not a
+  // trust anchor.
+  string api_url = 4;
+}
+
+message EnsureDatabaseDriverResponse {
+  message Installed {
+    string executable = 1;
+    DatabaseDriverOrigin origin = 2;
+  }
+
+  message NotInstalled {}
+
+  message Failed {
+    string reason = 1;
+  }
+
+  oneof state {
+    Installed installed = 1;
+    NotInstalled not_installed = 2;
+    Failed failed = 3;
+  }
+}
+
+// Zero is left unset, so a field nobody filled in claims nothing: the client
+// reads it, and any origin it does not know, as the least privileged one.
+enum DatabaseDriverOrigin {
+  DATABASE_DRIVER_ORIGIN_UNSPECIFIED = 0;
+  DATABASE_DRIVER_ORIGIN_BESIDE_EXECUTABLE = 1;
+  DATABASE_DRIVER_ORIGIN_STORE = 2;
+  DATABASE_DRIVER_ORIGIN_MANUAL = 3;
+  // Named by the host's `ZODE_DB_<ID>`.
+  DATABASE_DRIVER_ORIGIN_OVERRIDE = 4;
+}

@@ -19,13 +19,13 @@ that Zode's own test suite checks.
 
 ## What the server sees
 
-| Sees                                                      | Does not see                                    |
-| --------------------------------------------------------- | ----------------------------------------------- |
-| Your user id and your team id                             | Any team key, or anyone's sharing private key   |
-| Each member's sharing **public** key and its fingerprint  | Any project name, file name or path             |
-| One sealed copy of the team key per member and version    | Any variable name or value                      |
-| Opaque entry ids, entry lengths rounded up to 4 KiB       | Any connection string or password               |
-| Which key version sealed each entry, who wrote it, when   | Which entry is a `.env` and which a connection  |
+| Sees                                                     | Does not see                                   |
+| -------------------------------------------------------- | ---------------------------------------------- |
+| Your user id and your team id                            | Any team key, or anyone's sharing private key  |
+| Each member's sharing **public** key and its fingerprint | Any project name, file name or path            |
+| One sealed copy of the team key per member and version   | Any variable name or value                     |
+| Opaque entry ids, entry lengths rounded up to 4 KiB      | Any connection string or password              |
+| Which key version sealed each entry, who wrote it, when  | Which entry is a `.env` and which a connection |
 
 Your sharing private key is stored on the server too, at `sync/sharing-key`,
 sealed under your recovery key exactly like your environment key. The server
@@ -69,7 +69,7 @@ fingerprints you compare yourself, and says plainly where that starts:
 
 **The first time is the residual risk.** A machine opening a team for the
 very first time knows no one yet, so it takes the key of whoever sealed your
-team key from the server's member listing, and remembers it as *seen*. A seen
+team key from the server's member listing, and remembers it as _seen_. A seen
 key opens envelopes; it is still shown as **not verified**, and nothing is
 sealed to it until you trust it. A substitution made before that first look
 is not caught by the machine; one made after it is. Compare the sealer's

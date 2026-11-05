@@ -219,7 +219,7 @@ in data frames on the `stream_id` the reply names.
 | `diff_request`        | `request_id`, `worktree_id`                                                         | browser → Zode    |
 | `diff_reply`          | `request_id`, `stream_id`, `truncated`                                              | Zode → browser    |
 | `sessions_list`       | `request_id`, optional `before`, `limit`                                            | browser → Zode    |
-| `sessions_list_reply` | `request_id`, `sessions`: `[entry]`, `more`, optional `next`                        | Zode → browser    |
+| `sessions_list_reply` | `request_id`, `sessions`: `[entry]`, `more`, optional `next`, `unavailable_hosts`   | Zode → browser    |
 | `session_resume`      | `request_id`, `session_id`, `fork`                                                  | browser → Zode    |
 | `session_resumed`     | `request_id`, optional `open_agent_id`                                              | Zode → browser    |
 
@@ -228,10 +228,10 @@ in data frames on the `stream_id` the reply names.
 failing the whole list. `kind` is one of `file`, `directory`, `symlink`, and
 likewise degrades to `other`.
 
-An agent summary may also carry `session_id`, the agent's own id for the
-conversation the tab is writing, when the tab has one, and `agent`, which is
-`claude`, `codex`, `copilot` or `opencode` and is left out for a custom agent. A
-tab opened as a fork has no `session_id`. A reader that does not know the two
+An agent summary may also carry `session_id`, the id of the conversation the
+tab is writing as `sessions_list` names it, when the tab has one, and `agent`,
+which is `claude`, `codex`, `copilot` or `opencode` and is left out for a custom
+agent. A tab opened as a fork has no `session_id`. A reader that does not know the two
 fields ignores them.
 
 `capabilities` in `hello_ack` lists what the host serves: `terminal` always,
@@ -473,9 +473,12 @@ opens nothing and names the tab (`→` is browser to Zode, `←` the reply):
   came without a new `rpc_protocol`, so a client sends them only to a host that
   lists the capability.
 - **Scope.** A session is listed only if the directory it ran in lies inside a
-  visible folder of a local project open in a window on the host, matched by
-  whole path components. A directory that climbs out with `..` belongs to no
-  folder, and where open folders nest, the deepest one owns the session.
+  visible folder of a project open in a window on the host, on the same machine
+  as the session, matched by whole path components. Besides the host's own
+  machine, that is every WSL distro, SSH host and dev container a window is open
+  on; a collaborator's shared project and a host reached through the relay are
+  left out. A directory that climbs out with `..` belongs to no folder, and
+  where open folders nest, the deepest one owns the session.
   `folder` is that folder's name followed by the path inside it, joined with
   `/`; a folder with no name of its own is called `root`. Absolute paths are
   never sent.
@@ -490,43 +493,66 @@ opens nothing and names the tab (`→` is browser to Zode, `←` the reply):
   of an earlier reply, and the page starts after that entry. A request without
   `before` makes the host read the agents' session stores again first, unless a
   read finished less than 5 seconds ago, in which case it answers from that one.
-  Later pages are read without another scan.
+  Later pages are read without another scan. A remote host's stores are asked
+  to be read again on the same terms, but the reply does not wait for them: it
+  has what the host's stores held when it was asked, and a host whose stores
+  have not been read yet, or whose last read failed, is named in
+  `unavailable_hosts` instead.
 - **Long pages.** A page that does not fit one control message arrives as
   several `sessions_list_reply` messages with the same `request_id`, in order.
   Every one but the last has `more` set, and only the last carries `next`, and
   only when another page exists. Append their `sessions`.
+- **Hosts.** A session on a remote host has `host` set, and its `id` and
+  `worktree_id` are prefixed with a token naming the host and a colon:
+  `{token}:{id}`. The token is the first 12 lowercase hex digits of a SHA-256 of
+  the host's identity, so it stays the same across restarts and does not spell
+  out a user or a port. A session on the host's own machine has no `host` and its ids
+  are as they always were, so a reader that does not know the field lists every
+  session as before, and treats the ids as opaque: one id on two machines is two
+  entries, and resuming either opens it on its own machine.
+- **Unavailable hosts.** The last message of a first page may carry
+  `unavailable_hosts`, at most 16 of `{host, reason}`: `host` as an entry's
+  `host` has it, `reason` `reading` when its sessions have not been read yet and
+  a later list will have them, or `unavailable` when they could not be read
+  because the host is out of date, unreachable or disconnected. What went wrong
+  on the host is never sent. Left out when every host was listed.
 - **Entries.** Each entry in `sessions` has these fields. `title`, `preview`,
   `folder` and `branch` are cut to 200 characters, the last being `…` when
   anything was cut.
 
-| Field           | Meaning                                                                                      |
-| --------------- | -------------------------------------------------------------------------------------------- |
-| `id`            | The agent's own id for the session, which `session_resume` takes.                            |
-| `agent`         | `claude`, `codex`, `copilot` or `opencode`.                                                  |
-| `title`         | What the session is called. When that is empty, its `preview`.                               |
-| `preview`       | The start of the conversation. Left out when empty.                                          |
-| `worktree_id`   | The open folder it ran in, as `files_list` names it.                                         |
-| `folder`        | The folder's name and the path inside it.                                                    |
-| `branch`        | The branch the session recorded, when it recorded one.                                       |
-| `updated_at`    | When the session was last updated, in Unix milliseconds.                                     |
-| `can_fork`      | Whether `fork` may be set for it: true for Claude Code and opencode. Always sent.            |
-| `open_agent_id` | The `id` in `agent_list` of a tab already running this session. Left out when there is none. |
+| Field           | Meaning                                                                                                                                          |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `id`            | The agent's own id, prefixed for a remote host (see Hosts). What `session_resume` takes.                                                         |
+| `agent`         | `claude`, `codex`, `copilot` or `opencode`.                                                                                                      |
+| `title`         | What the session is called. When that is empty, its `preview`.                                                                                   |
+| `preview`       | The start of the conversation. Left out when empty.                                                                                              |
+| `worktree_id`   | The open folder it ran in: as `files_list` names it for this machine; for a remote host it only tells folders apart.                             |
+| `folder`        | The folder's name and the path inside it.                                                                                                        |
+| `branch`        | The branch the session recorded, when it recorded one.                                                                                           |
+| `updated_at`    | When the session was last updated, in Unix milliseconds.                                                                                         |
+| `can_fork`      | Whether `fork` may be set for it: true for Claude Code and opencode. Always sent.                                                                |
+| `open_agent_id` | The `id` in `agent_list` of a tab already running this session. Left out when there is none.                                                     |
+| `host`          | The remote host it is on: an SSH nickname or host name, a distro, a container's name, cut to 60 characters. Left out for the host's own machine. |
 
 - **Already open.** `open_agent_id` is set when a tab in `agent_list` has a
   `session_id` equal to the entry's `id` and its agent is running in it. A tab
   whose agent has exited does not count.
 - **Trust.** `session_id` is checked for its shape before it is looked up: 1 to
   128 bytes of ASCII letters, digits, `.`, `_` and `-`, the first a letter or a
-  digit, so it can never read as a flag or as `.` or `..`. The `id` inside
-  `before` must have the same shape, and a session whose id does not is not
-  listed. An id that does not fit is `not_found`.
+  digit, so it can never read as a flag or as `.` or `..` -- optionally after a
+  token of 12 lowercase hex digits and a colon. The `id` inside `before` must
+  have the same shape, and a session whose id does not is not listed. An id
+  that does not fit is `not_found`.
 - **Resuming.** `session_resume` with `fork` false, which is also the default,
   continues the session. If a tab already runs it, the host answers
   `session_resumed` with that tab's `open_agent_id` and opens nothing. Otherwise
   it opens a tab on the session in the window whose folder holds the directory,
-  and answers `session_resumed` without `open_agent_id`. The tab is added after
-  the answer and arrives like any other, as an `agent_update` whose
-  `session_id` is the one asked for. A tab that is still starting its agent does
+  on the machine the id names, and answers `session_resumed` without
+  `open_agent_id`. Whether the directory is still there is asked of that
+  machine. A remote host with no window open any more has nothing to resume,
+  even in a list taken while it had, and the host never reconnects to one for a
+  device. The tab is added after the answer and arrives like any other, as an
+  `agent_update` whose `session_id` is the one asked for. A tab that is still starting its agent does
   not count as running yet, but it does hold its session: a second
   `session_resume` for that session opens nothing. Its answer is still a
   `session_resumed` without `open_agent_id`, and the tab that arrives is the one
@@ -558,16 +584,16 @@ opens nothing and names the tab (`→` is browser to Zode, `←` the reply):
 
 Errors, in the `error` message with the `request_id`:
 
-| Request          | `code`         | When                                                                                                                                                                         |
-| ---------------- | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| either           | `unsupported`  | The host does not serve sessions.                                                                                                                                            |
-| `sessions_list`  | `not_found`    | `before.id` cannot be a session id.                                                                                                                                          |
-| `sessions_list`  | `rate_limited` | The file and session allowance is used up.                                                                                                                                   |
-| `sessions_list`  | `internal`     | The deadline passed.                                                                                                                                                         |
-| `session_resume` | `not_found`    | The id cannot be a session id or names no session, the session is outside the open folders or under a private or excluded path, its directory is gone, or the window closed. |
-| `session_resume` | `unsupported`  | The agent cannot resume it, or `fork` was set where `can_fork` is false.                                                                                                     |
-| `session_resume` | `rate_limited` | A resume for this device is already being worked on, one was opened for it in the last 3 seconds, or its waiting answers are over the allowance.                             |
-| `session_resume` | `internal`     | The deadline passed, or the host failed for another reason.                                                                                                                  |
+| Request          | `code`         | When                                                                                                                                                                                                                                             |
+| ---------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| either           | `unsupported`  | The host does not serve sessions.                                                                                                                                                                                                                |
+| `sessions_list`  | `not_found`    | `before.id` cannot be a session id.                                                                                                                                                                                                              |
+| `sessions_list`  | `rate_limited` | The file and session allowance is used up.                                                                                                                                                                                                       |
+| `sessions_list`  | `internal`     | The deadline passed.                                                                                                                                                                                                                             |
+| `session_resume` | `not_found`    | The id cannot be a session id or names no session, the session is outside the open folders or under a private or excluded path, its directory is gone, the window closed, no window is open on its remote host, or that host could not be asked. |
+| `session_resume` | `unsupported`  | The agent cannot resume it, or `fork` was set where `can_fork` is false.                                                                                                                                                                         |
+| `session_resume` | `rate_limited` | A resume for this device is already being worked on, one was opened for it in the last 3 seconds, or its waiting answers are over the allowance.                                                                                                 |
+| `session_resume` | `internal`     | The deadline passed, or the host failed for another reason.                                                                                                                                                                                      |
 
 A device that sends `sessions_list_reply` or `session_resumed` gets `malformed`:
 they are answers, not requests.

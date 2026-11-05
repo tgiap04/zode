@@ -76,6 +76,15 @@ impl ContainerPanel {
     /// exactly the separation those two questions wanted.
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut bar = TabBar::new("container-header").start_child(self.render_engine_picker(cx));
+        // Said outright in a remote window: the same engine names mean a
+        // different machine there, and nothing else on the bar says which.
+        if let Some(host) = self.host_name() {
+            bar = bar.start_child(
+                Label::new(format!("on {host}"))
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            );
+        }
         if let Some(picker) = self.render_config_picker(cx) {
             bar = bar.start_child(picker);
         }
@@ -158,8 +167,13 @@ impl ContainerPanel {
     /// `ContainerPanel::choose_config_file`.
     fn render_config_picker(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let source = self.backend()?.config_source()?;
+        // A remote view with no contexts read (yet) would open an empty menu.
+        if !self.offers_config_picker() {
+            return None;
+        }
         let targets = self.config_targets.clone();
         let chosen = source.target.clone();
+        let offers_file_picker = self.offers_local_config_file_picker();
         let file_handle = cx.entity().downgrade();
         let target_handle = file_handle.clone();
 
@@ -188,33 +202,40 @@ impl ContainerPanel {
                     let target_handle = target_handle.clone();
                     Some(ContextMenu::build(window, cx, move |mut menu, _, _| {
                         let file_handle = file_handle.clone();
-                        menu = menu.entry("Kubeconfig File\u{2026}", None, move |window, cx| {
-                            let file_handle = file_handle.clone();
-                            let paths = cx.prompt_for_paths(PathPromptOptions {
-                                files: true,
-                                directories: false,
-                                multiple: false,
-                                // `~/.kube/config` sits in a dotdirectory, and a
-                                // picker that cannot see it cannot choose it.
-                                show_hidden: true,
-                                prompt: Some("Choose a kubeconfig file".into()),
-                            });
-                            window
-                                .spawn(cx, async move |cx| {
-                                    let Ok(Ok(Some(mut chosen))) = paths.await else {
-                                        return;
-                                    };
-                                    let Some(path) = chosen.pop() else {
-                                        return;
-                                    };
-                                    file_handle
-                                        .update(cx, |panel, cx| panel.choose_config_file(path, cx))
-                                        .ok();
-                                })
-                                .detach();
-                        });
+                        if offers_file_picker {
+                            menu =
+                                menu.entry("Kubeconfig File\u{2026}", None, move |window, cx| {
+                                    let file_handle = file_handle.clone();
+                                    let paths = cx.prompt_for_paths(PathPromptOptions {
+                                        files: true,
+                                        directories: false,
+                                        multiple: false,
+                                        // `~/.kube/config` sits in a dotdirectory, and a
+                                        // picker that cannot see it cannot choose it.
+                                        show_hidden: true,
+                                        prompt: Some("Choose a kubeconfig file".into()),
+                                    });
+                                    window
+                                        .spawn(cx, async move |cx| {
+                                            let Ok(Ok(Some(mut chosen))) = paths.await else {
+                                                return;
+                                            };
+                                            let Some(path) = chosen.pop() else {
+                                                return;
+                                            };
+                                            file_handle
+                                                .update(cx, |panel, cx| {
+                                                    panel.choose_config_file(path, cx)
+                                                })
+                                                .ok();
+                                        })
+                                        .detach();
+                                });
+                        }
                         if !targets.is_empty() {
-                            menu = menu.separator();
+                            if offers_file_picker {
+                                menu = menu.separator();
+                            }
                             for target in targets.iter().cloned() {
                                 let selected = chosen.as_deref() == Some(target.name.as_str());
                                 let handle = target_handle.clone();
@@ -416,11 +437,26 @@ impl ContainerPanel {
             // somebody the cluster is down would send them after the wrong thing.
             ContainerError::NotConfigured { detail } => (
                 "Nothing selected".to_string(),
-                format!("{detail}. Choose a context, then refresh."),
+                if self.offers_config_picker() {
+                    format!("{detail}. Choose a context, then refresh.")
+                } else {
+                    // Nothing to choose from here: the menu is not drawn.
+                    let place = self
+                        .host_name()
+                        .map(|host| format!(" on {host}"))
+                        .unwrap_or_default();
+                    format!("{detail}. Add a context to the kubeconfig{place}, then refresh.")
+                },
             ),
             ContainerError::NotAuthorized { detail } => {
                 ("Not authorized".to_string(), detail.clone())
             }
+            // Never answered with this machine's engines instead: those would
+            // be a true list of the wrong machine's containers.
+            ContainerError::HostUnavailable { detail } => (
+                "The project's host cannot be reached".to_string(),
+                detail.clone(),
+            ),
             // The engine's own words. Shown so a person can act on them, never
             // interpreted -- this text comes from outside.
             other => ("The engine could not answer".to_string(), other.to_string()),

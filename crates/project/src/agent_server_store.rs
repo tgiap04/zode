@@ -13,7 +13,7 @@ use rpc::{
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings::{RegisterSetting, SettingsStore};
-use util::{ResultExt as _, debug_panic};
+use util::{ResultExt as _, debug_panic, paths::PathStyle};
 
 use crate::ProjectEnvironment;
 use crate::agent_bypass::{BypassCheck, CacheKey, PROBE_TIMEOUT};
@@ -133,10 +133,25 @@ pub struct BuiltinAgent {
 
 impl BuiltinAgent {
     pub fn install_command(&self) -> &'static str {
-        if cfg!(target_os = "windows") {
-            self.install_windows
-        } else {
-            self.install_unix
+        self.install_command_for(PathStyle::local())
+    }
+
+    /// The install line for a host of `path_style`, which for a remote project
+    /// is the remote's rather than this machine's: a Windows app connected to a
+    /// WSL distro must offer the Linux installer.
+    pub fn install_command_for(&self, path_style: PathStyle) -> &'static str {
+        match path_style {
+            PathStyle::Windows => self.install_windows,
+            PathStyle::Posix => self.install_unix,
+        }
+    }
+
+    fn missing(&self, path_style: PathStyle) -> AgentBinaryMissing {
+        AgentBinaryMissing {
+            agent: AgentId(self.id.into()),
+            binary: self.binary,
+            install_command: self.install_command_for(path_style),
+            docs_url: self.docs_url,
         }
     }
 }
@@ -214,20 +229,161 @@ pub fn builtin_agent(id: &str) -> Option<&'static BuiltinAgent> {
     BUILTIN_AGENTS.iter().find(|agent| agent.id == id)
 }
 
+/// A remote server's answer to `LocateAgentCli`, as the launch path wants it.
+///
+/// The path is only ever stringified back into the terminal command, never
+/// resolved here: on a Windows client a POSIX path is not `Path::is_absolute`,
+/// so it is checked by the remote's own path style instead.
+fn agent_binary_from_remote(
+    builtin: &'static BuiltinAgent,
+    path_style: PathStyle,
+    path: Option<String>,
+) -> Result<AgentBinary> {
+    match path {
+        None => Ok(AgentBinary::Missing(builtin.missing(path_style))),
+        Some(path) if path_style.is_absolute(&path) => Ok(AgentBinary::Found(PathBuf::from(path))),
+        Some(path) => bail!(
+            "the remote server reported `{path}` for `{}`, which is not an absolute path",
+            builtin.binary
+        ),
+    }
+}
+
+/// A remote server's answer to `ProbeAgentBypassFlag`. An answer missing its
+/// verdict is a server this client does not understand, and fails closed.
+fn bypass_check_from_remote(
+    flag: &'static str,
+    binary: PathBuf,
+    check: Option<proto::probe_agent_bypass_flag_response::Check>,
+) -> BypassCheck {
+    use proto::probe_agent_bypass_flag_response::Check;
+    match check {
+        Some(Check::Present(_)) => BypassCheck::Present,
+        Some(Check::Absent(_)) => BypassCheck::Absent { flag, binary },
+        Some(Check::Unprobed(unprobed)) => BypassCheck::Unprobed {
+            reason: unprobed.reason,
+        },
+        None => BypassCheck::Unprobed {
+            reason: "the remote server sent no answer for the probe".to_string(),
+        },
+    }
+}
+
+const REMOTE_SERVER_OUT_OF_DATE: &str =
+    "the remote server does not support agent terminals yet; reconnect to update it";
+
+/// How long a client waits for `LocateAgentCli`. The server may have to load a
+/// login shell before it can search that shell's `PATH`.
+const REMOTE_LOCATE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a client waits for `ProbeAgentBypassFlag`: the server's own probe
+/// budget, plus room for the round trip.
+const REMOTE_PROBE_TIMEOUT: Duration = Duration::from_secs(PROBE_TIMEOUT.as_secs() + 5);
+
+/// What a timed-out agent terminal request adds to "did not answer".
+const REMOTE_AGENT_UNANSWERED: &str = "if it predates agent terminals, reconnect to update it";
+
+/// A server built before a request existed answers it with "no handler
+/// registered". Said as `out_of_date` instead, in terms the user can act on,
+/// since the fix is a reconnect, which fetches the server matching this app.
+pub(crate) fn name_out_of_date_server(error: anyhow::Error, out_of_date: &str) -> anyhow::Error {
+    if format!("{error:#}").contains("no handler registered") {
+        anyhow::anyhow!("{out_of_date}")
+    } else {
+        error
+    }
+}
+
+/// `request`, unless `timer` fires first.
+///
+/// A server built before a request existed may drop it without a word -- its
+/// message loop has no type to decode it into -- so without a deadline the
+/// caller would wait on it forever. `out_of_date` replaces the answer of a
+/// server that says it has no handler; `if_unanswered` is what a timeout adds
+/// after "did not answer", and must not claim the server is old: a current one
+/// that is merely slow ends the same way.
+pub(crate) async fn remote_request_within<T>(
+    request: impl Future<Output = Result<T>>,
+    timer: impl Future<Output = ()>,
+    timeout: Duration,
+    out_of_date: &str,
+    if_unanswered: &str,
+) -> Result<T> {
+    match futures::future::select(std::pin::pin!(request), std::pin::pin!(timer)).await {
+        futures::future::Either::Left((response, _)) => {
+            response.map_err(|error| name_out_of_date_server(error, out_of_date))
+        }
+        futures::future::Either::Right(_) => Err(anyhow::anyhow!(
+            "the remote server did not answer within {}s; {if_unanswered}",
+            timeout.as_secs()
+        )),
+    }
+}
+
+async fn remote_agent_request<T>(
+    request: impl Future<Output = Result<T>>,
+    timer: impl Future<Output = ()>,
+    timeout: Duration,
+) -> Result<T> {
+    remote_request_within(
+        request,
+        timer,
+        timeout,
+        REMOTE_SERVER_OUT_OF_DATE,
+        REMOTE_AGENT_UNANSWERED,
+    )
+    .await
+}
+
 /// Looks `binary` up in `search_path`, which is meant to be the `PATH` of the
 /// user's own shell rather than the one this process was started with.
 ///
 /// The process `PATH` is only a fallback for when the shell environment could not
 /// be loaded at all: reporting "not installed" because a login shell failed is a
 /// worse answer than searching a narrower `PATH`.
-fn locate_binary(binary: &str, search_path: Option<String>) -> Option<PathBuf> {
+fn locate_binary(
+    binary: &str,
+    search_path: Option<String>,
+    skip_windows_drives: bool,
+) -> Option<PathBuf> {
     let search_path = search_path
         .filter(|path| !path.is_empty())
         .or_else(|| std::env::var("PATH").ok())?;
+    // Applied after the fallback, so the process `PATH` of a server running
+    // inside WSL is held to the same rule as the shell's.
+    let search_path = if skip_windows_drives {
+        without_windows_drive_mounts(&search_path)
+    } else {
+        search_path
+    };
     // `cwd` only affects relative `PATH` entries, which are vanishingly rare; an
     // unreadable working directory must not fail the lookup.
     let cwd = std::env::current_dir().unwrap_or_default();
     which::which_in(binary, Some(search_path), cwd).ok()
+}
+
+/// `search_path` without the Windows drives WSL mounts under `/mnt/<letter>/`.
+///
+/// WSL appends the Windows `PATH` to the distro's by default, so a Windows-side
+/// `claude.cmd` shim or npm global would otherwise satisfy the lookup and the
+/// terminal would run a Windows program against Linux paths.
+pub(crate) fn without_windows_drive_mounts(search_path: &str) -> String {
+    search_path
+        .split(':')
+        .filter(|entry| !is_windows_drive_mount(entry))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn is_windows_drive_mount(entry: &str) -> bool {
+    let Some(rest) = entry.strip_prefix("/mnt/") else {
+        return false;
+    };
+    let mut chars = rest.chars();
+    chars
+        .next()
+        .is_some_and(|drive| drive.is_ascii_alphabetic())
+        && chars.next().is_none_or(|separator| separator == '/')
 }
 
 /// Everything the UI needs to tell the user how to install a missing CLI, without
@@ -315,6 +471,10 @@ pub struct AgentServerStore {
     /// Probe answers for this run. See `agent_bypass` for why this is keyed by
     /// the binary on disk rather than by a version.
     bypass_flags: crate::agent_bypass::BypassFlagCache,
+    /// Stands in for the shell `PATH` when the shell environment carries none,
+    /// which under test is always.
+    #[cfg(any(test, feature = "test-support"))]
+    search_path_override: Option<String>,
 }
 
 pub struct AgentServersUpdated;
@@ -347,6 +507,8 @@ impl AgentServerStore {
 
     pub fn init_headless(session: &AnyProtoClient) {
         session.add_entity_request_handler(Self::handle_get_agent_server_command);
+        session.add_entity_request_handler(Self::handle_locate_agent_cli);
+        session.add_entity_request_handler(Self::handle_probe_agent_bypass_flag);
     }
 
     fn agent_servers_settings_changed(&mut self, cx: &mut Context<Self>) {
@@ -466,6 +628,8 @@ impl AgentServerStore {
         })];
         let mut this = Self {
             bypass_flags: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            search_path_override: None,
             state: AgentServerStoreState::Local {
                 project_environment,
                 downstream_client: None,
@@ -486,6 +650,8 @@ impl AgentServerStore {
     ) -> Self {
         Self {
             bypass_flags: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            search_path_override: None,
             state: AgentServerStoreState::Remote {
                 project_id,
                 upstream_client,
@@ -498,6 +664,8 @@ impl AgentServerStore {
     pub fn collab() -> Self {
         Self {
             bypass_flags: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            search_path_override: None,
             state: AgentServerStoreState::Collab,
             external_agents: HashMap::default(),
         }
@@ -566,6 +734,39 @@ impl AgentServerStore {
                 reason: format!("`{agent}` has no auto-approve flag recorded"),
             });
         };
+        let environment =
+            match &self.state {
+                AgentServerStoreState::Remote {
+                    project_id,
+                    upstream_client,
+                    ..
+                } => {
+                    // Forwarded before the cache key is built: that key stats
+                    // `binary` on this machine, where a remote path names nothing
+                    // (or worse, something else). The server keeps its own cache.
+                    let request = upstream_client.read(cx).proto_client().request(
+                        proto::ProbeAgentBypassFlag {
+                            project_id: *project_id,
+                            agent_id: agent.to_string(),
+                            binary: binary.to_string_lossy().into_owned(),
+                        },
+                    );
+                    let timer = cx.background_executor().timer(REMOTE_PROBE_TIMEOUT);
+                    return cx.spawn(async move |_, _| {
+                        match remote_agent_request(request, timer, REMOTE_PROBE_TIMEOUT).await {
+                            Ok(response) => bypass_check_from_remote(flag, binary, response.check),
+                            Err(error) => BypassCheck::Unprobed {
+                                reason: format!("{error:#}"),
+                            },
+                        }
+                    });
+                }
+                AgentServerStoreState::Local {
+                    project_environment,
+                    ..
+                } => Some(project_environment.downgrade()),
+                AgentServerStoreState::Collab => None,
+            };
         let Some(key) = CacheKey::for_binary(&binary) else {
             return Task::ready(BypassCheck::Unprobed {
                 reason: format!("could not read `{}`", binary.display()),
@@ -575,7 +776,27 @@ impl AgentServerStore {
             return Task::ready(Self::decide(present, flag, binary));
         }
 
+        let search_path_override = self.search_path_override();
         cx.spawn(async move |this, cx| {
+            // The `PATH` the CLI was found on, not this process's. An npm or nvm
+            // install is a `#!/usr/bin/env node` script, and `env` finds no
+            // `node` on the minimal `PATH` a GUI app (or a server started by
+            // `wsl.exe`) inherits.
+            let environment = environment.and_then(|environment| {
+                environment
+                    .update(cx, |environment, cx| environment.default_environment(cx))
+                    .log_err()
+            });
+            let environment = match environment {
+                Some(environment) => environment.await.unwrap_or_default(),
+                None => HashMap::default(),
+            };
+            let search_path = environment
+                .get("PATH")
+                .filter(|path| !path.is_empty())
+                .cloned()
+                .or(search_path_override);
+
             let probe = cx.background_spawn({
                 let binary = binary.clone();
                 async move {
@@ -586,6 +807,9 @@ impl AgentServerStore {
                     // to false (`util::command`), which is why every other
                     // spawn site in this tree sets it.
                     command.arg("--help").kill_on_drop(true);
+                    if let Some(search_path) = search_path {
+                        command.env("PATH", search_path);
+                    }
                     command.output().await
                 }
             });
@@ -617,10 +841,24 @@ impl AgentServerStore {
                 }
             };
 
-            let present = crate::agent_bypass::flag_present(
-                &crate::agent_bypass::help_text(&output.stdout, &output.stderr),
-                flag,
-            );
+            let help = crate::agent_bypass::help_text(&output.stdout, &output.stderr);
+            // A failure that printed no option line at all -- `env: node: No
+            // such file or directory` and exit 127, say -- never reached the
+            // CLI's own help, so it says nothing about the flag. Reading it as
+            // `Absent` would tell the reader the flag was renamed. Option lines
+            // are what `flag_present` reads, so a help page that exits non-zero
+            // is still read as one.
+            let printed_options = help.lines().any(|line| line.trim_start().starts_with('-'));
+            if !output.status.success() && !printed_options {
+                return BypassCheck::Unprobed {
+                    reason: format!(
+                        "`{} --help` failed ({}) without printing any help",
+                        binary.display(),
+                        output.status
+                    ),
+                };
+            }
+            let present = crate::agent_bypass::flag_present(&help, flag);
             this.update(cx, |this, _| this.bypass_flags.insert(key, present))
                 .log_err();
             Self::decide(present, flag, binary)
@@ -659,24 +897,54 @@ impl AgentServerStore {
             )));
         };
 
-        let AgentServerStoreState::Local {
-            project_environment,
-            ..
-        } = &self.state
-        else {
-            return Task::ready(Err(anyhow::anyhow!(
-                "locating an agent CLI is only supported for local projects"
-            )));
+        let project_environment = match &self.state {
+            AgentServerStoreState::Local {
+                project_environment,
+                ..
+            } => project_environment,
+            AgentServerStoreState::Remote {
+                project_id,
+                upstream_client,
+                ..
+            } => {
+                let upstream_client = upstream_client.read(cx);
+                // The CLI lives on the remote host, so its install line has to
+                // be that host's, whatever this machine is.
+                let path_style = upstream_client.path_style();
+                let request = upstream_client
+                    .proto_client()
+                    .request(proto::LocateAgentCli {
+                        project_id: *project_id,
+                        agent_id: agent.to_string(),
+                    });
+                let timer = cx.background_executor().timer(REMOTE_LOCATE_TIMEOUT);
+                return cx.spawn(async move |_, _| {
+                    let response =
+                        remote_agent_request(request, timer, REMOTE_LOCATE_TIMEOUT).await?;
+                    agent_binary_from_remote(builtin, path_style, response.path)
+                });
+            }
+            AgentServerStoreState::Collab => {
+                return Task::ready(Err(anyhow::anyhow!(
+                    "locating an agent CLI is only supported for local projects"
+                )));
+            }
         };
 
         let environment = project_environment.downgrade();
+        let search_path_override = self.search_path_override();
         cx.spawn(async move |_, cx| {
             let environment = environment
                 .update(cx, |environment, cx| environment.default_environment(cx))?
                 .await
                 .unwrap_or_default();
 
-            let search_path = environment.get("PATH").cloned();
+            let search_path = environment.get("PATH").cloned().or(search_path_override);
+            // Read from both: the shell environment is what the user sees, and
+            // the process one is what a server started by `wsl.exe` inherits
+            // when that shell could not be loaded.
+            let inside_wsl = environment.contains_key("WSL_DISTRO_NAME")
+                || std::env::var_os("WSL_DISTRO_NAME").is_some();
 
             // Under test the project environment is empty, and `locate_binary`
             // would fall back to the process `PATH` — which makes the answer
@@ -687,31 +955,45 @@ impl AgentServerStore {
             // `PATH` of its own; one that supplies none is asking about the
             // not-installed path.
             if cfg!(any(test, feature = "test-support")) && search_path.is_none() {
-                return Ok(AgentBinary::Missing(AgentBinaryMissing {
-                    agent: AgentId(builtin.id.into()),
-                    binary: builtin.binary,
-                    install_command: builtin.install_command(),
-                    docs_url: builtin.docs_url,
-                }));
+                return Ok(AgentBinary::Missing(builtin.missing(PathStyle::local())));
             }
 
             // `which_in` stats every `PATH` entry; keep that off the foreground
             // thread so a click never costs a frame.
             let found = cx
                 .background_executor()
-                .spawn(async move { locate_binary(builtin.binary, search_path) })
+                .spawn(async move { locate_binary(builtin.binary, search_path, inside_wsl) })
                 .await;
 
             Ok(match found {
                 Some(path) => AgentBinary::Found(path),
-                None => AgentBinary::Missing(AgentBinaryMissing {
-                    agent: AgentId(builtin.id.into()),
-                    binary: builtin.binary,
-                    install_command: builtin.install_command(),
-                    docs_url: builtin.docs_url,
-                }),
+                None => AgentBinary::Missing(builtin.missing(PathStyle::local())),
             })
         })
+    }
+
+    /// Points a store's CLI lookup and `--help` probe at `search_path` when its
+    /// shell environment has no `PATH`, which under test is always: see
+    /// `resolve_agent_binary`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_search_path_for_test(&mut self, search_path: Option<String>) {
+        self.search_path_override = search_path;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn search_path_override(&self) -> Option<String> {
+        self.search_path_override.clone()
+    }
+
+    #[cfg(not(any(test, feature = "test-support")))]
+    fn search_path_override(&self) -> Option<String> {
+        None
+    }
+
+    /// This store's cached probe answer for `binary`, if it has one.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn cached_bypass_flag_for_test(&self, binary: &std::path::Path) -> Option<bool> {
+        CacheKey::for_binary(binary).and_then(|key| self.bypass_flags.get(&key))
     }
 
     pub fn no_browser(&self) -> bool {
@@ -801,6 +1083,68 @@ impl AgentServerStore {
                 .root_dir
                 .unwrap_or_else(|| paths::home_dir().to_string_lossy().to_string()),
             login: None,
+        })
+    }
+
+    async fn handle_locate_agent_cli(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::LocateAgentCli>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::LocateAgentCliResponse> {
+        let agent = AgentId::new(envelope.payload.agent_id);
+        let binary = this
+            .update(&mut cx, |this, cx| this.resolve_agent_binary(&agent, cx))
+            .await?;
+        Ok(proto::LocateAgentCliResponse {
+            path: match binary {
+                AgentBinary::Found(path) => Some(path.to_string_lossy().into_owned()),
+                AgentBinary::Missing(_) => None,
+            },
+        })
+    }
+
+    /// Probes the CLI this host resolves for the agent, never a path the
+    /// request names: a request is input, and this is where it would turn into
+    /// a program the server runs. The request's path only has to agree with the
+    /// one found, since that is the binary the client is about to launch.
+    async fn handle_probe_agent_bypass_flag(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::ProbeAgentBypassFlag>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::ProbeAgentBypassFlagResponse> {
+        use proto::probe_agent_bypass_flag_response::{Absent, Check, Present, Unprobed};
+
+        let agent = AgentId::new(envelope.payload.agent_id);
+        let requested = envelope.payload.binary;
+        let located = this
+            .update(&mut cx, |this, cx| this.resolve_agent_binary(&agent, cx))
+            .await;
+        let check = match located {
+            Ok(AgentBinary::Found(binary)) if binary.to_string_lossy() == requested.as_str() => {
+                this.update(&mut cx, |this, cx| {
+                    this.verify_bypass_flag(&agent, binary, cx)
+                })
+                .await
+            }
+            Ok(AgentBinary::Found(binary)) => BypassCheck::Unprobed {
+                reason: format!(
+                    "`{requested}` is not the `{agent}` CLI on this host's PATH, which is `{}`",
+                    binary.display()
+                ),
+            },
+            Ok(AgentBinary::Missing(missing)) => BypassCheck::Unprobed {
+                reason: format!("`{}` is not installed on this host", missing.binary),
+            },
+            Err(error) => BypassCheck::Unprobed {
+                reason: format!("{error:#}"),
+            },
+        };
+        Ok(proto::ProbeAgentBypassFlagResponse {
+            check: Some(match check {
+                BypassCheck::Present => Check::Present(Present {}),
+                BypassCheck::Absent { .. } => Check::Absent(Absent {}),
+                BypassCheck::Unprobed { reason } => Check::Unprobed(Unprobed { reason }),
+            }),
         })
     }
 
@@ -1209,7 +1553,7 @@ mod tests {
     fn locates_a_binary_that_the_process_path_cannot_see() {
         let probe = Probe::new();
 
-        let found = locate_binary(&probe.name, Some(probe.search_path()))
+        let found = locate_binary(&probe.name, Some(probe.search_path()), false)
             .expect("a binary in the supplied PATH must be found");
         // Canonicalised on both sides: the macOS temp directory is a symlink
         // (`/var/folders/...` onto `/private/var/folders/...`), and which end of
@@ -1221,7 +1565,7 @@ mod tests {
         );
 
         assert_eq!(
-            locate_binary(&probe.name, None),
+            locate_binary(&probe.name, None, false),
             None,
             "the same binary must be invisible to the process PATH, or this test \
              proves nothing about reading the shell environment"
@@ -1234,7 +1578,7 @@ mod tests {
         // "not installed" verdict.
         let probe = Probe::new();
         assert_eq!(
-            locate_binary(&probe.name, Some(String::new())),
+            locate_binary(&probe.name, Some(String::new()), false),
             None,
             "an empty shell PATH falls back to the process PATH, which cannot \
              reach a temp directory"
@@ -1242,7 +1586,7 @@ mod tests {
         // The other half of the fallback: it has to actually search that PATH.
         // Windows ships no `sh`, and there is no name it is guaranteed to
         // resolve, so the claim is made where it can be made.
-        assert!(locate_binary("sh", Some(String::new())).is_some() || cfg!(windows));
+        assert!(locate_binary("sh", Some(String::new()), false).is_some() || cfg!(windows));
     }
 
     /// What a built-in must carry to be usable at all: a binary to look for, an
@@ -1282,6 +1626,245 @@ mod tests {
                 builtin.id
             );
         }
+    }
+
+    /// The install line follows the host the CLI will run on, not the one this
+    /// app runs on: a Windows app connected to a WSL distro offering
+    /// `irm ... | iex` would hand a Linux shell a PowerShell command.
+    #[test]
+    fn install_command_follows_the_hosts_path_style() {
+        let claude = builtin_agent(CLAUDE_CODE_AGENT_ID).expect("claude is a builtin");
+        assert_eq!(
+            claude.install_command_for(PathStyle::Posix),
+            "curl -fsSL https://claude.ai/install.sh | bash"
+        );
+        assert_eq!(
+            claude.install_command_for(PathStyle::Windows),
+            "irm https://claude.ai/install.ps1 | iex"
+        );
+        assert_eq!(
+            claude.install_command(),
+            claude.install_command_for(PathStyle::local()),
+            "a local project keeps the line it always had"
+        );
+    }
+
+    /// What the remote said is input: a path that is not absolute on the
+    /// remote's own terms is refused rather than handed to a terminal, and a
+    /// missing CLI is described in the remote's terms whatever this host is.
+    #[test]
+    fn a_remote_answer_is_checked_by_the_remotes_path_style() {
+        let claude = builtin_agent(CLAUDE_CODE_AGENT_ID).expect("claude is a builtin");
+        assert_eq!(
+            agent_binary_from_remote(
+                claude,
+                PathStyle::Posix,
+                Some("/home/me/.local/bin/claude".into())
+            )
+            .ok(),
+            Some(AgentBinary::Found(PathBuf::from(
+                "/home/me/.local/bin/claude"
+            )))
+        );
+        assert!(
+            agent_binary_from_remote(claude, PathStyle::Posix, Some("bin/claude".into())).is_err(),
+            "a relative path names nothing the terminal can run"
+        );
+        assert!(agent_binary_from_remote(claude, PathStyle::Posix, Some(String::new())).is_err());
+        let Ok(AgentBinary::Missing(missing)) =
+            agent_binary_from_remote(claude, PathStyle::Posix, None)
+        else {
+            panic!("no path is a missing CLI");
+        };
+        assert_eq!(missing.install_command, claude.install_unix);
+    }
+
+    /// The remote's path style picks the installer, whichever this host is: a
+    /// Windows remote is offered PowerShell even from a Unix client.
+    #[test]
+    fn a_missing_cli_on_a_windows_remote_offers_the_windows_installer() {
+        let claude = builtin_agent(CLAUDE_CODE_AGENT_ID).expect("claude is a builtin");
+        let Ok(AgentBinary::Missing(missing)) =
+            agent_binary_from_remote(claude, PathStyle::Windows, None)
+        else {
+            panic!("no path is a missing CLI");
+        };
+        assert_eq!(missing.install_command, claude.install_windows);
+    }
+
+    /// Executable scripts in a directory on nobody's `PATH`.
+    #[cfg(unix)]
+    fn scripts(files: &[(&str, &str)]) -> TempDir {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("a temp directory for the scripts");
+        for (name, body) in files {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).expect("the script is written");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("the script is executable");
+        }
+        dir
+    }
+
+    #[cfg(unix)]
+    async fn probe_claude(
+        store: &gpui::Entity<AgentServerStore>,
+        binary: PathBuf,
+        cx: &mut TestAppContext,
+    ) -> BypassCheck {
+        store
+            .update(cx, |store, cx| {
+                store.verify_bypass_flag(&AgentId::new(CLAUDE_CODE_AGENT_ID), binary, cx)
+            })
+            .await
+    }
+
+    /// An npm or nvm install is a `#!/usr/bin/env node` script. Probed with
+    /// this process's `PATH`, `env` finds no interpreter, and a CLI that
+    /// offers the flag would read as one that does not.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn the_probe_runs_with_the_shell_path(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test_settings(cx);
+        let interpreter = "zode-test-interpreter";
+        let bin = scripts(&[
+            (
+                interpreter,
+                "#!/bin/sh\nprintf '  --dangerously-skip-permissions  Skip prompts\\n'\n",
+            ),
+            ("claude", &format!("#!/usr/bin/env {interpreter}\n")),
+        ]);
+        let store = create_agent_server_store(cx);
+        store.update(cx, |store, _| {
+            store.set_search_path_for_test(Some(bin.path().to_string_lossy().into_owned()))
+        });
+
+        let check = probe_claude(&store, bin.path().join("claude"), cx).await;
+
+        assert_eq!(check, BypassCheck::Present);
+    }
+
+    /// A probe that never reached the CLI's help says nothing about the flag;
+    /// `Absent` would tell the reader it had been renamed.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_failed_probe_with_no_help_is_unprobed(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test_settings(cx);
+        let bin = scripts(&[(
+            "claude",
+            "#!/bin/sh\necho 'env: node: No such file or directory' >&2\nexit 127\n",
+        )]);
+        let store = create_agent_server_store(cx);
+
+        let check = probe_claude(&store, bin.path().join("claude"), cx).await;
+
+        assert!(
+            matches!(check, BypassCheck::Unprobed { .. }),
+            "got {check:?}"
+        );
+        assert_eq!(
+            store.read_with(cx, |store, _| store
+                .cached_bypass_flag_for_test(&bin.path().join("claude"))),
+            None,
+            "no answer is not an answer to remember"
+        );
+    }
+
+    /// A help page is read whatever the exit code: only a failure that printed
+    /// no option at all is set aside.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_help_page_that_exits_non_zero_is_still_read(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        init_test_settings(cx);
+        let bin = scripts(&[(
+            "claude",
+            "#!/bin/sh\nprintf '  --some-other-flag  Something\\n'\nexit 1\n",
+        )]);
+        let store = create_agent_server_store(cx);
+        let binary = bin.path().join("claude");
+
+        let check = probe_claude(&store, binary.clone(), cx).await;
+
+        assert_eq!(
+            check,
+            BypassCheck::Absent {
+                flag: "--dangerously-skip-permissions",
+                binary,
+            }
+        );
+    }
+
+    #[test]
+    fn a_remote_probe_without_a_verdict_fails_closed() {
+        use proto::probe_agent_bypass_flag_response::{Absent, Check, Present, Unprobed};
+        let flag = "--dangerously-skip-permissions";
+        let binary = PathBuf::from("/usr/bin/claude");
+        assert_eq!(
+            bypass_check_from_remote(flag, binary.clone(), Some(Check::Present(Present {}))),
+            BypassCheck::Present
+        );
+        assert_eq!(
+            bypass_check_from_remote(flag, binary.clone(), Some(Check::Absent(Absent {}))),
+            BypassCheck::Absent {
+                flag,
+                binary: binary.clone()
+            }
+        );
+        assert_eq!(
+            bypass_check_from_remote(
+                flag,
+                binary.clone(),
+                Some(Check::Unprobed(Unprobed {
+                    reason: "timed out".into()
+                }))
+            ),
+            BypassCheck::Unprobed {
+                reason: "timed out".into()
+            }
+        );
+        assert!(matches!(
+            bypass_check_from_remote(flag, binary, None),
+            BypassCheck::Unprobed { .. }
+        ));
+    }
+
+    #[test]
+    fn an_old_server_is_named_as_out_of_date() {
+        let mapped = name_out_of_date_server(
+            anyhow::anyhow!(
+                "RPC request LocateAgentCli failed: no handler registered for LocateAgentCli"
+            ),
+            REMOTE_SERVER_OUT_OF_DATE,
+        );
+        assert_eq!(
+            mapped.to_string(),
+            "the remote server does not support agent terminals yet; reconnect to update it"
+        );
+        let other = name_out_of_date_server(
+            anyhow::anyhow!("connection lost"),
+            REMOTE_SERVER_OUT_OF_DATE,
+        );
+        assert_eq!(
+            other.to_string(),
+            "connection lost",
+            "other errors pass through"
+        );
+    }
+
+    #[test]
+    fn windows_drive_mounts_are_dropped_from_a_wsl_path() {
+        assert_eq!(
+            without_windows_drive_mounts(
+                "/home/me/.local/bin:/mnt/c/Users/me/AppData/Roaming/npm:/usr/bin:/mnt/d:/mnt/wsl/bin:/mnt/cd/bin"
+            ),
+            "/home/me/.local/bin:/usr/bin:/mnt/wsl/bin:/mnt/cd/bin",
+            "only `/mnt/<drive letter>` entries are Windows drives; other mounts stay"
+        );
+        assert_eq!(without_windows_drive_mounts("/mnt/c/Windows"), "");
+        assert_eq!(without_windows_drive_mounts(""), "");
     }
 
     /// "Install Now" types the command into a terminal and deliberately stops

@@ -16,6 +16,7 @@ use project::{
     LspStore, LspStoreEvent, ManifestTree, PrettierStore, ProjectEnvironment, ProjectPath,
     ToolchainStore, WorktreeId,
     agent_server_store::AgentServerStore,
+    agent_session_host::{AgentSessionHost, AgentSessionService},
     buffer_store::{BufferStore, BufferStoreEvent},
     context_server_store::ContextServerStore,
     debugger::{breakpoint_store::BreakpointStore, dap_store::DapStore},
@@ -39,7 +40,7 @@ use std::{
     num::NonZeroU64,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::Instant,
@@ -49,6 +50,178 @@ use util::{ResultExt, paths::PathStyle, rel_path::RelPath};
 use worktree::Worktree;
 
 use crate::headless_terminals::HeadlessTerminals;
+use database::install::{DriverEndpoint, DriverInstaller, store};
+
+/// The database drivers installed on this host.
+///
+/// Resolved against this host's own store and environment, and installed for
+/// this host's platform through the same installer the app uses for itself,
+/// which checks the manifest's signature and every archive's checksum.
+pub(crate) struct HostDatabaseDrivers {
+    root: PathBuf,
+    http_client: Arc<dyn HttpClient>,
+    /// The one installer, and the API it downloads from: the first one a
+    /// request named, or any API when that is `None`.
+    ///
+    /// One for the life of the server, because its in-flight map is what joins
+    /// two requests for the same driver into one download. A request naming
+    /// another API is refused rather than served from the first or given a new
+    /// installer: serving it would quietly ignore the mirror its client was
+    /// pointed at, and a second installer would run a second download of the
+    /// same driver into the same store.
+    installer: OnceLock<(Option<String>, Arc<DriverInstaller>)>,
+    /// This server's own `ZODE_API_URL`, the one API it may reach over plain
+    /// http.
+    own_api_url: Option<String>,
+}
+
+impl HostDatabaseDrivers {
+    pub(crate) fn new(root: PathBuf, http_client: Arc<dyn HttpClient>) -> Self {
+        Self {
+            root,
+            http_client,
+            installer: OnceLock::new(),
+            own_api_url: std::env::var("ZODE_API_URL")
+                .ok()
+                .filter(|url| !url.trim().is_empty()),
+        }
+    }
+
+    /// Answers with `installer` for every API, in place of one trusting the
+    /// key built into this binary.
+    #[cfg(test)]
+    pub(crate) fn with_installer(root: PathBuf, installer: Arc<DriverInstaller>) -> Self {
+        Self {
+            root,
+            http_client: http_client::FakeHttpClient::with_404_response(),
+            installer: OnceLock::from((None, installer)),
+            own_api_url: None,
+        }
+    }
+
+    /// As though this server had been started with `ZODE_API_URL` set to
+    /// `api_url`.
+    #[cfg(test)]
+    pub(crate) fn with_own_api_url(mut self, api_url: &str) -> Self {
+        self.own_api_url = Some(api_url.to_string());
+        self
+    }
+
+    fn installer_for(&self, api_url: &str) -> Result<Arc<DriverInstaller>, String> {
+        let (bound_to, installer) = self.installer.get_or_init(|| {
+            let installer = DriverInstaller::with_root(
+                self.http_client.clone(),
+                DriverEndpoint::new(api_url),
+                self.root.clone(),
+            );
+            (Some(api_url.to_string()), Arc::new(installer))
+        });
+        match bound_to {
+            Some(bound_to) if bound_to != api_url => Err(format!(
+                "this remote server already downloads drivers from {bound_to} and keeps to it \
+                 while it runs; restart the remote server to download from {api_url}"
+            )),
+            _ => Ok(installer.clone()),
+        }
+    }
+
+    /// Why `api_url` may not be downloaded from here, if it may not.
+    ///
+    /// Plain http is what a developer names for a backend on `localhost`, and
+    /// `localhost` here is this host, not the client's machine. Only an API
+    /// this server was itself started with is trusted to mean the same thing.
+    fn refusal_of(&self, api_url: &str) -> Option<String> {
+        let is_https = api_url
+            .split_once("://")
+            .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"));
+        if is_https || self.own_api_url.as_deref() == Some(api_url) {
+            return None;
+        }
+        Some(format!(
+            "`{api_url}` is not https, and a plain-http API is downloaded from only when this \
+             remote server was started with ZODE_API_URL set to it: localhost here is this host, \
+             not the client's machine"
+        ))
+    }
+
+    async fn locate(&self, id: &str) -> Option<proto::ensure_database_driver_response::State> {
+        let (root, id) = (self.root.clone(), id.to_string());
+        // This process's environment: whatever the remote server was started
+        // with, not a login shell's.
+        let located =
+            smol::unblock(move || store::locate_in(&root, &id, |key| std::env::var_os(key))).await;
+        located.map(|(executable, location)| installed_answer(executable, location))
+    }
+
+    pub(crate) async fn ensure(
+        &self,
+        id: String,
+        install: bool,
+        api_url: &str,
+    ) -> proto::ensure_database_driver_response::State {
+        use proto::ensure_database_driver_response::{Failed, NotInstalled, State};
+        // Before the id reaches a path: it came over the wire.
+        if !store::is_published(&id) {
+            return State::Failed(Failed {
+                reason: format!("`{id}` is not a database driver Zode publishes"),
+            });
+        }
+        if let Some(installed) = self.locate(&id).await {
+            return installed;
+        }
+        if !install {
+            return State::NotInstalled(NotInstalled {});
+        }
+        let installer = match self.refusal_of(api_url) {
+            Some(reason) => Err(reason),
+            None => self.installer_for(api_url),
+        };
+        let installer = match installer {
+            Ok(installer) => installer,
+            Err(reason) => return State::Failed(Failed { reason }),
+        };
+        match installer.install(&id).await {
+            Ok(_) => self.locate(&id).await.unwrap_or_else(|| {
+                State::Failed(Failed {
+                    reason: format!("the `{id}` driver was installed but cannot be found"),
+                })
+            }),
+            Err(error) => State::Failed(Failed {
+                reason: format!("{error:#}"),
+            }),
+        }
+    }
+}
+
+/// The answer for a driver found at `executable`.
+///
+/// A path that is not UTF-8 cannot cross the wire intact, and one mangled on
+/// the way names a file that does not exist on this host.
+pub(crate) fn installed_answer(
+    executable: PathBuf,
+    location: store::DriverLocation,
+) -> proto::ensure_database_driver_response::State {
+    use proto::ensure_database_driver_response::{Failed, Installed, State};
+    let Some(path) = executable.to_str() else {
+        return State::Failed(Failed {
+            reason: format!(
+                "the driver at {} has a path that is not UTF-8, which cannot be sent to the \
+                 client; move it, or name another copy with ZODE_DB_<ID>",
+                executable.display()
+            ),
+        });
+    };
+    let origin = match location {
+        store::DriverLocation::BesideExecutable => proto::DatabaseDriverOrigin::BesideExecutable,
+        store::DriverLocation::Store => proto::DatabaseDriverOrigin::Store,
+        store::DriverLocation::Manual => proto::DatabaseDriverOrigin::Manual,
+        store::DriverLocation::Override => proto::DatabaseDriverOrigin::Override,
+    };
+    State::Installed(Installed {
+        executable: path.to_string(),
+        origin: origin as i32,
+    })
+}
 
 pub struct HeadlessProject {
     pub fs: Arc<dyn Fs>,
@@ -60,6 +233,7 @@ pub struct HeadlessProject {
     pub dap_store: Entity<DapStore>,
     pub breakpoint_store: Entity<BreakpointStore>,
     pub agent_server_store: Entity<AgentServerStore>,
+    pub agent_sessions: Entity<AgentSessionService>,
     pub context_server_store: Entity<ContextServerStore>,
     pub settings_observer: Entity<SettingsObserver>,
     pub next_entry_id: Arc<AtomicUsize>,
@@ -73,6 +247,7 @@ pub struct HeadlessProject {
     pub _toolchain_store: Entity<ToolchainStore>,
     pub kernels: HashMap<String, Child>,
     pub(crate) terminals: HeadlessTerminals,
+    pub(crate) database_drivers: Arc<HostDatabaseDrivers>,
 }
 
 pub struct HeadlessAppState {
@@ -239,6 +414,9 @@ impl HeadlessProject {
             agent_server_store
         });
 
+        let agent_sessions =
+            cx.new(|_| AgentSessionService::for_this_host(fs.clone(), agent_server_store.clone()));
+
         let context_server_store = cx.new(|cx| {
             let mut context_server_store =
                 ContextServerStore::local(worktree_store.clone(), None, true, cx);
@@ -281,6 +459,7 @@ impl HeadlessProject {
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &settings_observer);
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &git_store);
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &agent_server_store);
+        session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &agent_sessions);
         session.subscribe_to_entity(REMOTE_SERVER_PROJECT_ID, &context_server_store);
 
         session.add_request_handler(cx.weak_entity(), Self::handle_list_remote_directory);
@@ -323,9 +502,11 @@ impl HeadlessProject {
 
         session.add_request_handler(cx.weak_entity(), Self::handle_spawn_kernel);
         session.add_request_handler(cx.weak_entity(), Self::handle_kill_kernel);
+        session.add_entity_request_handler(Self::handle_ensure_database_driver);
 
         BufferStore::init(&session);
         WorktreeStore::init(&session);
+        WorktreeStore::init_private_files(&session);
         SettingsObserver::init(&session);
         LspStore::init(&session);
         TaskStore::init(Some(&session));
@@ -335,6 +516,7 @@ impl HeadlessProject {
         BreakpointStore::init(&session);
         GitStore::init(&session);
         AgentServerStore::init_headless(&session);
+        AgentSessionHost::init_headless(&session);
         ContextServerStore::init_headless(&session);
 
         HeadlessProject {
@@ -349,6 +531,7 @@ impl HeadlessProject {
             dap_store,
             breakpoint_store,
             agent_server_store,
+            agent_sessions,
             context_server_store,
             languages,
             extensions,
@@ -358,6 +541,10 @@ impl HeadlessProject {
             profiling_collector: gpui::ProfilingCollector::new(startup_time),
             _toolchain_store: toolchain_store,
             kernels: Default::default(),
+            database_drivers: Arc::new(HostDatabaseDrivers::new(
+                database::install::store::root().to_path_buf(),
+                http_client,
+            )),
         }
     }
 
@@ -1296,6 +1483,22 @@ impl HeadlessProject {
             .collect();
 
         Ok(proto::GetRemoteProfilingDataResponse { threads, now_nanos })
+    }
+
+    /// Resolves a database driver on this host, and installs it here when
+    /// asked: the client runs a remote project's driver through this host and
+    /// never one of its own.
+    async fn handle_ensure_database_driver(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::EnsureDatabaseDriver>,
+        cx: AsyncApp,
+    ) -> Result<proto::EnsureDatabaseDriverResponse> {
+        let drivers = this.read_with(&cx, |this, _| this.database_drivers.clone());
+        let request = envelope.payload;
+        let state = drivers
+            .ensure(request.driver_id, request.install, &request.api_url)
+            .await;
+        Ok(proto::EnsureDatabaseDriverResponse { state: Some(state) })
     }
 
     async fn handle_get_directory_environment(

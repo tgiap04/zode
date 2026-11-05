@@ -480,9 +480,136 @@ pub fn make_executable(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The drivers Zode builds and publishes, by id and by the name shown for it.
+///
+/// One list for the app and for a remote server: a remote server is asked for
+/// a driver by id, and must refuse any id outside this list before the id is
+/// joined onto a path.
+pub const PUBLISHED_DRIVERS: &[(&str, &str)] = &[
+    ("sqlite", "SQLite"),
+    ("postgres", "PostgreSQL"),
+    ("mysql", "MySQL"),
+    ("mongodb", "MongoDB"),
+];
+
+pub fn is_published(id: &str) -> bool {
+    PUBLISHED_DRIVERS
+        .iter()
+        .any(|(published, _)| *published == id)
+}
+
+/// Which of the places [`locate_in`] searches a driver was found in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DriverLocation {
+    BesideExecutable,
+    /// In the store, with the marker an install leaves.
+    Store,
+    /// In the store, without that marker.
+    Manual,
+    /// Named by `ZODE_DB_<ID>`.
+    Override,
+}
+
+/// Where a driver binary lives on the machine running this code, if anywhere.
+///
+/// Three places, in order:
+///
+/// 1. **Beside the running executable** -- true of a development build and of
+///    any bundle that still carries one. First deliberately: a checkout that has
+///    run `make drivers` must use the driver it just built, never a downloaded
+///    one from an older release.
+/// 2. **The store under `root`**, told apart by the marker an install leaves.
+/// 3. **Whatever `ZODE_DB_<ID>` names** in `environment` -- a full path to a
+///    file, not a name resolved on `PATH`. Left implicit, a `PATH` search was
+///    indistinguishable from "not installed".
+///
+/// Found in none of them, the answer is `None` rather than a guess: a driver
+/// that was never installed must read as exactly that.
+///
+/// `environment` is the environment of the process that will run the driver.
+/// For a remote project that is the remote server's own, as it was started,
+/// never the app's and never a login shell's: a `ZODE_DB_<ID>` exported only
+/// in a shell profile is not seen.
+pub fn locate_in(
+    root: &Path,
+    id: &str,
+    environment: impl Fn(&str) -> Option<OsString>,
+) -> Option<(PathBuf, DriverLocation)> {
+    let executable = executable_name(id);
+
+    let beside_exe = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(&executable)));
+    if let Some(path) = beside_exe.as_ref().filter(|path| path.is_file()) {
+        return Some((path.clone(), DriverLocation::BesideExecutable));
+    }
+
+    if let Some(path) = installed_path_in(root, id) {
+        let location = if installed_by_zode(&path) {
+            DriverLocation::Store
+        } else {
+            DriverLocation::Manual
+        };
+        return Some((path, location));
+    }
+
+    if let Some(path) = path_override(id, environment) {
+        return Some((path, DriverLocation::Override));
+    }
+
+    log::info!(
+        "database driver `{executable}` is not installed{}; it will be offered for download",
+        beside_exe
+            .as_deref()
+            .map(|path| format!(" (looked beside the executable at {})", path.display()))
+            .unwrap_or_default()
+    );
+    None
+}
+
+fn path_override(id: &str, environment: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    let key = format!("ZODE_DB_{}", id.to_ascii_uppercase());
+    let path = PathBuf::from(environment(&key)?);
+    if path.is_file() {
+        log::info!("using the `{id}` driver named by {key}: {}", path.display());
+        Some(path)
+    } else {
+        log::warn!(
+            "{key} names {}, which is not a file; ignoring it",
+            path.display()
+        );
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_driver_named_by_the_given_environment_is_found_and_no_other() {
+        let root = tempfile::tempdir().unwrap();
+        let named = root.path().join("hand-built-driver");
+        std::fs::write(&named, b"not really a driver").unwrap();
+
+        let found = locate_in(root.path(), "postgres", |key| {
+            (key == "ZODE_DB_POSTGRES").then(|| named.clone().into_os_string())
+        });
+        assert_eq!(found, Some((named, DriverLocation::Override)));
+
+        assert_eq!(
+            locate_in(root.path(), "postgres", |_| None),
+            None,
+            "only the environment handed in is read, not this process's"
+        );
+    }
+
+    #[test]
+    fn only_published_ids_are_published() {
+        assert!(is_published("postgres"));
+        assert!(!is_published("../postgres"));
+        assert!(!is_published("oracle"));
+    }
 
     fn plant(root: &Path, id: &str, version: &str) -> PathBuf {
         let dir = version_dir_in(root, id, version);

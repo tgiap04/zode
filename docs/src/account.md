@@ -118,7 +118,7 @@ finishes the job.
 
 Sync, `.env` sync and remote control run on Zode's hosted service, and how much
 of it an account can use depends on its plan. The account menu names the plan —
-for example *Plan: Free · 2 of 2 synced devices* or *Plan: Pro (renews 3 Dec)* —
+for example _Plan: Free · 2 of 2 synced devices_ or _Plan: Pro (renews 3 Dec)_ —
 with **Upgrade…** or **Manage Plan…** beside it. Both open the website in your
 browser. Paying happens there, through Polar; the editor never sees a card or a
 payment.

@@ -34,6 +34,10 @@ pub(crate) enum CountState {
 /// rail switches the history with it, without this panel watching anything.
 pub struct AgentHistoryPanel {
     workspace: WeakEntity<Workspace>,
+    /// The project this panel lists, held apart from the workspace because the
+    /// panel is built inside the workspace's own update, where reading the
+    /// workspace back panics.
+    project: WeakEntity<project::Project>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) providers: Vec<Arc<dyn SessionProvider>>,
     /// The one sweep of both stores, shared with every other surface that needs
@@ -41,6 +45,10 @@ pub struct AgentHistoryPanel {
     /// a second thing to keep in step, and a second sweep to fill it. Filtering
     /// is a view over the index, recomputed per render.
     pub(crate) store: Entity<crate::SessionStore>,
+    /// Whether this panel's project is opened over a remote server, so its
+    /// sessions are on that host and nothing about them can be checked here.
+    /// Fixed for the life of a project.
+    pub(crate) remote: bool,
     pub(crate) counts: HashMap<Arc<str>, CountState>,
     /// Whether each working directory the sessions ran in still exists, as of
     /// the last sweep. Rows read this instead of stating the disk: a render runs
@@ -94,7 +102,8 @@ pub struct AgentHistoryPanel {
 
 impl AgentHistoryPanel {
     pub fn new(workspace: &Workspace, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let store = crate::SessionStore::global(cx);
+        let store = crate::SessionStore::for_project(workspace.project(), cx);
+        let remote = workspace.project().read(cx).is_via_remote_server();
         let names = crate::SessionNames::global(cx);
         let filter_editor = cx.new(|cx| {
             let mut editor = Editor::single_line(window, cx);
@@ -135,9 +144,11 @@ impl AgentHistoryPanel {
             filter_editor,
             _subscriptions: subscriptions,
             workspace: workspace.weak_handle(),
+            project: workspace.project().downgrade(),
             focus_handle: cx.focus_handle(),
             providers: agent_sessions::default_providers(),
             store,
+            remote,
             counts: HashMap::default(),
             cwd_alive: HashMap::default(),
             cwd_check: None,
@@ -174,15 +185,37 @@ impl AgentHistoryPanel {
             .collect::<collections::HashSet<_>>()
             .into_iter()
             .collect();
-        let checked = cx.background_spawn(async move {
-            directories
-                .into_iter()
-                .map(|directory| {
-                    let exists = super::actions::directory_exists(&directory);
-                    (directory, exists)
-                })
-                .collect::<HashMap<_, _>>()
-        });
+        let checked = if self.remote {
+            // The directories are the remote host's, so only it can say. An
+            // empty index asks nothing: a request with nothing in it is still
+            // a request on the wire.
+            let Some(host) = self.remote_host(cx).filter(|_| !directories.is_empty()) else {
+                self.cwd_alive.clear();
+                return;
+            };
+            let answer = host.directories_exist(directories.clone(), cx);
+            cx.background_spawn(async move {
+                match answer.await {
+                    Ok(exists) => directories.into_iter().zip(exists).collect(),
+                    Err(error) => {
+                        log::warn!(
+                            "checking session directories on the remote host failed: {error:#}"
+                        );
+                        HashMap::default()
+                    }
+                }
+            })
+        } else {
+            cx.background_spawn(async move {
+                directories
+                    .into_iter()
+                    .map(|directory| {
+                        let exists = super::actions::directory_exists(&directory);
+                        (directory, exists)
+                    })
+                    .collect::<HashMap<_, _>>()
+            })
+        };
         self.cwd_check = Some(cx.spawn(async move |this, cx| {
             let checked = checked.await;
             this.update(cx, |this, cx| {
@@ -208,12 +241,10 @@ impl AgentHistoryPanel {
     /// no worktree yet (a fresh window) shows nothing rather than everything —
     /// "every session on this machine" is not what the panel is for.
     pub(crate) fn project_roots(&self, cx: &App) -> Vec<PathBuf> {
-        let Some(workspace) = self.workspace.upgrade() else {
+        let Some(project) = self.project.upgrade() else {
             return Vec::new();
         };
-        workspace
-            .read(cx)
-            .project()
+        project
             .read(cx)
             .visible_worktrees(cx)
             .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
@@ -246,21 +277,27 @@ impl AgentHistoryPanel {
         if self.counts.contains_key(&session.id) {
             return;
         }
-        let Some(provider) = self
-            .providers
-            .iter()
-            .find(|provider| provider.agent() == session.agent)
-            .cloned()
-        else {
-            return;
+        let counting = if self.remote {
+            let Some(host) = self.remote_host(cx) else {
+                return;
+            };
+            host.counts(session, cx)
+        } else {
+            let Some(provider) = self
+                .providers
+                .iter()
+                .find(|provider| provider.agent() == session.agent)
+                .cloned()
+            else {
+                return;
+            };
+            let session = session.clone();
+            cx.background_spawn(async move { provider.counts(&session) })
         };
         self.counts.insert(session.id.clone(), CountState::Pending);
-        let session = session.clone();
         let id = session.id.clone();
         cx.spawn(async move |this, cx| {
-            let counts = cx
-                .background_spawn(async move { provider.counts(&session) })
-                .await;
+            let counts = counting.await;
             this.update(cx, |this, cx| {
                 match counts {
                     Ok(counts) => {
@@ -301,12 +338,44 @@ impl AgentHistoryPanel {
         &self.workspace
     }
 
+    /// This panel's own project's connection to its remote host. Asked per
+    /// request rather than kept: the shared store must not hold a connection
+    /// this project has closed, and neither should anything else.
+    fn remote_host(&self, cx: &App) -> Option<project::agent_session_host::RemoteSessionHost> {
+        self.project.upgrade()?.read(cx).remote_session_host(cx)
+    }
+
+    /// Whether this machine's file manager can show a session's paths. A
+    /// remote host's paths name nothing here, except on a WSL distro this
+    /// machine can reach through its `\\wsl$` share -- the same rule the
+    /// project panel's reveal follows.
+    pub(crate) fn can_reveal(&self, cx: &App) -> bool {
+        let wsl_with_interop = self.remote
+            && self
+                .project
+                .upgrade()
+                .is_some_and(|project| project.read(cx).is_via_wsl_with_host_interop(cx));
+        reveal_reaches_the_path(self.remote, wsl_with_interop)
+    }
+
     pub(crate) fn query(&self, cx: &App) -> String {
         self.filter_editor.read(cx).text(cx)
     }
 
     /// Stores whose absence the list should mention rather than hide.
-    pub(crate) fn unavailable(&self) -> Vec<(&'static str, String)> {
+    ///
+    /// A remote host's stores are named by its last sweep: asking the
+    /// providers here would stat this machine's home instead of the host's.
+    pub(crate) fn unavailable(&self, cx: &App) -> Vec<(&'static str, String)> {
+        if self.remote {
+            return self
+                .store
+                .read(cx)
+                .unavailable()
+                .iter()
+                .map(|(agent, reason)| (agent.label(), reason.clone()))
+                .collect();
+        }
         self.providers
             .iter()
             .filter_map(|provider| match provider.availability() {
@@ -317,6 +386,11 @@ impl AgentHistoryPanel {
             })
             .collect()
     }
+}
+
+/// [`AgentHistoryPanel::can_reveal`], given the two facts it reads.
+pub(crate) fn reveal_reaches_the_path(remote: bool, wsl_with_interop: bool) -> bool {
+    !remote || wsl_with_interop
 }
 
 impl EventEmitter<PanelEvent> for AgentHistoryPanel {}

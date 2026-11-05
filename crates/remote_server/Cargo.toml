@@ -29,6 +29,9 @@ clap.workspace = true
 client.workspace = true
 collections.workspace = true
 dap_adapters.workspace = true
+# The installer alone, without the client half: a driver for a project on
+# this host is resolved and downloaded here, for this host's platform.
+database = { workspace = true, features = ["install"] }
 debug_adapter_extension.workspace = true
 env_logger.workspace = true
 extension.workspace = true
@@ -86,8 +89,10 @@ windows.workspace = true
 gpui = { workspace = true, features = ["windows-manifest"] }
 
 [dev-dependencies]
+agent_sessions.workspace = true
 client = { workspace = true, features = ["test-support"] }
 clock = { workspace = true, features = ["test-support"] }
+database = { workspace = true, features = ["install", "test-support"] }
 editor = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
@@ -103,6 +108,7 @@ theme = { workspace = true, features = ["test-support"] }
 lsp = { workspace = true, features = ["test-support"] }
 unindent.workspace = true
 serde_json.workspace = true
+tempfile.workspace = true
 zlog.workspace = true
 
 [build-dependencies]

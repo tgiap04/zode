@@ -10,8 +10,6 @@
 //! one between two hosts needs one `FocusHandle` in two dispatch trees at once,
 //! and a focus handle cannot be in two.
 
-use std::sync::Arc;
-
 use gpui::{
     App, Bounds, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Render,
     SharedString, TitlebarOptions, Window, WindowBounds, WindowKind, WindowOptions, px, size,
@@ -20,7 +18,7 @@ use ui::prelude::*;
 use workspace::Workspace;
 use workspace::item::Item;
 
-use crate::container_panel::ContainerPanel;
+use crate::container_panel::{ContainerPanel, Engines, engines_for_project};
 
 /// At or above this the list shows the columns that only pay for themselves when
 /// there is room: the status text and the published ports.
@@ -78,13 +76,8 @@ impl ContainerPanel {
     ///
     /// Used by the floating window, which cannot reach a `&Workspace` in the
     /// context that builds it.
-    pub fn standalone(
-        backends: Vec<Arc<dyn container::ContainerBackend>>,
-        active: usize,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let mut panel = Self::build(backends, cx);
-        panel.active_backend = active.min(panel.backends.len().saturating_sub(1));
+    pub(crate) fn standalone(engines: Engines, active: usize, cx: &mut Context<Self>) -> Self {
+        let mut panel = Self::build(engines, active, cx);
         panel.reload(cx);
         panel.start_watching(cx);
         panel
@@ -110,19 +103,25 @@ impl ContainerPanel {
 ///
 /// Inherited from a container tab that is already open, when there is one, so a
 /// second window does not arrive on a different engine from the tab it was
-/// opened beside. Falls back to the full list otherwise.
-fn backends_for_a_new_view(
-    workspace: &Workspace,
-    cx: &App,
-) -> (Vec<Arc<dyn container::ContainerBackend>>, usize) {
-    workspace
+/// opened beside. Both views belong to the same project, so the host they run
+/// on is the same. A tab still reaching its host has nothing to inherit, and
+/// the new view reaches the project's host itself.
+fn engines_for_a_new_view(workspace: &Workspace, cx: &mut App) -> (Engines, usize) {
+    let inherited = workspace
         .items_of_type::<ContainerPanel>(cx)
         .next()
-        .map(|view| {
+        .and_then(|view| {
             let view = view.read(cx);
-            (view.backends.clone(), view.active_backend)
-        })
-        .unwrap_or_else(|| (crate::container_panel::engines_for_a_new_view(cx), 0))
+            let host = view.command_host.clone()?;
+            Some((
+                Engines::Built {
+                    backends: view.backends.clone(),
+                    host,
+                },
+                view.active_backend,
+            ))
+        });
+    inherited.unwrap_or_else(|| (engines_for_project(workspace.project(), cx), 0))
 }
 
 /// Brings the container tab forward, or opens one.
@@ -191,10 +190,10 @@ pub(crate) fn open_in_editor_tab(
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
-    let (backends, active) = backends_for_a_new_view(workspace, cx);
+    let (engines, active) = engines_for_a_new_view(workspace, cx);
     let handle = cx.weak_entity();
     let view = cx.new(|cx| {
-        let mut panel = ContainerPanel::standalone(backends, active, cx);
+        let mut panel = ContainerPanel::standalone(engines, active, cx);
         // A tab lives in this workspace, so it can open terminals and show
         // confirmations here. The floating window below cannot -- see
         // `ContainerPanel::workspace`.
@@ -274,13 +273,13 @@ pub(crate) fn open_in_floating_window(
     // Read before `open_window` -- that closure runs in a *different* window's
     // context, where a second `&Workspace` cannot be borrowed alongside the `App`
     // creating the entity.
-    let (backends, active) = backends_for_a_new_view(workspace, cx);
+    let (engines, active) = engines_for_a_new_view(workspace, cx);
     let _ = window;
 
     let options = window_options(cx);
 
     if let Err(error) = cx.open_window(options, |window, cx| {
-        let panel = cx.new(|cx| ContainerPanel::standalone(backends, active, cx));
+        let panel = cx.new(|cx| ContainerPanel::standalone(engines, active, cx));
         let standalone_window = cx.new(|_cx| StandaloneWindow {
             panel: panel.clone(),
         });

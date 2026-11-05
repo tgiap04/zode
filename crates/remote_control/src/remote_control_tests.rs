@@ -3253,8 +3253,13 @@ async fn control_messages_sent_while_the_relay_is_full_wait_instead_of_ending_se
     let mut connected = open_session(&rig, &browser, cx);
     connected.send(&browser, &hello(1));
     cx.run_until_parked();
+    // Paced, because the tap on the pty holds a bounded number of reads: a
+    // single burst can fill it before this thread drains it, and then the
+    // output is replaced by a snapshot of a frame or two and the relay never
+    // fills. Small bursts each fit, and together they are more frames than the
+    // relay holds while staying under `SESSION_QUEUE_LIMIT`.
     let flooding = shell_terminal(
-        "read line; head -c 3000000 /dev/zero | tr '\\000' 'x'; printf '\\nFLOODEND\\n'; sleep 30",
+        "read line; for i in $(seq 40); do head -c 16384 /dev/zero | tr '\\000' 'x'; sleep 0.02; done; printf '\\nFLOODEND\\n'; sleep 30",
         cx,
     )
     .await;
@@ -3280,11 +3285,11 @@ async fn control_messages_sent_while_the_relay_is_full_wait_instead_of_ending_se
 
     rig.relay.pause_delivery();
     connected.send_data(&browser, 7, b"go\r");
-    for _ in 0..500 {
-        if flooding
+    for _ in 0..2000 {
+        let flood_ended = flooding
             .update(cx, |terminal, _| terminal.get_content())
-            .contains("FLOODEND")
-        {
+            .contains("FLOODEND");
+        if flood_ended && !rig.host.read_with(cx, |host, cx| host.relay_has_room(cx)) {
             break;
         }
         cx.background_executor

@@ -155,15 +155,14 @@ impl BranchPanel {
 
     /// Asks the index to re-read disk for a closed agent tab.
     fn refresh_sessions_after_close(&mut self, cx: &mut Context<Self>) {
-        // The store the panel already holds, else the shared one if somebody
+        // The store the panel already holds, else this project's if somebody
         // created it: another workspace's panel may be waiting on it even
-        // though this one was never drawn. `try_global`, not `global` -- a tab
-        // closing must not bring a store into existence.
-        let Some(store) = self
-            .session_store
-            .clone()
-            .or_else(|| agent_ui::SessionStore::try_global(cx))
-        else {
+        // though this one was never drawn. `try_for_project`, not
+        // `for_project` -- a tab closing must not bring a store into existence.
+        let Some(store) = self.session_store.clone().or_else(|| {
+            let workspace = self.workspace.upgrade()?;
+            agent_ui::SessionStore::try_for_project(workspace.read(cx).project(), cx)
+        }) else {
             return;
         };
         // `SessionStore::refresh` coalesces a call that arrives mid-sweep into

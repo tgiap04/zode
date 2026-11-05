@@ -1575,6 +1575,9 @@ mod permission_bypass {
         }
     }
 
+    /// These panels open local projects, so their checkouts are this machine's.
+    const LOCAL: agent_ui::BypassHost = agent_ui::BypassHost::Local;
+
     fn store(cx: &mut gpui::VisualTestContext) -> gpui::Entity<agent_ui::PermissionBypassStore> {
         cx.update(|_, cx| agent_ui::PermissionBypassStore::global(cx))
     }
@@ -1601,7 +1604,7 @@ mod permission_bypass {
 
         store(cx).read_with(cx, |store, _| {
             assert!(
-                !store.is_enabled(std::path::Path::new(CHECKOUT)),
+                !store.is_enabled(&LOCAL, std::path::Path::new(CHECKOUT)),
                 "a declined confirmation must not switch the prompts off"
             );
         });
@@ -1627,17 +1630,18 @@ mod permission_bypass {
 
         let store = store(cx);
         store.read_with(cx, |store, _| {
-            assert!(store.is_enabled(std::path::Path::new(CHECKOUT)));
+            assert!(store.is_enabled(&LOCAL, std::path::Path::new(CHECKOUT)));
         });
 
         store.update(cx, |store, cx| {
             store.prune(
+                &LOCAL,
                 std::path::Path::new(ANCHOR),
                 &[PathBuf::from("/repos/zode/other")],
                 cx,
             );
             assert!(
-                !store.is_enabled(std::path::Path::new(CHECKOUT)),
+                !store.is_enabled(&LOCAL, std::path::Path::new(CHECKOUT)),
                 "this repository's prune must reach the entry, which it can only \
                  do if the anchor was stored rather than the checkout path"
             );
@@ -1654,6 +1658,7 @@ mod permission_bypass {
 
         store(cx).update(cx, |store, cx| {
             store.set(
+                &LOCAL,
                 std::path::Path::new(CHECKOUT),
                 std::path::Path::new(ANCHOR),
                 true,
@@ -1671,7 +1676,7 @@ mod permission_bypass {
             "switching the prompts back on must not itself prompt"
         );
         store(cx).read_with(cx, |store, _| {
-            assert!(!store.is_enabled(std::path::Path::new(CHECKOUT)));
+            assert!(!store.is_enabled(&LOCAL, std::path::Path::new(CHECKOUT)));
         });
     }
 
@@ -1983,6 +1988,38 @@ mod confirm_delete_checkout {
         });
     }
 
+    /// A collaboration guest's checkout offers no sessions to delete: its
+    /// sessions are on a collaborator's machine, so the stocked sessions that
+    /// spell the checkout's path are this machine's, merely sharing a path.
+    #[gpui::test]
+    async fn a_checkout_not_on_this_machine_plans_no_session_deletion(cx: &mut TestAppContext) {
+        let (panel, id, cx) = panel_ready_to_delete(cx).await;
+        let target = PathBuf::from(TARGET);
+        stock_sessions_inside_target(&panel, cx);
+        let project = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("the panel's workspace is still alive")
+            .read_with(cx, |workspace, _| workspace.project().clone());
+        project.update(cx, |project, _| project.mark_as_collab_for_testing());
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.confirm_delete_checkout(id, target.clone(), "wt-a".into(), window, cx);
+        });
+        cx.run_until_parked();
+
+        let (_, detail) = cx.pending_prompt().expect("the delete must prompt");
+        assert_eq!(
+            detail,
+            format!(
+                "wt-a\n\nThe worktree at {TARGET} will be removed. Its branch and its commits stay."
+            ),
+            "the local sessions that share the path must not be offered"
+        );
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+    }
+
     /// `TARGET` is never registered as a worktree (see the module doc), so
     /// `remove_worktree` answers `Err` even when the reader presses the
     /// button that asks for sessions to go too --
@@ -2229,6 +2266,51 @@ mod single_delete {
         cx.run_until_parked();
         cx.simulate_prompt_answer("Move to Trash");
         cx.run_until_parked();
+    }
+
+    /// A row's delete goes to the operation that deletes a session on its
+    /// project's host. A collaboration guest's has no host here that could, so
+    /// it is refused out loud rather than dropped without a word.
+    #[gpui::test]
+    async fn a_guest_rows_delete_is_refused_out_loud(cx: &mut TestAppContext) {
+        let (panel, _store, _session, _log, cx) = panel_listing_one_session(cx, "guest").await;
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace still alive");
+        let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
+        project.update(cx, |project, _| project.mark_as_collab_for_testing());
+        let entry = panel.read_with(cx, |panel, _| {
+            panel
+                .rows
+                .iter()
+                .filter_map(|row| match row {
+                    TreeRow::Worktree { agents, .. } => Some(agents.clone()),
+                    _ => None,
+                })
+                .flat_map(|agents| agents.iter().cloned().collect::<Vec<_>>())
+                .find(|entry| matches!(entry, AgentEntry::Past { .. }))
+                .expect("the fixture lists one finished session")
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.delete_agent_session(&entry, window, cx)
+        });
+        cx.run_until_parked();
+
+        assert!(!cx.has_pending_prompt(), "nothing is offered for deletion");
+        let refusal = workspace::notifications::NotificationId::named(
+            "Deleting sessions of a shared project is not supported".into(),
+        );
+        assert!(
+            workspace.read_with(cx, |workspace, _| workspace
+                .notification_ids()
+                .contains(&refusal)),
+            "the refusal is said, not swallowed"
+        );
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(listed_ids(panel), vec!["guest".to_string()]);
+        });
     }
 
     /// Prompt answered, store idle.

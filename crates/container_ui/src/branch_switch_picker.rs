@@ -11,6 +11,8 @@ use gpui::{
 use picker::{Picker, PickerDelegate};
 use ui::{ListItem, ListItemSpacing, prelude::*};
 
+use util::command::CommandHost;
+
 use crate::compose_checkout::{self, GitFailure, Target};
 use crate::container_panel::ContainerPanel;
 
@@ -60,6 +62,7 @@ impl BranchPicker {
     pub(crate) fn new(
         panel: WeakEntity<ContainerPanel>,
         root: PathBuf,
+        host: Arc<dyn CommandHost>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -77,17 +80,20 @@ impl BranchPicker {
         let picker_for_load = picker.clone();
         let load = cx.spawn_in(window, async move |_this, cx| {
             let remote_root = root.clone();
+            let remote_host = host.clone();
             let remote = cx
-                .background_spawn(
-                    async move { compose_checkout::select_remote(&remote_root).await },
-                )
+                .background_spawn(async move {
+                    compose_checkout::select_remote(remote_host.as_ref(), &remote_root).await
+                })
                 .await;
             let (remote, fetched) = match remote {
                 Ok(Some(remote)) => {
                     let fetch_root = root.clone();
                     let fetch_remote = remote.clone();
+                    let fetch_host = host.clone();
                     let fetching = cx.background_spawn(async move {
-                        compose_checkout::fetch(&fetch_root, &fetch_remote).await
+                        compose_checkout::fetch(fetch_host.as_ref(), &fetch_root, &fetch_remote)
+                            .await
                     });
                     let timer = cx.background_executor().timer(FETCH_TIMEOUT);
                     let fetched = compose_checkout::within(fetching, timer, "fetch").await;
@@ -99,7 +105,8 @@ impl BranchPicker {
             let list_remote = remote.clone();
             let listed = cx
                 .background_spawn(async move {
-                    compose_checkout::list_targets(&root, list_remote.as_deref()).await
+                    compose_checkout::list_targets(host.as_ref(), &root, list_remote.as_deref())
+                        .await
                 })
                 .await;
             let outcome = picker_for_load.update_in(cx, |picker, window, cx| {

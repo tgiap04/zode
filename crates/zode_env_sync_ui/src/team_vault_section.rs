@@ -22,6 +22,9 @@ use zode_team_vault::{
 use crate::masking;
 use crate::{ActiveEnvFile, OpenTeamMembers};
 
+/// Said when the team vault is used in a window on another machine.
+const TEAM_VAULT_ELSEWHERE: &str = "The team vault works with projects on this computer for now; open this project locally to pull or share its files.";
+
 /// Which buttons the Team tab offers. The server enforces every one of these
 /// again; this only keeps a member from being offered what will be refused.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -334,12 +337,27 @@ impl TeamVaultSection {
 
     fn active_root(&self, cx: &App) -> Option<PathBuf> {
         let workspace = self.workspace.upgrade()?;
-        crate::active_worktree_root(workspace.read(cx), cx)
+        crate::active_checkout(workspace.read(cx), cx)
+            .filter(|checkout| checkout.is_local())
+            .map(|checkout| checkout.root().to_path_buf())
+    }
+
+    /// Whether the open project lives on another machine. The team vault
+    /// reads and writes files on this one, so for a project on a WSL, SSH or
+    /// dev container host it would put a team's secrets on the wrong disk.
+    fn project_is_elsewhere(&self, cx: &App) -> bool {
+        self.workspace
+            .upgrade()
+            .is_some_and(|workspace| !workspace.read(cx).project().read(cx).is_local())
     }
 
     /// Brings a shared file into the open project, at the path it was shared
     /// under. Asks for a folder only when no project is open.
     fn pull(&mut self, row: TeamEntryRow, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project_is_elsewhere(cx) {
+            self.say(TEAM_VAULT_ELSEWHERE, Color::Error, cx);
+            return;
+        }
         if let Some(root) = self.active_root(cx) {
             self.fetch_into(row, root, window, cx);
             return;
@@ -490,6 +508,10 @@ impl TeamVaultSection {
 
     /// Shares the `.env` open in the editor, or one picked from disk.
     fn share(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project_is_elsewhere(cx) {
+            self.say(TEAM_VAULT_ELSEWHERE, Color::Error, cx);
+            return;
+        }
         let active = self
             .workspace
             .upgrade()
@@ -517,10 +539,7 @@ impl TeamVaultSection {
                 .filter(|root| absolute.starts_with(root))
                 .or_else(|| absolute.parent().map(Path::to_path_buf))
                 .unwrap_or_else(|| absolute.clone());
-            let file = ActiveEnvFile {
-                absolute,
-                worktree_root,
-            };
+            let file = ActiveEnvFile::local(worktree_root, absolute);
             this.update_in(cx, |this, window, cx| this.prepare_share(file, window, cx))
                 .ok();
         })
@@ -530,7 +549,8 @@ impl TeamVaultSection {
     fn prepare_share(&mut self, file: ActiveEnvFile, window: &mut Window, cx: &mut Context<Self>) {
         let label = file.relative_label().to_string();
         let project_hint = file
-            .worktree_root
+            .checkout
+            .root()
             .file_name()
             .map(|name| name.to_string_lossy().into_owned());
         let existing = self
@@ -1531,5 +1551,72 @@ pub(crate) mod tests {
         });
         cx.update(|window, _| window.refresh());
         cx.run_until_parked();
+    }
+
+    /// The team vault writes and reads files on this machine, so in a window
+    /// whose project lives elsewhere -- a WSL distro, an SSH host -- a pull
+    /// would put a team's secret on the wrong disk. Both actions refuse and
+    /// say why instead.
+    #[gpui::test]
+    async fn a_project_on_another_machine_neither_pulls_nor_shares(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        fs::Fs::create_dir(fs.as_ref(), std::path::Path::new("/root"))
+            .await
+            .expect("the project folder");
+        let project = project::Project::test(fs.clone(), ["/root".as_ref()], cx).await;
+        project.update(cx, |project, _| project.mark_as_collab_for_testing());
+        let window = cx.add_window(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .expect("the window is open");
+        let team = team_session(cx);
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        let section = cx.new(|cx| TeamVaultSection::new(team, workspace.downgrade(), cx));
+
+        section.update_in(cx, |section, window, cx| section.share(window, cx));
+        section.read_with(cx, |section, _| {
+            assert_eq!(
+                section
+                    .message
+                    .as_ref()
+                    .map(|(message, _)| message.as_ref()),
+                Some(TEAM_VAULT_ELSEWHERE),
+                "a share must refuse rather than read a file on this machine"
+            );
+        });
+
+        section.update(cx, |section, _| section.message = None);
+        let row = TeamEntryRow {
+            entry: EntryId::parse(&"c3".repeat(16)).expect("a valid entry id"),
+            kind: Some(ManifestEntryKind::Env),
+            label: ".env".into(),
+            project_hint: None,
+            updated: "".into(),
+        };
+        section.update_in(cx, |section, window, cx| section.pull(row, window, cx));
+        cx.run_until_parked();
+        section.read_with(cx, |section, _| {
+            assert_eq!(
+                section
+                    .message
+                    .as_ref()
+                    .map(|(message, _)| message.as_ref()),
+                Some(TEAM_VAULT_ELSEWHERE),
+                "a pull must refuse rather than write into this machine"
+            );
+        });
+        assert!(
+            fs::Fs::load(fs.as_ref(), std::path::Path::new("/root/.env"))
+                .await
+                .is_err(),
+            "nothing may be written into the project"
+        );
     }
 }

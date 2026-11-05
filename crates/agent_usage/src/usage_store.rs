@@ -1,11 +1,17 @@
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use gpui::{App, AppContext as _, Context, Entity, Global, Task};
-use project::AgentId;
-use workspace::{StatusBarSettings, item::Settings as _};
+use gpui::{
+    App, AppContext as _, Context, Entity, EntityId, Global, SharedString, Subscription, Task,
+    WeakEntity,
+};
+use project::{AgentId, Project};
+use util::command::CommandHost;
+use workspace::{RemoteConnectionIdentity, StatusBarSettings, item::Settings as _};
 
-use crate::{Outcome, SourceState, claude, codex};
+use crate::{Outcome, SourceState, UNAVAILABLE_FOR_CONNECTION, claude, codex};
 
 /// How often the quota is re-read while some window has the user's attention.
 ///
@@ -38,18 +44,77 @@ struct GlobalAgentUsageStore(Entity<AgentUsageStore>);
 
 impl Global for GlobalAgentUsageStore {}
 
-/// The quota, read once for the whole application.
+/// One store per remote host, by the identity of its connection.
 ///
-/// A quota belongs to an account, not to a project: every indicator on screen is
-/// showing the same token's numbers. This used to live on the indicator, which
-/// the status bar builds once per `Workspace` — and this fork keeps a workspace
-/// per project inside one window, so a user with eight projects open ran eight
-/// poll loops against one endpoint on one token, each with its own retry chain.
-/// Every throttle in this crate was written per indicator and so could not see
-/// the other seven.
+/// Keyed by host rather than by project: every project on a WSL distro or an
+/// SSH host is spent from the account its CLIs are signed into there, so a
+/// store per project would poll one account once per window. Bounded by the
+/// hosts this app has opened a project on in this session.
+#[derive(Default)]
+struct RemoteAgentUsageStores(HashMap<RemoteConnectionIdentity, Entity<AgentUsageStore>>);
+
+impl Global for RemoteAgentUsageStores {}
+
+/// The one store for every project whose host this app cannot run anything
+/// on. It never reads anything.
+struct UnreachableAgentUsageStore(Entity<AgentUsageStore>);
+
+impl Global for UnreachableAgentUsageStore {}
+
+/// Where a store reads its quota.
+enum UsageHost {
+    /// This machine: its keychain, its home directory, its `codex`.
+    ThisMachine,
+    /// A WSL distro, an SSH host or a dev container, asked through whichever
+    /// of its open projects is still connected.
+    Remote {
+        /// What the host is shown as in a reason.
+        label: SharedString,
+        /// Oldest first. A project leaves the moment it is released, so a
+        /// read never waits on a connection whose window has closed.
+        projects: Vec<RemoteProject>,
+    },
+    /// A project reached through the relay, whose host is a device of its
+    /// own: it cannot be asked from here, and this machine's account would be
+    /// the wrong one to show for it.
+    Unreachable,
+}
+
+struct RemoteProject {
+    project: EntityId,
+    /// Weak so the store never keeps a closed window's project alive.
+    handle: WeakEntity<Project>,
+    _released: Subscription,
+}
+
+/// What one refresh asks.
+enum FetchTarget {
+    ThisMachine,
+    Host {
+        label: SharedString,
+        host: Task<anyhow::Result<Arc<dyn CommandHost>>>,
+    },
+    /// A remote store with no connected project to ask through.
+    NoConnection,
+}
+
+/// The quota of one machine's account, read once for the whole application.
 ///
-/// One store, one loop, however many indicators observe it.
+/// A quota belongs to an account, not to a project: every indicator for a
+/// project on the same machine is showing the same token's numbers. A project
+/// on a remote host is spent from the account its CLIs are signed into there,
+/// so each such host has a store of its own (see [`Self::for_project`]).
+///
+/// This used to live on the indicator, which the status bar builds once per
+/// `Workspace` — and this fork keeps a workspace per project inside one
+/// window, so a user with eight projects open ran eight poll loops against one
+/// endpoint on one token, each with its own retry chain. Every throttle in this
+/// crate was written per indicator and so could not see the other seven.
+///
+/// One store per machine, one loop per store, however many indicators observe
+/// it.
 pub(crate) struct AgentUsageStore {
+    host: UsageHost,
     /// Fixed order, so the numbers do not swap places between reads.
     sources: [SourceState; 2],
     /// A fetch is in flight. Guards a click so pressing twice does not queue a
@@ -82,6 +147,152 @@ impl AgentUsageStore {
         let store = cx.new(|_| Self::new());
         cx.set_global(GlobalAgentUsageStore(store.clone()));
         store
+    }
+
+    /// The store for the account `project`'s agents spend: this machine's for
+    /// a local project, its host's for a remote one.
+    ///
+    /// Never this machine's for a project that lives elsewhere. A project
+    /// whose host cannot be asked gets a store that says so instead.
+    pub(crate) fn for_project(project: &Entity<Project>, cx: &mut App) -> Entity<Self> {
+        let remote = {
+            let project = project.read(cx);
+            // A guest's agents run here, on the guest's own machine, so the
+            // account they spend is this one.
+            if project.is_local() || project.is_via_collab() {
+                return Self::global(cx);
+            }
+            project
+                .remote_connection_options(cx)
+                .filter(|_| project.is_via_remote_server())
+                .map(|options| {
+                    (
+                        workspace::remote_connection_identity(&options),
+                        options.display_name(),
+                    )
+                })
+                .filter(|(identity, _)| !matches!(identity, RemoteConnectionIdentity::Relay { .. }))
+        };
+        match remote {
+            Some((identity, label)) => Self::for_remote_host(identity, label.into(), project, cx),
+            None => Self::unreachable(cx),
+        }
+    }
+
+    fn for_remote_host(
+        identity: RemoteConnectionIdentity,
+        label: SharedString,
+        project: &Entity<Project>,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        let existing = cx
+            .default_global::<RemoteAgentUsageStores>()
+            .0
+            .get(&identity)
+            .cloned();
+        let store = match existing {
+            Some(store) => store,
+            None => {
+                let store = cx.new(|_| {
+                    Self::with_host(UsageHost::Remote {
+                        label,
+                        projects: Vec::new(),
+                    })
+                });
+                cx.default_global::<RemoteAgentUsageStores>()
+                    .0
+                    .insert(identity, store.clone());
+                store
+            }
+        };
+        store.update(cx, |store, cx| store.register(project, cx));
+        store
+    }
+
+    fn unreachable(cx: &mut App) -> Entity<Self> {
+        if let Some(global) = cx.try_global::<UnreachableAgentUsageStore>() {
+            return global.0.clone();
+        }
+        let store = cx.new(|_| {
+            let mut store = Self::with_host(UsageHost::Unreachable);
+            let now = Utc::now();
+            for source in &mut store.sources {
+                source.apply(Outcome::Clear(UNAVAILABLE_FOR_CONNECTION.into()), now);
+            }
+            store
+        });
+        cx.set_global(UnreachableAgentUsageStore(store.clone()));
+        store
+    }
+
+    fn register(&mut self, project: &Entity<Project>, cx: &mut Context<Self>) {
+        let UsageHost::Remote { projects, .. } = &mut self.host else {
+            return;
+        };
+        let project_id = project.entity_id();
+        if projects.iter().any(|known| known.project == project_id) {
+            return;
+        }
+        let released = cx.observe_release(project, move |this, _, _| {
+            if let UsageHost::Remote { projects, .. } = &mut this.host {
+                projects.retain(|known| known.project != project_id);
+                // Nobody left to show this host's numbers to.
+                if projects.is_empty() {
+                    this._poll = None;
+                }
+            }
+        });
+        projects.push(RemoteProject {
+            project: project_id,
+            handle: project.downgrade(),
+            _released: released,
+        });
+    }
+
+    /// What the next refresh asks, and through which connection.
+    fn fetch_target(&self, cx: &mut App) -> Option<FetchTarget> {
+        match &self.host {
+            UsageHost::ThisMachine => Some(FetchTarget::ThisMachine),
+            UsageHost::Unreachable => None,
+            UsageHost::Remote { label, projects } => {
+                let connected = projects.iter().find_map(|known| {
+                    known
+                        .handle
+                        .upgrade()
+                        .filter(|project| !project.read(cx).is_disconnected(cx))
+                });
+                Some(match connected {
+                    Some(project) => FetchTarget::Host {
+                        label: label.clone(),
+                        host: project.update(cx, |project, cx| project.command_host(cx)),
+                    },
+                    None => FetchTarget::NoConnection,
+                })
+            }
+        }
+    }
+
+    /// Whether this store speaks for an account on some other machine.
+    pub(crate) fn speaks_for_another_machine(&self) -> bool {
+        !matches!(self.host, UsageHost::ThisMachine)
+    }
+
+    /// A store for the host named `label`, with no project and no tasks.
+    #[cfg(test)]
+    pub(crate) fn test_for_host(label: &str) -> Self {
+        Self::with_host(UsageHost::Remote {
+            label: SharedString::from(label.to_string()),
+            projects: Vec::new(),
+        })
+    }
+
+    /// The host's name for reasons, `None` for this machine.
+    #[cfg(test)]
+    pub(crate) fn host_label(&self) -> Option<SharedString> {
+        match &self.host {
+            UsageHost::Remote { label, .. } => Some(label.clone()),
+            UsageHost::ThisMachine | UsageHost::Unreachable => None,
+        }
     }
 
     /// A store with fixed state and no tasks.
@@ -125,7 +336,12 @@ impl AgentUsageStore {
     }
 
     fn new() -> Self {
+        Self::with_host(UsageHost::ThisMachine)
+    }
+
+    fn with_host(host: UsageHost) -> Self {
         Self {
+            host,
             sources: [
                 SourceState::new(AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string())),
                 SourceState::new(AgentId::new(project::CODEX_AGENT_ID.to_string())),
@@ -196,7 +412,7 @@ impl AgentUsageStore {
     /// freely — on activation, or after a manual refresh — without stacking
     /// timers.
     fn start_polling(&mut self, reason: PollReason, cx: &mut Context<Self>) {
-        if !Self::may_read_usage() {
+        if !Self::may_read_usage() || matches!(self.host, UsageHost::Unreachable) {
             return;
         }
         if !self.should_fetch(reason, Utc::now()) {
@@ -277,6 +493,10 @@ impl AgentUsageStore {
             return;
         }
 
+        let Some(target) = self.fetch_target(cx) else {
+            return;
+        };
+
         self.fetching = true;
         // Stamped here rather than on the answer: this is the moment a request
         // goes out, and it is requests the throttle is trying not to duplicate.
@@ -285,31 +505,9 @@ impl AgentUsageStore {
 
         let http_client = cx.http_client();
         let executor = cx.background_executor().clone();
-        let claude_executor = executor.clone();
-        let codex_executor = executor;
         self._fetch = Some(cx.spawn(async move |this, cx| {
-            // Concurrently, and neither waits on the other: one agent being
-            // absent must not delay the other's numbers by a process spawn. A
-            // disabled agent substitutes a `ready` future rather than dropping
-            // out of the `join`, so the concurrency shape is unchanged whichever
-            // agents are on.
-            let claude_future = if claude_on {
-                futures::future::Either::Left(async move {
-                    Outcome::from(claude::fetch(http_client, claude_executor).await)
-                })
-            } else {
-                futures::future::Either::Right(std::future::ready(Self::disabled_outcome()))
-            };
-            let codex_future = if codex_on {
-                futures::future::Either::Left(async move {
-                    Outcome::from(codex::fetch(codex_executor).await)
-                })
-            } else {
-                futures::future::Either::Right(std::future::ready(Self::disabled_outcome()))
-            };
-
             let (claude_outcome, codex_outcome) =
-                futures::future::join(claude_future, codex_future).await;
+                read_both(target, claude_on, codex_on, http_client, executor).await;
 
             this.update(cx, |this, cx| {
                 this.apply(claude_outcome, codex_outcome, Utc::now());
@@ -339,6 +537,70 @@ impl AgentUsageStore {
     pub(crate) fn source_states(&self) -> Vec<SourceState> {
         self.sources.to_vec()
     }
+}
+
+/// Reads both agents' quota once, concurrently, from wherever `target` says.
+///
+/// Concurrently, and neither waits on the other: one agent being absent must
+/// not delay the other's numbers by a process spawn. A disabled agent
+/// substitutes a `ready` future rather than dropping out of the `join`, so the
+/// concurrency shape is unchanged whichever agents are on.
+async fn read_both(
+    target: FetchTarget,
+    claude_on: bool,
+    codex_on: bool,
+    http_client: Arc<dyn http_client::HttpClient>,
+    executor: gpui::BackgroundExecutor,
+) -> (Outcome, Outcome) {
+    use futures::future::Either;
+
+    let (host, label) = match target {
+        FetchTarget::ThisMachine => (None, None),
+        FetchTarget::NoConnection => {
+            return (
+                Outcome::Keep(UNAVAILABLE_FOR_CONNECTION.into()),
+                Outcome::Keep(UNAVAILABLE_FOR_CONNECTION.into()),
+            );
+        }
+        FetchTarget::Host { label, host } => match host.await {
+            Ok(host) => (Some(host), Some(label)),
+            Err(error) => {
+                log::warn!("agent usage: {label} could not be asked: {error:#}");
+                return (
+                    Outcome::Keep(UNAVAILABLE_FOR_CONNECTION.into()),
+                    Outcome::Keep(UNAVAILABLE_FOR_CONNECTION.into()),
+                );
+            }
+        },
+    };
+
+    let claude_future = if claude_on {
+        let executor = executor.clone();
+        let host = host.clone();
+        let label = label.clone();
+        Either::Left(async move {
+            let result = match host {
+                Some(host) => claude::fetch_on_host(http_client, executor, host).await,
+                None => claude::fetch(http_client, executor).await,
+            };
+            Outcome::from_claude(result, label.as_ref().map(SharedString::as_str))
+        })
+    } else {
+        Either::Right(std::future::ready(AgentUsageStore::disabled_outcome()))
+    };
+    let codex_future = if codex_on {
+        Either::Left(async move {
+            let result = match host {
+                Some(host) => codex::fetch_on_host(executor, host).await,
+                None => codex::fetch(executor).await,
+            };
+            Outcome::from_codex(result, label.as_ref().map(SharedString::as_str))
+        })
+    } else {
+        Either::Right(std::future::ready(AgentUsageStore::disabled_outcome()))
+    };
+
+    futures::future::join(claude_future, codex_future).await
 }
 
 #[cfg(test)]
@@ -459,5 +721,256 @@ mod tests {
 
         assert!(!store.should_fetch(PollReason::Activation, just_inside));
         assert!(store.should_fetch(PollReason::Activation, just_outside));
+    }
+
+    fn a_window(percent: u8) -> crate::UsageWindow {
+        crate::UsageWindow {
+            percent,
+            resets_at: None,
+            label: None,
+            kind: crate::WindowKind::Session,
+        }
+    }
+
+    struct RemoteRig {
+        project: Entity<Project>,
+        host_name: String,
+        _server: Entity<()>,
+    }
+
+    async fn remote_project(
+        cx: &mut gpui::TestAppContext,
+        server_cx: &mut gpui::TestAppContext,
+    ) -> RemoteRig {
+        let fs = fs::FakeFs::new(cx.executor());
+        let (project, server) = Project::test_remote(fs, cx, server_cx).await;
+        let host_name = project.read_with(cx, |project, cx| {
+            project
+                .remote_connection_options(cx)
+                .expect("a remote project has connection options")
+                .display_name()
+        });
+        RemoteRig {
+            project,
+            host_name,
+            _server: server,
+        }
+    }
+
+    async fn local_project(cx: &mut gpui::TestAppContext) -> Entity<Project> {
+        cx.update(|cx| {
+            if !cx.has_global::<settings::SettingsStore>() {
+                let settings_store = settings::SettingsStore::test(cx);
+                cx.set_global(settings_store);
+            }
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        Project::test(fs, [], cx).await
+    }
+
+    /// The account a remote project's agents spend is its host's, so its
+    /// numbers live in a store of their own, and neither store's answer
+    /// reaches the other.
+    #[gpui::test]
+    async fn a_remote_project_s_store_is_its_host_s_and_independent_of_this_machine_s(
+        cx: &mut gpui::TestAppContext,
+        server_cx: &mut gpui::TestAppContext,
+    ) {
+        let remote = remote_project(cx, server_cx).await;
+        let local = local_project(cx).await;
+
+        let remote_store = cx.update(|cx| AgentUsageStore::for_project(&remote.project, cx));
+        let local_store = cx.update(|cx| AgentUsageStore::for_project(&local, cx));
+        let this_machine = cx.update(|cx| AgentUsageStore::global(cx));
+
+        assert_eq!(local_store.entity_id(), this_machine.entity_id());
+        assert_ne!(
+            remote_store.entity_id(),
+            local_store.entity_id(),
+            "a remote project must never read this machine's account"
+        );
+        assert_eq!(
+            cx.update(|cx| AgentUsageStore::for_project(&remote.project, cx))
+                .entity_id(),
+            remote_store.entity_id(),
+            "one store per host, however often it is asked for"
+        );
+        remote_store.read_with(cx, |store, _| {
+            assert_eq!(
+                store.host_label().as_ref().map(SharedString::as_str),
+                Some(remote.host_name.as_str())
+            );
+        });
+
+        let now = Utc::now();
+        remote_store.update(cx, |store, _| {
+            store.apply(
+                Outcome::Windows(vec![a_window(71)]),
+                Outcome::Keep("unchanged".into()),
+                now,
+            );
+        });
+        local_store.update(cx, |store, _| {
+            store.apply(
+                Outcome::Windows(vec![a_window(4)]),
+                Outcome::Keep("unchanged".into()),
+                now,
+            );
+        });
+
+        remote_store.read_with(cx, |store, _| {
+            assert_eq!(store.source_at(0).windows, vec![a_window(71)]);
+        });
+        local_store.read_with(cx, |store, _| {
+            assert_eq!(store.source_at(0).windows, vec![a_window(4)]);
+        });
+    }
+
+    /// A host with no connected project to ask through says so, rather than
+    /// reading anything here.
+    #[gpui::test]
+    async fn a_host_with_no_connection_is_unavailable_for_this_connection(
+        cx: &mut gpui::TestAppContext,
+        server_cx: &mut gpui::TestAppContext,
+    ) {
+        let remote = remote_project(cx, server_cx).await;
+        let store = cx.update(|cx| AgentUsageStore::for_project(&remote.project, cx));
+        let remote_client = remote.project.read_with(cx, |project, _| {
+            project
+                .remote_client()
+                .expect("a remote project has a remote client")
+        });
+        remote_client.update(cx, |remote_client, cx| {
+            remote_client.force_server_not_running(cx)
+        });
+
+        let target = store.update(cx, |store, cx| store.fetch_target(cx));
+        assert!(
+            matches!(target, Some(FetchTarget::NoConnection)),
+            "a disconnected host is asked through nothing"
+        );
+
+        let http_client = http_client::FakeHttpClient::with_404_response();
+        let outcomes = read_both(
+            FetchTarget::NoConnection,
+            true,
+            true,
+            http_client,
+            cx.executor(),
+        )
+        .await;
+        assert_eq!(
+            outcomes,
+            (
+                Outcome::Keep(UNAVAILABLE_FOR_CONNECTION.into()),
+                Outcome::Keep(UNAVAILABLE_FOR_CONNECTION.into()),
+            )
+        );
+    }
+
+    /// A host whose command cannot be built is unavailable, and nothing is
+    /// read in its place.
+    #[gpui::test]
+    async fn a_host_that_cannot_be_built_reads_nothing_here(cx: &mut gpui::TestAppContext) {
+        let http_client = http_client::FakeHttpClient::with_404_response();
+        let outcomes = read_both(
+            FetchTarget::Host {
+                label: "Ubuntu-22.04".into(),
+                host: Task::ready(Err(anyhow::anyhow!("Ubuntu-22.04 is not connected"))),
+            },
+            true,
+            true,
+            http_client,
+            cx.executor(),
+        )
+        .await;
+        assert_eq!(
+            outcomes,
+            (
+                Outcome::Keep(UNAVAILABLE_FOR_CONNECTION.into()),
+                Outcome::Keep(UNAVAILABLE_FOR_CONNECTION.into()),
+            )
+        );
+    }
+
+    /// The not-signed-in reasons name the host, so a reader can tell which
+    /// machine to sign in on.
+    #[gpui::test]
+    async fn a_host_that_is_signed_out_is_named(cx: &mut gpui::TestAppContext) {
+        let http_client = http_client::FakeHttpClient::with_404_response();
+        let disconnected: Arc<dyn CommandHost> =
+            Arc::new(crate::test_support::RecordingHost::disconnected());
+        let outcomes = read_both(
+            FetchTarget::Host {
+                label: "Ubuntu-22.04".into(),
+                host: Task::ready(Ok(disconnected)),
+            },
+            true,
+            true,
+            http_client,
+            cx.executor(),
+        )
+        .await;
+        assert_eq!(
+            outcomes,
+            (
+                Outcome::Keep(UNAVAILABLE_FOR_CONNECTION.into()),
+                Outcome::Keep(UNAVAILABLE_FOR_CONNECTION.into()),
+            ),
+            "a host that could not run the read is unavailable, not signed out"
+        );
+
+        assert_eq!(
+            Outcome::from_claude(
+                Err(claude::Unavailable::NoCredentials),
+                Some("Ubuntu-22.04")
+            ),
+            Outcome::Clear("not signed in on Ubuntu-22.04".into())
+        );
+        assert_eq!(
+            Outcome::from_codex(Err(codex::Unavailable::NotInstalled), Some("Ubuntu-22.04")),
+            Outcome::Clear("codex CLI not installed on Ubuntu-22.04".into())
+        );
+        assert_eq!(
+            Outcome::from_claude(Err(claude::Unavailable::NoCredentials), None),
+            Outcome::Clear("no Claude Code sign-in was found on this machine".into()),
+            "this machine's wording is unchanged"
+        );
+    }
+
+    /// A guest's agents run on the guest's own machine, so a collaborator's
+    /// project reads this machine's account, as it always has.
+    #[gpui::test]
+    async fn a_collaborator_s_project_reads_this_machine_s_account(cx: &mut gpui::TestAppContext) {
+        let project = local_project(cx).await;
+        project.update(cx, |project, _| project.mark_as_collab_for_testing());
+
+        let store = cx.update(|cx| AgentUsageStore::for_project(&project, cx));
+
+        assert_eq!(
+            store.entity_id(),
+            cx.update(|cx| AgentUsageStore::global(cx)).entity_id()
+        );
+    }
+
+    /// A project reached through a connection this app cannot run anything
+    /// on -- the relay's -- reads nothing and says why.
+    #[gpui::test]
+    async fn an_unreachable_host_never_polls_and_says_why(cx: &mut gpui::TestAppContext) {
+        let store = cx.update(|cx| AgentUsageStore::unreachable(cx));
+
+        store.update(cx, |store, cx| {
+            store.refresh_now(cx);
+            assert!(!store.is_fetching(), "nothing is read for it");
+            assert!(!store.is_polling(), "and no loop runs for it");
+            assert!(store.fetch_target(cx).is_none());
+            for source in store.source_states() {
+                assert_eq!(
+                    source.reason.as_ref().map(SharedString::as_str),
+                    Some(UNAVAILABLE_FOR_CONNECTION)
+                );
+                assert!(source.windows.is_empty());
+            }
+        });
     }
 }

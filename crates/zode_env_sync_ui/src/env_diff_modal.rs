@@ -1,6 +1,6 @@
 use gpui::{App, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable, Subscription, Window};
 use ui::{CommonAnimationExt, Modal, ModalFooter, ModalHeader, Section, Tooltip, prelude::*};
-use workspace::ModalView;
+use workspace::{DismissDecision, ModalView};
 use zode_env_sync::{EnvSession, EnvStatus};
 
 use crate::masking;
@@ -32,7 +32,18 @@ pub struct EnvDiffModal {
 }
 
 impl EventEmitter<DismissEvent> for EnvDiffModal {}
-impl ModalView for EnvDiffModal {}
+impl ModalView for EnvDiffModal {
+    /// Clicking outside, or opening another window, is refused like Cancel is
+    /// while a write to the host is on its way: it cannot be called back, and
+    /// this window is where its outcome is read.
+    fn on_before_dismiss(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> DismissDecision {
+        DismissDecision::Dismiss(!self.session.read(cx).is_applying())
+    }
+}
 
 impl Focusable for EnvDiffModal {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
@@ -127,6 +138,18 @@ impl EnvDiffModal {
         .detach();
     }
 
+    /// Leaves without writing anything -- unless a write to the host is
+    /// already on its way, which cannot be called back: the window stays, so
+    /// the outcome is seen where the choice was made.
+    fn cancel(&mut self, cx: &mut Context<Self>) {
+        if self
+            .session
+            .update(cx, |session, cx| session.dismiss_pending(cx))
+        {
+            cx.emit(DismissEvent);
+        }
+    }
+
     /// The reveal button's label, which must never overstate the protection.
     fn reveal_label(&self) -> &'static str {
         match (self.revealed, self.support.is_available()) {
@@ -150,17 +173,14 @@ impl Render for EnvDiffModal {
             .w(rems(60.))
             .max_h(rems(40.))
             .debug_selector(|| "env-diff-modal".into())
-            .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| {
-                this.session
-                    .update(cx, |session, cx| session.dismiss_pending(cx));
-                cx.emit(DismissEvent);
-            }));
+            .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| this.cancel(cx)));
 
         let working = matches!(self.session.read(cx).status(), EnvStatus::Working);
         let (outcome, outcome_color) = self.outcome_line(cx);
         let file_name = self.file_name.clone();
 
         let session = self.session.read(cx);
+        let writing = session.is_applying();
         let Some(pending) = session.pending() else {
             // Not an empty box. Either the answer has not arrived, or it
             // arrived and changed nothing -- both are things to say, and
@@ -236,7 +256,7 @@ impl Render for EnvDiffModal {
         // Nothing was written, and the file is still the old one. Shown
         // beside the diff rather than only in a status bar, because this is
         // the window the user is looking at when they press the button.
-        let write_failure = (outcome_color == Color::Error).then(|| outcome.clone());
+        let write_failure = (!writing && outcome_color == Color::Error).then(|| outcome.clone());
 
         let added_background = cx.theme().status().created_background;
         let removed_background = cx.theme().status().deleted_background;
@@ -306,6 +326,24 @@ impl Render for EnvDiffModal {
                                 .overflow_y_scroll()
                                 .child(diff_body),
                         )
+                        .when(writing, |this| {
+                            this.child(
+                                h_flex()
+                                    .gap_1p5()
+                                    .items_center()
+                                    .child(
+                                        Icon::new(IconName::LoadCircle)
+                                            .size(IconSize::XSmall)
+                                            .color(Color::Muted)
+                                            .with_rotate_animation(2),
+                                    )
+                                    .child(
+                                        Label::new("Writing to the host…")
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    ),
+                            )
+                        })
                         .when_some(write_failure, |this, reason| {
                             // The window stays open for exactly this line.
                             this.child(
@@ -387,17 +425,16 @@ impl Render for EnvDiffModal {
                                 .gap_1()
                                 .child(
                                     Button::new("env-diff-cancel", "Cancel")
+                                        .disabled(writing)
                                         .tooltip(Tooltip::text("Change nothing on either side"))
-                                        .on_click(cx.listener(|this, _, _window, cx| {
-                                            this.session.update(cx, |session, cx| {
-                                                session.dismiss_pending(cx)
-                                            });
-                                            cx.emit(DismissEvent);
-                                        })),
+                                        .on_click(
+                                            cx.listener(|this, _, _window, cx| this.cancel(cx)),
+                                        ),
                                 )
                                 .child(
                                     Button::new("env-diff-apply", "Write the Server's Copy")
                                         .style(ButtonStyle::Filled)
+                                        .disabled(writing)
                                         .tooltip(Tooltip::text(
                                             "The current file is copied aside first, outside this project",
                                         ))
@@ -427,8 +464,9 @@ mod tests {
     use std::cell::Cell;
     use std::path::PathBuf;
     use std::rc::Rc;
+    use std::sync::Arc;
     use zode_account::{Account, AccountStatus, AccountUser};
-    use zode_env_sync::{EntryId, PendingEnvDivergence};
+    use zode_env_sync::{EntryId, EnvFile, EnvFileFuture, PendingEnvDivergence};
 
     fn init_theme(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -470,6 +508,7 @@ mod tests {
             revision: "rev-1".into(),
             seq: 2,
             safe_to_apply,
+            local_hash: Some(zode_env_sync::env_state::hash(local.as_bytes())),
         }
     }
 
@@ -639,5 +678,99 @@ mod tests {
             modal.support = os_auth::Support::Available { method: "test" };
             assert_eq!(modal.reveal_label(), "Reveal values…");
         });
+    }
+
+    /// A file on a host that never answers a write.
+    struct HostThatNeverAnswers;
+
+    impl EnvFile for HostThatNeverAnswers {
+        fn read(&self) -> EnvFileFuture<'_, Option<Vec<u8>>> {
+            Box::pin(async { Ok(Some(b"# staging\nAPI_KEY=old_secret_value\n".to_vec())) })
+        }
+
+        fn write_atomic(&self, _contents: Vec<u8>) -> EnvFileFuture<'_, ()> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    struct Directory(PathBuf);
+
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).ok();
+        }
+    }
+
+    #[gpui::test]
+    fn a_write_to_the_host_in_flight_keeps_the_window_and_its_difference(cx: &mut TestAppContext) {
+        init_theme(cx);
+        let directory = Directory(
+            std::env::temp_dir().join(format!("zode-env-diff-writing-{}", std::process::id())),
+        );
+        std::fs::create_dir_all(&directory.0).expect("the fixture directory");
+        let session = session_with(None, cx);
+        session.update(cx, |session, cx| {
+            session.keep_files_in_for_test(&directory.0);
+            session.set_pending_in_for_test(divergence(true), Arc::new(HostThatNeverAnswers), cx);
+            assert!(!session.apply_pending(cx), "a remote write answers later");
+        });
+        let (modal, cx) = cx.add_window_view({
+            let session = session.clone();
+            |_window, cx| EnvDiffModal::new(session, ".env", cx)
+        });
+        cx.run_until_parked();
+        let dismissed = dismissals(&modal, cx);
+
+        modal.update(cx, |modal, cx| modal.cancel(cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            dismissed.get(),
+            0,
+            "the window closed on a write that is still going to land"
+        );
+        session.read_with(cx, |session, _| {
+            assert!(session.pending().is_some(), "the difference was dropped");
+        });
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn clicking_outside_does_not_close_the_window_while_the_host_is_written(
+        cx: &mut TestAppContext,
+    ) {
+        init_theme(cx);
+        let directory = Directory(
+            std::env::temp_dir().join(format!("zode-env-diff-outside-{}", std::process::id())),
+        );
+        std::fs::create_dir_all(&directory.0).expect("the fixture directory");
+        let session = session_with(None, cx);
+        session.update(cx, |session, cx| {
+            session.keep_files_in_for_test(&directory.0);
+            session.set_pending_in_for_test(divergence(true), Arc::new(HostThatNeverAnswers), cx);
+        });
+        let (modal, cx) = cx.add_window_view({
+            let session = session.clone();
+            |_window, cx| EnvDiffModal::new(session, ".env", cx)
+        });
+        cx.run_until_parked();
+
+        let before_writing =
+            modal.update_in(cx, |modal, window, cx| modal.on_before_dismiss(window, cx));
+        assert!(
+            matches!(before_writing, workspace::DismissDecision::Dismiss(true)),
+            "with nothing in flight the window may close"
+        );
+
+        session.update(cx, |session, cx| {
+            assert!(!session.apply_pending(cx), "a remote write answers later");
+        });
+        let while_writing =
+            modal.update_in(cx, |modal, window, cx| modal.on_before_dismiss(window, cx));
+        assert!(
+            matches!(while_writing, workspace::DismissDecision::Dismiss(false)),
+            "the window closed on a write that is still going to land"
+        );
     }
 }

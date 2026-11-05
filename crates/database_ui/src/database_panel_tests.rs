@@ -186,11 +186,15 @@ async fn right_clicking_a_connection_opens_a_menu_the_panel_owns(cx: &mut TestAp
 }
 
 fn set_connections(cx: &mut gpui::VisualTestContext, entries: &[(&str, &str)]) {
+    set_connections_for(cx, "sqlite", entries);
+}
+
+fn set_connections_for(cx: &mut gpui::VisualTestContext, driver: &str, entries: &[(&str, &str)]) {
     let entries: Vec<_> = entries
         .iter()
         .map(|(name, url)| settings::DatabaseConnectionContent {
             name: Some((*name).to_string()),
-            driver: Some("sqlite".into()),
+            driver: Some(driver.into()),
             url: Some((*url).to_string()),
         })
         .collect();
@@ -368,11 +372,25 @@ pub(crate) async fn modal_for_test<'a>(
     gpui::Entity<crate::connection_modal::ConnectionModal>,
     &'a mut gpui::VisualTestContext,
 ) {
+    modal_on_host_for_test(cx, installed, |_| crate::driver_registry::DriverHost::Local).await
+}
+
+/// [`modal_for_test`], listing and starting the drivers of whatever host
+/// `drivers` names instead of this machine's.
+pub(crate) async fn modal_on_host_for_test<'a>(
+    cx: &'a mut TestAppContext,
+    installed: &[&str],
+    drivers: impl FnOnce(&mut gpui::App) -> crate::driver_registry::DriverHost,
+) -> (
+    gpui::Entity<crate::connection_modal::ConnectionModal>,
+    &'a mut gpui::VisualTestContext,
+) {
     init_test(cx);
-    cx.update(|cx| {
+    let drivers = cx.update(|cx| {
         for id in installed {
             crate::driver_registry::install_for_test(id, cx);
         }
+        drivers(cx)
     });
     let fs = FakeFs::new(cx.executor());
     let project = Project::test(fs, [], cx).await;
@@ -382,7 +400,12 @@ pub(crate) async fn modal_for_test<'a>(
 
     let modal = cx.update(|window, cx| {
         cx.new(|cx| {
-            crate::connection_modal::ConnectionModal::new(workspace.downgrade(), window, cx)
+            crate::connection_modal::ConnectionModal::new(
+                workspace.downgrade(),
+                drivers,
+                window,
+                cx,
+            )
         })
     });
     (modal, cx)
@@ -551,6 +574,63 @@ async fn a_driver_that_is_merely_undownloaded_does_not_blame_a_missing_extension
             "nothing may be started for a driver that is not on the machine"
         );
     });
+}
+
+/// In a remote window a connection's driver is the host's: the host is asked
+/// for it, and the host's path is what runs, through the host. This machine
+/// has no `postgres` driver, so any fallback to its drivers fails here.
+#[gpui::test]
+async fn opening_a_connection_in_a_remote_window_runs_the_hosts_driver(cx: &mut TestAppContext) {
+    use crate::driver_registry::remote_test_support::{
+        HOST_NAME, REMOTE_POSTGRES, RecordingHost, remote_host,
+    };
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    let local_store = tempfile::tempdir().expect("a temporary directory");
+    let service = std::rc::Rc::new(RecordingHost::with_postgres());
+    cx.update(|_window, cx| {
+        cx.set_global(zed_credentials_provider::ZedCredentialsProvider(
+            std::sync::Arc::new(MemoryCredentials::default()),
+        ));
+        crate::driver_registry::set_installer_for_test(local_store.path().to_path_buf(), cx);
+    });
+    panel.update(cx, |panel, cx| {
+        panel.drivers = Some(remote_host(service.clone(), cx));
+    });
+    set_connections_for(cx, "postgres", &[("staging", "postgres://localhost/app")]);
+
+    panel.update_in(cx, |panel, window, cx| {
+        panel.toggle_connection(0, window, cx)
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        service.asked.borrow().clone(),
+        vec![("postgres".to_string(), false)],
+        "the host is asked for the driver, and asked to install nothing"
+    );
+    assert_eq!(
+        service.command_host.programs.lock().unwrap().clone(),
+        vec![REMOTE_POSTGRES.to_string()],
+        "the host's path, run through the host"
+    );
+    panel.read_with(cx, |panel, _| {
+        let failure = panel.failure(0).expect("the test host runs nothing");
+        assert!(failure.contains(&format!("on {HOST_NAME}")), "{failure}");
+    });
+    cx.update(|_window, cx| {
+        assert!(
+            !crate::driver_registry::global(cx)
+                .read(cx)
+                .get("postgres")
+                .is_some_and(|driver| driver.is_installed()),
+            "nothing of this machine's stood in"
+        );
+        assert_eq!(crate::driver_registry::installer(cx).waiters("postgres"), 0);
+    });
+    assert!(
+        database::install::test_support::directory_entries(local_store.path(), "postgres")
+            .is_empty()
+    );
 }
 
 /// A view standing on its own lays the table list beside the data once it is

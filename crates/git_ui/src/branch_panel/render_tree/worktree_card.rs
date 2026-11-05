@@ -54,9 +54,11 @@ impl BranchPanel {
         let is_current = self.is_current_checkout(worktree, cx);
         let is_pinned = self.pinned(cx).contains(&worktree.path);
         let reloading_sessions = self.is_reloading_sessions(&worktree.path);
-        let bypass_on = agent_ui::PermissionBypassStore::global(cx)
-            .read(cx)
-            .is_enabled(&worktree.path);
+        let bypass_on = self.bypass_host(cx).is_some_and(|host| {
+            agent_ui::PermissionBypassStore::global(cx)
+                .read(cx)
+                .is_enabled(&host, &worktree.path)
+        });
         let toggle_key = row.toggle_key();
         let switch_to = worktree.clone();
         let menu_for = worktree.clone();

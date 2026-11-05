@@ -286,8 +286,10 @@ impl FloatingPane {
         cx: &mut Context<Self>,
     ) {
         let workspace = self.workspace.clone();
+        let project = self.project.clone();
         let pane = self.active_pane.clone();
-        let view = cx.new(|cx| container_ui::standalone_in_workspace(engine, workspace, cx));
+        let view =
+            cx.new(|cx| container_ui::standalone_in_workspace(engine, workspace, &project, cx));
         pane.update(cx, |pane, cx| {
             pane.add_item(Box::new(view), true, true, None, window, cx);
         });

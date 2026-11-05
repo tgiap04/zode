@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
+use util::command::{Command, CommandHost};
 
 use crate::kubeconfig::{ConfigSource, ConfigTarget};
 use crate::resource::{Resource, ResourceAction, ResourceKind};
@@ -59,6 +60,10 @@ pub enum ContainerError {
     CommandFailed { program: String, stderr: String },
     /// The command succeeded and its output could not be read.
     Parse { detail: String },
+    /// The machine the engine runs on cannot be asked at all: a remote
+    /// project whose connection cannot start a command there. Never answered
+    /// by running the engine on this machine instead.
+    HostUnavailable { detail: String },
 }
 
 impl std::fmt::Display for ContainerError {
@@ -77,11 +82,80 @@ impl std::fmt::Display for ContainerError {
                 write!(f, "{program} failed: {stderr}")
             }
             ContainerError::Parse { detail } => write!(f, "could not read the output: {detail}"),
+            ContainerError::HostUnavailable { detail } => write!(f, "{detail}"),
         }
     }
 }
 
 impl std::error::Error for ContainerError {}
+
+/// Exit status a POSIX shell, and `env`, give for a program not on `PATH`.
+///
+/// What a missing engine looks like through a remote host's wrapper, which
+/// itself always starts: the spawn's own `NotFound` only ever describes this
+/// machine.
+pub(crate) const COMMAND_NOT_FOUND_EXIT: i32 = 127;
+
+/// ssh's own exit status when it could not reach the host, kept apart from
+/// the tool's: the engines this panel runs never exit with it themselves.
+const WRAPPER_FAILED_EXIT: i32 = 255;
+
+/// Why `program` could not be started on `host`.
+///
+/// For a remote host the process started here is only the wrapper (`wsl.exe`,
+/// `ssh`), so its `NotFound` says the wrapper is missing on this machine, not
+/// that the engine is missing on the host.
+pub(crate) fn spawn_failure(
+    host: &dyn CommandHost,
+    program: &str,
+    error: std::io::Error,
+) -> ContainerError {
+    match host.remote_name() {
+        Some(name) if error.kind() == std::io::ErrorKind::NotFound => {
+            ContainerError::HostUnavailable {
+                detail: format!("the command that reaches {name} could not be started: {error}"),
+            }
+        }
+        None if error.kind() == std::io::ErrorKind::NotFound => ContainerError::EngineMissing {
+            program: program.to_string(),
+        },
+        _ => ContainerError::CommandFailed {
+            program: program.to_string(),
+            stderr: error.to_string(),
+        },
+    }
+}
+
+/// What an unsuccessful exit says before the engine's own words are read:
+/// the program was not found, or the wrapper never reached the host.
+pub(crate) fn exit_failure(
+    host: &dyn CommandHost,
+    program: &str,
+    code: Option<i32>,
+    stderr: &str,
+) -> Option<ContainerError> {
+    match (code, host.remote_name()) {
+        (Some(COMMAND_NOT_FOUND_EXIT), _) => Some(ContainerError::EngineMissing {
+            program: program.to_string(),
+        }),
+        (Some(WRAPPER_FAILED_EXIT), Some(name)) => Some(ContainerError::HostUnavailable {
+            detail: format!("{name} could not be reached: {}", stderr.trim()),
+        }),
+        _ => None,
+    }
+}
+
+/// `program args` on `host`, or why that host cannot run anything.
+pub(crate) fn host_command(
+    host: &dyn CommandHost,
+    program: &str,
+    args: &[&str],
+) -> Result<Command, ContainerError> {
+    host.command(program, args, &[], None)
+        .map_err(|error| ContainerError::HostUnavailable {
+            detail: format!("{error:#}"),
+        })
+}
 
 /// Something the panel learned about a resource without asking.
 #[derive(Clone, Debug, PartialEq, Eq)]

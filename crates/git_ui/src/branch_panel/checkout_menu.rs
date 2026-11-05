@@ -34,9 +34,14 @@ impl BranchPanel {
         let worktree = worktree.clone();
         // Read here rather than inside the builder: the builder closure gets no
         // `App`, and the entry has to draw the state it will toggle.
-        let bypass_on = agent_ui::PermissionBypassStore::global(cx)
-            .read(cx)
-            .is_enabled(&path);
+        // `None` is a checkout whose agents this machine cannot record a bypass
+        // for, so the toggle is left out rather than shown doing nothing.
+        let bypass_available = self.bypass_host(cx).is_some();
+        let bypass_on = self.bypass_host(cx).is_some_and(|host| {
+            agent_ui::PermissionBypassStore::global(cx)
+                .read(cx)
+                .is_enabled(&host, &path)
+        });
 
         ContextMenu::build(window, cx, move |menu, _window, _cx| {
             let pin = panel.clone();
@@ -84,20 +89,22 @@ impl BranchPanel {
             // five things depending on where the workspace happens to point.
             let bypass = panel.clone();
             let path_for_bypass = path.clone();
-            let menu = menu.item(
-                ContextMenuEntry::new("Run Agents Without Permission Prompts")
-                    .toggleable(IconPosition::Start, bypass_on)
-                    .handler(move |window, cx| {
-                        bypass.update(cx, |panel, cx| {
-                            panel.toggle_agent_permission_bypass(
-                                id,
-                                path_for_bypass.clone(),
-                                window,
-                                cx,
-                            );
-                        });
-                    }),
-            );
+            let menu = menu.when(bypass_available, |menu| {
+                menu.item(
+                    ContextMenuEntry::new("Run Agents Without Permission Prompts")
+                        .toggleable(IconPosition::Start, bypass_on)
+                        .handler(move |window, cx| {
+                            bypass.update(cx, |panel, cx| {
+                                panel.toggle_agent_permission_bypass(
+                                    id,
+                                    path_for_bypass.clone(),
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }),
+                )
+            });
 
             // With the agent entries because it is about the same list: the sessions
             // shown under this card. Offered even when the card shows none, which is
@@ -266,10 +273,13 @@ impl BranchPanel {
         else {
             return;
         };
+        let Some(host) = self.bypass_host(cx) else {
+            return;
+        };
         let store = agent_ui::PermissionBypassStore::global(cx);
 
-        if store.read(cx).is_enabled(&path) {
-            store.update(cx, |store, cx| store.set(&path, &anchor, false, cx));
+        if store.read(cx).is_enabled(&host, &path) {
+            store.update(cx, |store, cx| store.set(&host, &path, &anchor, false, cx));
             self.mark_stale(cx);
             cx.notify();
             return;
@@ -298,7 +308,7 @@ impl BranchPanel {
             panel
                 .update(cx, |panel, cx| {
                     agent_ui::PermissionBypassStore::global(cx)
-                        .update(cx, |store, cx| store.set(&path, &anchor, true, cx));
+                        .update(cx, |store, cx| store.set(&host, &path, &anchor, true, cx));
                     panel.mark_stale(cx);
                     cx.notify();
                 })
@@ -360,16 +370,22 @@ impl BranchPanel {
         // make opening this menu the thing that pays for the first sweep.
         // An empty plan is the correct answer for that reader: today's
         // prompt, unchanged.
-        let plan = match self.session_store.as_ref() {
-            Some(store) => {
-                let index = store.read(cx).index().clone();
-                checkout_deletion::plan_session_deletion(&index, &path, &other_live_worktrees)
-            }
-            None => agent_ui::DeleteAll {
-                targets: Vec::new(),
-                total_bytes: 0,
+        let lives_on = self.workspace.upgrade().map_or(
+            checkout_deletion::SessionsLiveOn::Elsewhere,
+            |workspace| {
+                checkout_deletion::SessionsLiveOn::of(workspace.read(cx).project().read(cx))
             },
-        };
+        );
+        let index = self
+            .session_store
+            .as_ref()
+            .map(|store| store.read(cx).index().clone());
+        let plan = checkout_deletion::checkout_session_plan(
+            lives_on,
+            index.as_deref(),
+            &path,
+            &other_live_worktrees,
+        );
 
         let detail = checkout_deletion::confirm_detail(&label, &path, &plan);
         let buttons = checkout_deletion::confirm_buttons(&plan);

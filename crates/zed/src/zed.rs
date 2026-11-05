@@ -5173,6 +5173,7 @@ mod tests {
                 "syntax_tree_view",
                 "tab_switcher",
                 "task",
+                "team_sharing",
                 "terminal",
                 "terminal_panel",
                 "theme",
@@ -5187,6 +5188,7 @@ mod tests {
                 "worktree_picker",
                 "zed",
                 "zed_actions",
+                "zode_account",
             ];
             assert_eq!(
                 all_namespaces,

@@ -162,8 +162,16 @@ pub enum Outcome {
     Clear(SharedString),
 }
 
-impl From<Result<Vec<UsageWindow>, claude::Unavailable>> for Outcome {
-    fn from(result: Result<Vec<UsageWindow>, claude::Unavailable>) -> Self {
+/// What a source says when the remote host a project lives on could not be
+/// asked, or is one this app cannot run anything on.
+pub(crate) const UNAVAILABLE_FOR_CONNECTION: &str = "usage unavailable for this connection";
+
+impl Outcome {
+    /// Claude's answer from the machine named `host`, `None` for this one.
+    pub(crate) fn from_claude(
+        result: Result<Vec<UsageWindow>, claude::Unavailable>,
+        host: Option<&str>,
+    ) -> Self {
         match result {
             Ok(windows) => Outcome::Windows(windows),
             // A failed request keeps what is there; anything else means the
@@ -187,29 +195,59 @@ impl From<Result<Vec<UsageWindow>, claude::Unavailable>> for Outcome {
             Err(claude::Unavailable::RuntimeOverride) => {
                 Outcome::Clear("an ANTHROPIC_* override is set".into())
             }
-            Err(claude::Unavailable::NoCredentials) => {
-                Outcome::Clear("no Claude Code sign-in was found on this machine".into())
-            }
+            Err(claude::Unavailable::NoCredentials) => Outcome::Clear(match host {
+                // The panel row already names the agent, and a host name can
+                // take twenty characters of it.
+                Some(host) => format!("not signed in on {host}").into(),
+                None => "no Claude Code sign-in was found on this machine".into(),
+            }),
             Err(claude::Unavailable::UnsupportedPlan) => {
                 Outcome::Clear("this plan reports no quota windows".into())
             }
+            // Keep: a connection that drops for a moment says nothing about the
+            // numbers it last gave.
+            Err(claude::Unavailable::HostUnavailable) => {
+                Outcome::Keep(UNAVAILABLE_FOR_CONNECTION.into())
+            }
+            Err(claude::Unavailable::CredentialsUnreadable) => Outcome::Clear(match host {
+                Some(host) => format!("sign-in on {host} is unreadable").into(),
+                None => "the sign-in is unreadable".into(),
+            }),
         }
     }
-}
 
-impl From<Result<Vec<UsageWindow>, codex::Unavailable>> for Outcome {
-    fn from(result: Result<Vec<UsageWindow>, codex::Unavailable>) -> Self {
+    /// Codex's answer from the machine named `host`, `None` for this one.
+    pub(crate) fn from_codex(
+        result: Result<Vec<UsageWindow>, codex::Unavailable>,
+        host: Option<&str>,
+    ) -> Self {
         match result {
             Ok(windows) => Outcome::Windows(windows),
             // Starting or reaching the app-server can fail transiently, so this
             // keeps; a missing CLI or a payload this build cannot read will not
             // fix itself between ticks, so those clear.
             Err(codex::Unavailable::Failed(reason)) => Outcome::Keep(reason),
-            Err(codex::Unavailable::NotInstalled) => {
-                Outcome::Clear("the codex CLI is not installed".into())
-            }
+            Err(codex::Unavailable::NotInstalled) => Outcome::Clear(match host {
+                Some(host) => format!("codex CLI not installed on {host}").into(),
+                None => "the codex CLI is not installed".into(),
+            }),
             Err(codex::Unavailable::Unreadable(reason)) => Outcome::Clear(reason),
+            Err(codex::Unavailable::HostUnavailable) => {
+                Outcome::Keep(UNAVAILABLE_FOR_CONNECTION.into())
+            }
         }
+    }
+}
+
+impl From<Result<Vec<UsageWindow>, claude::Unavailable>> for Outcome {
+    fn from(result: Result<Vec<UsageWindow>, claude::Unavailable>) -> Self {
+        Self::from_claude(result, None)
+    }
+}
+
+impl From<Result<Vec<UsageWindow>, codex::Unavailable>> for Outcome {
+    fn from(result: Result<Vec<UsageWindow>, codex::Unavailable>) -> Self {
+        Self::from_codex(result, None)
     }
 }
 
@@ -257,6 +295,18 @@ impl SourceState {
     }
 }
 
+/// What the indicator draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Drawing {
+    /// Nothing at all, not even an empty box.
+    Nothing,
+    /// The numbers of every source that has some.
+    Numbers,
+    /// The agents' marks alone, muted: every source the user wants has only a
+    /// reason, and the panel behind the click says it.
+    Reasons,
+}
+
 /// The status-bar indicator.
 ///
 /// A view over [`AgentUsageStore`] and nothing more. It holds no numbers of its
@@ -279,9 +329,37 @@ pub struct AgentUsageIndicator {
 }
 
 impl AgentUsageIndicator {
+    /// An indicator for this machine's account.
+    ///
+    /// Test-only, so no call site can show this machine's account for a
+    /// project that lives elsewhere: the app builds every indicator through
+    /// [`Self::for_project`].
+    #[cfg(test)]
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let store = AgentUsageStore::global(cx);
+        Self::with_store(store, window, cx)
+    }
 
+    /// An indicator for the account `project`'s agents spend: its host's, for
+    /// a project on a WSL distro, an SSH host or a dev container.
+    ///
+    /// Bound to the project of the workspace whose status bar holds it, not to
+    /// whichever window or workspace has focus: a window keeps several
+    /// workspaces, and each one's bar must speak for its own project.
+    pub fn for_project(
+        project: &Entity<project::Project>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let store = AgentUsageStore::for_project(project, cx);
+        Self::with_store(store, window, cx)
+    }
+
+    fn with_store(
+        store: Entity<AgentUsageStore>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut this = Self {
             _observe: cx.observe(&store, |_, _, cx| cx.notify()),
             store: store.clone(),
@@ -356,6 +434,41 @@ impl AgentUsageIndicator {
         Self::visible_sources(sources, settings).next().is_some()
     }
 
+    /// What the bar draws for `sources`.
+    ///
+    /// Silence is right for this machine: no sign-in here is most installs,
+    /// and the bar has never mentioned it. For another machine it hides why a
+    /// window that runs its agents there shows no numbers, and the reason --
+    /// which host, signed out or unreachable -- is the one thing to say.
+    fn drawing(
+        sources: &[SourceState],
+        settings: &StatusBarSettings,
+        another_machine: bool,
+    ) -> Drawing {
+        if Self::has_anything_to_show(sources, settings) {
+            return Drawing::Numbers;
+        }
+        let mut wanted = sources
+            .iter()
+            .filter(|source| Self::agent_is_enabled(&source.agent, settings))
+            .peekable();
+        if another_machine
+            && wanted.peek().is_some()
+            && wanted.all(|source| source.reason.is_some())
+        {
+            Drawing::Reasons
+        } else {
+            Drawing::Nothing
+        }
+    }
+
+    /// Whether this indicator reads this machine's account, for a test in the
+    /// crate that builds the status bar.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reads_this_machine_s_account(&self, cx: &mut App) -> bool {
+        self.store.entity_id() == AgentUsageStore::global(cx).entity_id()
+    }
+
     /// The panel's handle, for an action registered outside this crate.
     pub fn panel_handle(&self) -> PopoverMenuHandle<UsagePanel> {
         self.panel_handle.clone()
@@ -393,37 +506,53 @@ impl Render for AgentUsageIndicator {
         let settings = StatusBarSettings::get_global(cx);
         // One read of the shared state per draw, rather than a borrow held while
         // the element tree is built.
-        let sources = self.store.read(cx).source_states();
-        if !Self::has_anything_to_show(&sources, settings) {
+        let store = self.store.read(cx);
+        let sources = store.source_states();
+        let drawing = Self::drawing(&sources, settings, store.speaks_for_another_machine());
+        if drawing == Drawing::Nothing {
             return div();
         }
 
         let now = Utc::now();
-        let fetching = self.store.read(cx).is_fetching();
+        let fetching = store.is_fetching();
         let compact = settings.agent_usage_display == AgentUsageDisplay::Compact;
-        let groups = Self::visible_sources(&sources, settings)
-            .map(|source| {
-                // Compact keeps one window per agent rather than one window
-                // overall: which agent a number belongs to is the thing the icon
-                // is there to say, and dropping an agent entirely would make its
-                // icon disappear rather than its detail.
-                let line = if compact {
-                    most_constrained(&source.windows, now)
-                        .map(|window| render_window(window, now))
-                        .unwrap_or_default()
-                } else {
-                    render_windows(&source.windows, now)
-                };
-                h_flex()
-                    .gap_1()
-                    .child(
+        let groups = if drawing == Drawing::Reasons {
+            sources
+                .iter()
+                .filter(|source| Self::agent_is_enabled(&source.agent, settings))
+                .map(|source| {
+                    h_flex().child(
                         Icon::new(agent_icon(&source.agent))
                             .size(IconSize::Small)
                             .color(Color::Muted),
                     )
-                    .child(Label::new(line).size(LabelSize::Small).color(Color::Muted))
-            })
-            .collect::<Vec<_>>();
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Self::visible_sources(&sources, settings)
+                .map(|source| {
+                    // Compact keeps one window per agent rather than one window
+                    // overall: which agent a number belongs to is the thing the icon
+                    // is there to say, and dropping an agent entirely would make its
+                    // icon disappear rather than its detail.
+                    let line = if compact {
+                        most_constrained(&source.windows, now)
+                            .map(|window| render_window(window, now))
+                            .unwrap_or_default()
+                    } else {
+                        render_windows(&source.windows, now)
+                    };
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Icon::new(agent_icon(&source.agent))
+                                .size(IconSize::Small)
+                                .color(Color::Muted),
+                        )
+                        .child(Label::new(line).size(LabelSize::Small).color(Color::Muted))
+                })
+                .collect::<Vec<_>>()
+        };
 
         let indicator = cx.weak_entity();
         let panel_handle = self.panel_handle.clone();
@@ -1239,13 +1368,34 @@ mod tests {
     fn fixed_reasons_fit_the_panel_row() {
         const BUDGET: usize = 48;
 
-        let reasons = [
+        // A WSL distro's name, and an SSH host at the length one typically
+        // runs to.
+        const HOSTS: [&str; 2] = ["Ubuntu-22.04", "build-box.corp.local"];
+
+        let mut reasons = vec![
             Outcome::from(Err::<Vec<_>, _>(claude::Unavailable::RateLimited)),
             Outcome::from(Err::<Vec<_>, _>(claude::Unavailable::RuntimeOverride)),
             Outcome::from(Err::<Vec<_>, _>(claude::Unavailable::NoCredentials)),
             Outcome::from(Err::<Vec<_>, _>(claude::Unavailable::UnsupportedPlan)),
+            Outcome::from(Err::<Vec<_>, _>(claude::Unavailable::CredentialsUnreadable)),
             Outcome::from(Err::<Vec<_>, _>(codex::Unavailable::NotInstalled)),
+            Outcome::Keep(UNAVAILABLE_FOR_CONNECTION.into()),
         ];
+        for host in HOSTS {
+            for unavailable in [
+                claude::Unavailable::NoCredentials,
+                claude::Unavailable::CredentialsUnreadable,
+                claude::Unavailable::HostUnavailable,
+            ] {
+                reasons.push(Outcome::from_claude(Err(unavailable), Some(host)));
+            }
+            for unavailable in [
+                codex::Unavailable::NotInstalled,
+                codex::Unavailable::HostUnavailable,
+            ] {
+                reasons.push(Outcome::from_codex(Err(unavailable), Some(host)));
+            }
+        }
 
         for outcome in &reasons {
             let reason = match outcome {
@@ -1519,6 +1669,131 @@ mod tests {
         }
     }
 
+    /// One window holds a workspace per project, each with its own status bar.
+    /// Each bar's indicator speaks for its own project's account, whichever
+    /// workspace has focus.
+    #[gpui::test]
+    async fn each_status_bar_reads_the_store_for_its_own_project(
+        cx: &mut gpui::TestAppContext,
+        server_cx: &mut gpui::TestAppContext,
+    ) {
+        let fs = fs::FakeFs::new(cx.executor());
+        let (remote, _server) = project::Project::test_remote(fs.clone(), cx, server_cx).await;
+        let local = project::Project::test(fs, [], cx).await;
+        let window = cx.add_window(|_, _| gpui::Empty);
+
+        let store_of = |project: &Entity<project::Project>, cx: &mut gpui::TestAppContext| {
+            window
+                .update(cx, |_, window, cx| {
+                    cx.new(|cx| AgentUsageIndicator::for_project(project, window, cx))
+                        .read(cx)
+                        .store
+                        .clone()
+                })
+                .expect("the window was just built")
+        };
+        let remote_bar = store_of(&remote, cx);
+        let local_bar = store_of(&local, cx);
+
+        assert_eq!(
+            remote_bar.entity_id(),
+            cx.update(|cx| AgentUsageStore::for_project(&remote, cx))
+                .entity_id(),
+            "the remote workspace's bar reads its host's account"
+        );
+        assert_eq!(
+            local_bar.entity_id(),
+            cx.update(|cx| AgentUsageStore::global(cx)).entity_id(),
+            "the local workspace's bar reads this machine's account"
+        );
+        assert_ne!(remote_bar.entity_id(), local_bar.entity_id());
+    }
+
+    /// A remote host's reasons -- signed out there, unreachable -- are why a
+    /// window running its agents there has no numbers, so they reach the bar
+    /// as a muted mark the panel explains. This machine's stay silent, as
+    /// they always have.
+    #[gpui::test]
+    fn another_machine_s_reasons_reach_the_bar_and_this_machine_s_do_not(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let signed_out = |store: &mut AgentUsageStore| {
+            store.apply(
+                Outcome::from_claude(
+                    Err(claude::Unavailable::NoCredentials),
+                    Some("Ubuntu-22.04"),
+                ),
+                Outcome::from_codex(Err(codex::Unavailable::NotInstalled), Some("Ubuntu-22.04")),
+                Utc::now(),
+            );
+        };
+        let remote = cx.new(|_| {
+            let mut store = AgentUsageStore::test_for_host("Ubuntu-22.04");
+            signed_out(&mut store);
+            store
+        });
+        let this_machine = cx.new(|_| {
+            let mut store = AgentUsageStore::test_new();
+            store.apply(
+                Outcome::from(Err::<Vec<_>, _>(claude::Unavailable::NoCredentials)),
+                Outcome::from(Err::<Vec<_>, _>(codex::Unavailable::NotInstalled)),
+                Utc::now(),
+            );
+            store
+        });
+        let not_yet_read = cx.new(|_| AgentUsageStore::test_for_host("Ubuntu-22.04"));
+
+        let drawing_of = |store: &Entity<AgentUsageStore>,
+                          settings: &StatusBarSettings,
+                          cx: &mut gpui::TestAppContext| {
+            store.read_with(cx, |store, _| {
+                AgentUsageIndicator::drawing(
+                    &store.source_states(),
+                    settings,
+                    store.speaks_for_another_machine(),
+                )
+            })
+        };
+
+        let shown = all_agents_shown();
+        assert_eq!(drawing_of(&remote, &shown, cx), Drawing::Reasons);
+        assert_eq!(
+            drawing_of(&this_machine, &shown, cx),
+            Drawing::Nothing,
+            "no sign-in on this machine is most installs, and says nothing"
+        );
+        assert_eq!(
+            drawing_of(&not_yet_read, &shown, cx),
+            Drawing::Nothing,
+            "before the first read there is no reason to give"
+        );
+
+        let claude_only = StatusBarSettings {
+            codex_usage_button: false,
+            ..all_agents_shown()
+        };
+        assert_eq!(drawing_of(&remote, &claude_only, cx), Drawing::Reasons);
+        let neither = StatusBarSettings {
+            claude_usage_button: false,
+            codex_usage_button: false,
+            ..all_agents_shown()
+        };
+        assert_eq!(
+            drawing_of(&remote, &neither, cx),
+            Drawing::Nothing,
+            "switched off means silent, wherever the account is"
+        );
+
+        remote.update(cx, |store, _| {
+            store.apply(
+                Outcome::Windows(vec![a_window()]),
+                Outcome::Keep("unchanged".into()),
+                Utc::now(),
+            );
+        });
+        assert_eq!(drawing_of(&remote, &shown, cx), Drawing::Numbers);
+    }
+
     /// The status bar puts a gap between items, so an item that returns a flex
     /// box rather than a bare `div` shifts everything beside it while showing
     /// nothing — visible as a hole in the bar on any build where no agent is
@@ -1562,5 +1837,158 @@ mod tests {
                 "an icon with no percentage beside it reads as 0%, which is a lie"
             );
         });
+    }
+}
+
+/// Stand-ins for the machine a project lives on, and a way to read what this
+/// crate logs.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::Path;
+    use std::sync::Mutex;
+    #[cfg(unix)]
+    use std::sync::OnceLock;
+
+    use util::command::{Command, CommandHost};
+    use util::paths::PathStyle;
+
+    /// One command a [`RecordingHost`] was asked for.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub(crate) struct Asked {
+        pub program: String,
+        pub args: Vec<String>,
+        pub env: Vec<(String, String)>,
+    }
+
+    /// A remote host that records every command it is asked for and answers
+    /// each with `/bin/sh -c <script>` on this machine, or refuses the way a
+    /// host whose connection is down does.
+    pub(crate) struct RecordingHost {
+        name: String,
+        script: Option<String>,
+        environment: Vec<(String, String)>,
+        asked: Mutex<Vec<Asked>>,
+    }
+
+    impl RecordingHost {
+        pub(crate) fn running(script: &str) -> Self {
+            Self {
+                name: "Ubuntu-22.04".to_string(),
+                script: Some(script.to_string()),
+                environment: Vec::new(),
+                asked: Mutex::new(Vec::new()),
+            }
+        }
+
+        pub(crate) fn disconnected() -> Self {
+            Self {
+                script: None,
+                ..Self::running("")
+            }
+        }
+
+        pub(crate) fn with_environment(mut self, name: &str, value: &str) -> Self {
+            self.environment.push((name.to_string(), value.to_string()));
+            self
+        }
+
+        pub(crate) fn asked(&self) -> Vec<Asked> {
+            self.asked
+                .lock()
+                .expect("the record is not poisoned")
+                .clone()
+        }
+    }
+
+    impl CommandHost for RecordingHost {
+        fn command(
+            &self,
+            program: &str,
+            args: &[&str],
+            env: &[(&str, &str)],
+            _cwd: Option<&Path>,
+        ) -> anyhow::Result<Command> {
+            self.asked
+                .lock()
+                .expect("the record is not poisoned")
+                .push(Asked {
+                    program: program.to_string(),
+                    args: args.iter().map(|arg| arg.to_string()).collect(),
+                    env: env
+                        .iter()
+                        .map(|(name, value)| (name.to_string(), value.to_string()))
+                        .collect(),
+                });
+            let Some(script) = &self.script else {
+                anyhow::bail!("{} is not connected", self.name);
+            };
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", script])
+                .envs(env.iter().copied())
+                .kill_on_drop(true);
+            Ok(command)
+        }
+
+        fn path_style(&self) -> PathStyle {
+            PathStyle::Posix
+        }
+
+        fn remote_name(&self) -> Option<String> {
+            Some(self.name.clone())
+        }
+
+        fn environment_variable(&self, name: &str) -> Option<String> {
+            self.environment
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    #[cfg(unix)]
+    struct CapturingLogger {
+        lines: Mutex<Vec<String>>,
+    }
+
+    #[cfg(unix)]
+    impl log::Log for CapturingLogger {
+        fn enabled(&self, _metadata: &log::Metadata) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record) {
+            if let Ok(mut lines) = self.lines.lock() {
+                lines.push(format!("{} {}", record.level(), record.args()));
+            }
+        }
+
+        fn flush(&self) {}
+    }
+
+    #[cfg(unix)]
+    static LOGGER: OnceLock<CapturingLogger> = OnceLock::new();
+
+    /// Every line logged in this test binary so far, at every level.
+    ///
+    /// Shared by the tests running beside the caller, so a caller asserts on
+    /// what must never appear, plus a line only its own run could have written.
+    #[cfg(unix)]
+    pub(crate) fn captured_log() -> Vec<String> {
+        install_log_capture();
+        LOGGER
+            .get()
+            .and_then(|logger| logger.lines.lock().ok().map(|lines| lines.clone()))
+            .unwrap_or_default()
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn install_log_capture() {
+        let logger = LOGGER.get_or_init(|| CapturingLogger {
+            lines: Mutex::new(Vec::new()),
+        });
+        if log::set_logger(logger).is_ok() {
+            log::set_max_level(log::LevelFilter::Trace);
+        }
     }
 }

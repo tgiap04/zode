@@ -7,12 +7,20 @@
 //! window right now -- the same scope the history panel keeps, so a device
 //! cannot see or start anything the person at this screen could not.
 //!
+//! The sessions of a WSL distro, SSH host or dev container with a window open
+//! here are listed too. The device knows nothing of hosts: it dedups, pages and
+//! resumes by id alone, so a remote session's id carries its host --
+//! `{token}:{id}`, the token a hash of the host's identity -- and a session on
+//! this machine keeps the id it has always had.
+//!
 //! Everything that decides something is a plain function over plain values;
 //! the two async entry points, [`list`] and [`resume`], only gather what those
 //! functions need from the running app.
 
 use std::{
     cmp::Reverse,
+    collections::HashMap,
+    fmt::Write as _,
     path::{Component, Path, PathBuf},
     sync::{
         Arc,
@@ -22,13 +30,21 @@ use std::{
 };
 
 use agent_sessions::{AgentKind, Fork, SessionIndex, SessionSummary, provider_for};
-use agent_ui::{ResumeRefusal, SessionStore, resume_refusal_in_background, resume_session};
+use agent_ui::{
+    ProjectSessionSource, ResumeRefusal, SessionStore, project_session_source, resume_refusal_on,
+    resume_session,
+};
 use futures::StreamExt as _;
-use gpui::{AnyWindowHandle, App, AsyncApp, Entity, Global, WeakEntity, WindowHandle};
-use remote_relay_protocol::{Control, SessionCursor, SessionEntry, error_code};
-use settings::WorktreeId;
+use gpui::{AnyWindowHandle, App, AsyncApp, Entity, EntityId, Global, WeakEntity, WindowHandle};
+use remote_relay_protocol::{
+    Control, SessionCursor, SessionEntry, UnavailableHost, error_code, host_status,
+};
+use settings::{Settings as _, SettingsLocation, WorktreeId};
+use sha2::{Digest as _, Sha256};
 use util::{ResultExt as _, paths::PathStyle, rel_path::RelPath};
-use workspace::{MultiWorkspace, Toast, Workspace, notifications::NotificationId};
+use workspace::{
+    MultiWorkspace, RemoteConnectionIdentity, Toast, Workspace, notifications::NotificationId,
+};
 use worktree::WorktreeSettings;
 
 use crate::{
@@ -53,6 +69,12 @@ const MAX_TOAST_TITLE_CHARS: usize = 60;
 const MAX_TOAST_DEVICE_CHARS: usize = 40;
 /// The longest id that is looked up. Every agent's own ids are far shorter.
 const MAX_SESSION_ID_BYTES: usize = 128;
+/// The most characters of a host's name that are sent.
+const MAX_HOST_LABEL_CHARS: usize = 60;
+/// The most hosts a reply says it could not list.
+const MAX_UNAVAILABLE_HOSTS: usize = 16;
+/// How many hex digits of the hash of a host's identity name it in an id.
+const HOST_TOKEN_LEN: usize = 12;
 
 /// Room kept in one `sessions_list_reply` for everything but its entries: the
 /// tag, the request id, the flags, and a cursor whose id is as long as an id
@@ -110,6 +132,74 @@ pub(crate) fn is_plausible_session_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
+/// A remote host as the ids of its sessions name it: the first
+/// [`HOST_TOKEN_LEN`] lowercase hex digits of the SHA-256 of its stable
+/// identity.
+///
+/// A hash and not a counter, so the same host has the same token after a
+/// restart and a list a device kept from before cannot resume on another host;
+/// and a hash and not the identity itself, so a user name or port is not
+/// spelled out on the wire -- though a short unsalted hash of them can still be
+/// confirmed by guessing.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct HostToken(String);
+
+impl HostToken {
+    pub(crate) fn of(identity: &RemoteConnectionIdentity) -> Self {
+        let digest = Sha256::digest(identity.stable_key().as_bytes());
+        let mut token = String::with_capacity(HOST_TOKEN_LEN);
+        for byte in digest.iter().take(HOST_TOKEN_LEN / 2) {
+            write!(token, "{byte:02x}").log_err();
+        }
+        Self(token)
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        (text.len() == HOST_TOKEN_LEN
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
+        .then(|| Self(text.to_string()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The id a device knows a session, or a folder, by: the host's own for one on
+/// this machine, and `{token}:{id}` for one on a remote host.
+pub(crate) fn wire_id(host: Option<&HostToken>, id: &str) -> String {
+    match host {
+        Some(host) => format!("{}:{id}", host.as_str()),
+        None => id.to_string(),
+    }
+}
+
+/// The host and the session a device's id names, if it could name one. A
+/// plausible session id never holds a `:`, so the first one is where the
+/// token ends.
+pub(crate) fn parse_wire_id(wire: &str) -> Option<(Option<HostToken>, &str)> {
+    let (host, id) = match wire.split_once(':') {
+        Some((token, id)) => (Some(HostToken::parse(token)?), id),
+        None => (None, wire),
+    };
+    is_plausible_session_id(id).then_some((host, id))
+}
+
+/// The id a device knows the session a tab of `workspace` runs as `id` by,
+/// so a tab on a remote host is matched to that host's entry and never to one
+/// on this machine with the same id.
+pub(crate) fn tab_session_id(workspace: &WeakEntity<Workspace>, id: &str, cx: &App) -> String {
+    let host = workspace.upgrade().and_then(|workspace| {
+        match project_session_source(workspace.read(cx).project(), cx)? {
+            ProjectSessionSource::Remote { identity, .. } => Some(HostToken::of(&identity)),
+            ProjectSessionSource::Here => None,
+        }
+    });
+    wire_id(host.as_ref(), id)
+}
+
 /// `text` cut to at most `max_chars` characters, the last of them `…` when
 /// anything was cut. Never inside a character.
 pub(crate) fn clip(text: &str, max_chars: usize) -> String {
@@ -134,6 +224,14 @@ pub(crate) fn wire_agent(agent: AgentKind) -> &'static str {
     }
 }
 
+/// The remote host a folder is on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RootHost {
+    pub token: HostToken,
+    /// What the host is shown as, already clipped.
+    pub label: String,
+}
+
 /// A folder open in a window, as far as deciding which sessions belong to it.
 #[derive(Clone)]
 pub(crate) struct RootScope {
@@ -144,9 +242,17 @@ pub(crate) struct RootScope {
     /// What the folder's own settings keep out of sight. `None` keeps nothing
     /// out.
     pub hidden: Option<Arc<WorktreeSettings>>,
+    /// `None` for a folder on this machine.
+    pub host: Option<RootHost>,
+    /// How the folder's host spells its paths.
+    pub path_style: PathStyle,
 }
 
 impl RootScope {
+    fn host_token(&self) -> Option<&HostToken> {
+        self.host.as_ref().map(|host| &host.token)
+    }
+
     /// Whether `cwd` is at or under a path this folder's settings keep private
     /// or leave out of the scan -- the same two checks the file browser makes of
     /// what it shows -- so a session that ran there is not one the folder has.
@@ -159,7 +265,7 @@ impl RootScope {
         };
         // A path that is not a plain relative one cannot be judged, so it is
         // not shown.
-        let Ok(inside) = RelPath::new(inside, PathStyle::local()) else {
+        let Ok(inside) = RelPath::new(inside, self.path_style) else {
             return true;
         };
         settings.is_path_private(&inside) || settings.is_path_excluded(&inside)
@@ -173,12 +279,18 @@ pub(crate) struct OpenRoot {
     pub window: WindowHandle<MultiWorkspace>,
 }
 
-/// The visible folders of every local project open in a window.
+/// The visible folders of every project open in a window whose sessions this
+/// machine can reach: its own, and those of each WSL, SSH and dev container
+/// host. A collaboration guest's are on someone else's machine and are left
+/// out.
 ///
-/// Remote projects are left out: a session's directory is a path on this
-/// machine, and a folder that only exists on another one holds none.
+/// A folder on a remote host open in two windows is kept once, for the window
+/// and workspace with the lowest ids, so which one a session opens in does not
+/// depend on which was asked first. Each window holds the folder under a
+/// worktree id of its own, so the folder is known by its host and path.
 pub(crate) fn open_roots(cx: &App) -> Vec<OpenRoot> {
     let mut roots: Vec<OpenRoot> = Vec::new();
+    let mut remote: Vec<((u64, u64), OpenRoot)> = Vec::new();
     for handle in cx.windows() {
         let Some(window) = handle.downcast::<MultiWorkspace>() else {
             continue;
@@ -187,25 +299,53 @@ pub(crate) fn open_roots(cx: &App) -> Vec<OpenRoot> {
             continue;
         };
         for workspace in multi_workspace.workspaces() {
-            let project = workspace.read(cx).project().read(cx);
-            if !project.is_local() {
+            let project_entity = workspace.read(cx).project().clone();
+            let Some(source) = project_session_source(&project_entity, cx) else {
                 continue;
-            }
+            };
+            let (host, path_style) = match source {
+                ProjectSessionSource::Here => (None, PathStyle::local()),
+                ProjectSessionSource::Remote {
+                    identity,
+                    label,
+                    path_style,
+                } => (
+                    Some(RootHost {
+                        token: HostToken::of(&identity),
+                        label: clip(&label, MAX_HOST_LABEL_CHARS),
+                    }),
+                    path_style,
+                ),
+            };
+            let project = project_entity.read(cx);
             for worktree in project.visible_worktrees(cx) {
                 let worktree = worktree.read(cx);
                 let worktree_id = worktree.id();
-                if roots
-                    .iter()
-                    .any(|known| known.scope.worktree_id == worktree_id)
+                if host.is_none()
+                    && roots
+                        .iter()
+                        .any(|known| known.scope.worktree_id == worktree_id)
                 {
                     continue;
                 }
-                // Every worktree of a local project is a local one. A folder
-                // whose settings cannot be read is one whose private paths are
-                // unknown, so it holds no sessions.
-                let Some(hidden) = worktree.as_local().map(|local| Arc::new(local.settings()))
-                else {
-                    continue;
+                let hidden = match (&host, worktree.as_local()) {
+                    (_, Some(local)) => Arc::new(local.settings()),
+                    // A remote folder's settings are the ones the host sent for
+                    // it, read where the worktree itself reads them.
+                    (Some(_), None) => Arc::new(
+                        WorktreeSettings::get(
+                            Some(SettingsLocation {
+                                worktree_id,
+                                path: RelPath::empty(),
+                            }),
+                            cx,
+                        )
+                        .clone(),
+                    ),
+                    // A folder of a project on this machine that is not on
+                    // this machine's disk has private paths nobody knows, so
+                    // it holds no sessions.
+                    (None, None) => continue,
                 };
                 // Never the absolute path: a root with no name of its own
                 // would otherwise put one in every `folder` it owns.
@@ -213,31 +353,56 @@ pub(crate) fn open_roots(cx: &App) -> Vec<OpenRoot> {
                     "" => "root".to_string(),
                     name => name.to_string(),
                 };
-                roots.push(OpenRoot {
+                let root = OpenRoot {
                     scope: RootScope {
                         worktree_id,
                         path: worktree.abs_path().to_path_buf(),
                         name,
                         hidden: Some(hidden),
+                        host: host.clone(),
+                        path_style,
                     },
                     workspace: workspace.downgrade(),
                     window,
-                });
+                };
+                if host.is_some() {
+                    let order = (window.window_id().as_u64(), workspace.entity_id().as_u64());
+                    remote.push((order, root));
+                } else {
+                    roots.push(root);
+                }
             }
+        }
+    }
+    remote.sort_by_key(|(order, _)| *order);
+    for (_, root) in remote {
+        let known = roots.iter().any(|known| {
+            known.scope.host_token() == root.scope.host_token()
+                && known.scope.path == root.scope.path
+        });
+        if !known {
+            roots.push(root);
         }
     }
     roots
 }
 
-/// The index in `roots` of the folder `cwd` belongs to: the deepest one that
-/// holds it, by whole path components, so `/a/zode` does not hold
-/// `/a/zode-kit`. A folder open twice goes to the one with the lowest id, so
-/// the answer does not depend on which window was asked first.
+/// The index in `roots` of the folder on `host` that `cwd` belongs to: the
+/// deepest one that holds it, by whole path components, so `/a/zode` does not
+/// hold `/a/zode-kit`. A folder open twice goes to the one with the lowest id,
+/// so the answer does not depend on which window was asked first.
+///
+/// Only folders on the same host are candidates: `/home/me/repo` in a WSL
+/// distro and on this machine are two directories.
 ///
 /// A directory that climbs out with `..` belongs to no folder, however it
 /// starts: the path is read from a store this editor does not own, and a
 /// textual prefix is no proof of where it ends up.
-pub(crate) fn deepest_root_index(roots: &[RootScope], cwd: &Path) -> Option<usize> {
+pub(crate) fn deepest_root_index(
+    roots: &[RootScope],
+    host: Option<&HostToken>,
+    cwd: &Path,
+) -> Option<usize> {
     if cwd
         .components()
         .any(|component| matches!(component, Component::ParentDir))
@@ -247,7 +412,7 @@ pub(crate) fn deepest_root_index(roots: &[RootScope], cwd: &Path) -> Option<usiz
     roots
         .iter()
         .enumerate()
-        .filter(|(_, root)| cwd.starts_with(&root.path))
+        .filter(|(_, root)| root.host_token() == host && cwd.starts_with(&root.path))
         .max_by_key(|(_, root)| (root.path.components().count(), Reverse(root.worktree_id)))
         .map(|(index, _)| index)
 }
@@ -286,29 +451,33 @@ struct Listed<'a> {
     session: &'a SessionSummary,
     root: &'a RootScope,
     updated_at: u64,
+    /// The id the device knows it by.
+    id: String,
 }
 
 impl Listed<'_> {
     fn is_at_or_before(&self, cursor: &SessionCursor) -> bool {
-        (Reverse(self.updated_at), self.session.id.as_ref())
+        (Reverse(self.updated_at), self.id.as_str())
             <= (Reverse(cursor.updated_at), cursor.id.as_str())
     }
 
     fn cursor(&self) -> SessionCursor {
         SessionCursor {
             updated_at: self.updated_at,
-            id: self.session.id.to_string(),
+            id: self.id.clone(),
         }
     }
 }
 
-/// One page of the sessions that ran inside `roots`, newest first, and where
-/// the next one starts if there is one.
-///
-/// `before` is exclusive. Order is `(updated_at descending, id ascending)` at
-/// millisecond resolution -- the resolution the cursor has -- so two sessions
-/// in the same millisecond keep one order from page to page.
-/// `open_agent` is asked only about the sessions on the page.
+/// The sessions one host holds.
+pub(crate) struct HostSessions<'a> {
+    /// `None` for this machine.
+    pub host: Option<&'a HostToken>,
+    pub sessions: &'a [SessionSummary],
+}
+
+/// [`page_across`] over this machine's sessions alone.
+#[cfg(test)]
 pub(crate) fn page(
     sessions: &[SessionSummary],
     roots: &[RootScope],
@@ -316,11 +485,43 @@ pub(crate) fn page(
     limit: usize,
     open_agent: impl Fn(&str) -> Option<String>,
 ) -> (Vec<SessionEntry>, Option<SessionCursor>) {
-    let mut listed: Vec<Listed> = sessions
+    page_across(
+        &[HostSessions {
+            host: None,
+            sessions,
+        }],
+        roots,
+        before,
+        limit,
+        open_agent,
+    )
+}
+
+/// One page of the sessions that ran inside `roots`, from every host in
+/// `hosts`, newest first, and where the next one starts if there is one.
+///
+/// `before` is exclusive. Order is `(updated_at descending, id ascending)` at
+/// millisecond resolution -- the resolution the cursor has -- by the id the
+/// device knows, so two sessions in the same millisecond keep one order from
+/// page to page, across hosts as much as on one.
+/// `open_agent` is asked only about the sessions on the page, by that id.
+pub(crate) fn page_across(
+    hosts: &[HostSessions],
+    roots: &[RootScope],
+    before: Option<&SessionCursor>,
+    limit: usize,
+    open_agent: impl Fn(&str) -> Option<String>,
+) -> (Vec<SessionEntry>, Option<SessionCursor>) {
+    let mut listed: Vec<Listed> = hosts
         .iter()
-        .filter(|session| is_plausible_session_id(&session.id))
-        .filter_map(|session| {
-            let root = roots.get(deepest_root_index(roots, &session.cwd)?)?;
+        .flat_map(|host| {
+            host.sessions
+                .iter()
+                .map(move |session| (host.host, session))
+        })
+        .filter(|(_, session)| is_plausible_session_id(&session.id))
+        .filter_map(|(host, session)| {
+            let root = roots.get(deepest_root_index(roots, host, &session.cwd)?)?;
             if root.hides(&session.cwd) {
                 return None;
             }
@@ -328,6 +529,7 @@ pub(crate) fn page(
                 session,
                 root,
                 updated_at: unix_millis(session.updated_at),
+                id: wire_id(host, &session.id),
             })
         })
         .collect();
@@ -335,7 +537,7 @@ pub(crate) fn page(
         right
             .updated_at
             .cmp(&left.updated_at)
-            .then_with(|| left.session.id.cmp(&right.session.id))
+            .then_with(|| left.id.cmp(&right.id))
     });
     if let Some(cursor) = before {
         let seen = listed.partition_point(|candidate| candidate.is_at_or_before(cursor));
@@ -345,16 +547,19 @@ pub(crate) fn page(
     listed.truncate(limit);
     let next = listed.last().filter(|_| more_follow).map(Listed::cursor);
     let entries = listed
-        .iter()
+        .into_iter()
         .map(|listed| {
             let session = listed.session;
             let preview = session.preview.trim();
+            let host = listed.root.host.as_ref();
             SessionEntry {
-                id: session.id.to_string(),
                 agent: wire_agent(session.agent).to_string(),
                 title: clip(display_title(session), MAX_TEXT_CHARS),
                 preview: (!preview.is_empty()).then(|| clip(preview, MAX_TEXT_CHARS)),
-                worktree_id: listed.root.worktree_id.to_proto().to_string(),
+                worktree_id: wire_id(
+                    host.map(|host| &host.token),
+                    &listed.root.worktree_id.to_proto().to_string(),
+                ),
                 folder: clip(&folder_label(listed.root, &session.cwd), MAX_TEXT_CHARS),
                 branch: session
                     .branch
@@ -364,31 +569,61 @@ pub(crate) fn page(
                 can_fork: provider_for(session.agent)
                     .resume_command(session, Fork::New)
                     .is_some(),
-                open_agent_id: open_agent(&session.id),
+                open_agent_id: open_agent(&listed.id),
+                host: host.map(|host| host.label.clone()),
+                id: listed.id,
             }
         })
         .collect();
     (entries, next)
 }
 
+/// What a reply says of a remote host whose store holds `generation` sweeps,
+/// the last of which could not ask the host when `failed`: nothing when its
+/// sessions are in the list.
+pub(crate) fn host_notice(label: &str, generation: u64, failed: bool) -> Option<UnavailableHost> {
+    let reason = if generation == 0 {
+        host_status::READING
+    } else if failed {
+        host_status::UNAVAILABLE
+    } else {
+        return None;
+    };
+    Some(UnavailableHost {
+        host: label.to_string(),
+        reason: reason.to_string(),
+    })
+}
+
 /// A page as the messages that carry it: as many as it takes to keep each under
-/// one frame, every one but the last marked `more`, and the cursor on the last
-/// alone.
+/// one frame, every one but the last marked `more`, and the cursor and the
+/// hosts that could not be listed on the last alone.
 pub(crate) fn session_replies(
     request_id: u32,
     entries: Vec<SessionEntry>,
     next: Option<SessionCursor>,
+    unavailable_hosts: Vec<UnavailableHost>,
 ) -> Vec<Control> {
+    let mut unavailable_hosts = unavailable_hosts;
+    unavailable_hosts.truncate(MAX_UNAVAILABLE_HOSTS);
+    let notices_weight = if unavailable_hosts.is_empty() {
+        0
+    } else {
+        serde_json::to_vec(&unavailable_hosts)
+            .log_err()
+            .map_or(0, |json| json.len())
+    };
     // A page holds at most `MAX_PAGE_LIMIT` entries and an entry that cannot
     // be sent is left out on its own, so the page needs no weight limit.
     let (batches, _) = file_browse::batch_by_json_size(
         entries,
         |entry| serde_json::to_vec(entry).log_err().map(|json| json.len()),
-        REPLY_OVERHEAD,
+        REPLY_OVERHEAD + notices_weight,
         usize::MAX,
     );
     let last = batches.len() - 1;
     let mut next = next;
+    let mut unavailable_hosts = Some(unavailable_hosts);
     batches
         .into_iter()
         .enumerate()
@@ -399,6 +634,11 @@ pub(crate) fn session_replies(
                 sessions,
                 more: !is_last,
                 next: if is_last { next.take() } else { None },
+                unavailable_hosts: if is_last {
+                    unavailable_hosts.take().unwrap_or_default()
+                } else {
+                    Vec::new()
+                },
             }
         })
         .collect()
@@ -449,6 +689,9 @@ fn not_found() -> BrowseError {
 #[derive(Default)]
 struct FreshReads {
     landed_at: Option<Instant>,
+    /// When a device last had each remote host's store read again, by store.
+    /// Only the stores of hosts with a window open are kept.
+    remote_asked_at: HashMap<EntityId, Instant>,
 }
 
 impl Global for FreshReads {}
@@ -503,9 +746,104 @@ async fn read_index(refresh: bool, cx: &mut AsyncApp) -> Result<Arc<SessionIndex
     }))
 }
 
+/// A remote host with a window open, and the store its sessions are kept in.
+struct RemoteSource {
+    token: HostToken,
+    label: String,
+    store: Entity<SessionStore>,
+}
+
+/// The store of every remote host `roots` are on, once each, with every open
+/// project on it registered, so a sweep can ask through any of them.
+fn remote_sources(roots: &[OpenRoot], cx: &mut App) -> Vec<RemoteSource> {
+    let mut sources: Vec<RemoteSource> = Vec::new();
+    let mut registered: Vec<EntityId> = Vec::new();
+    for root in roots {
+        let Some(host) = &root.scope.host else {
+            continue;
+        };
+        let Some(workspace) = root.workspace.upgrade() else {
+            continue;
+        };
+        let project = workspace.read(cx).project().clone();
+        if registered.contains(&project.entity_id()) {
+            continue;
+        }
+        registered.push(project.entity_id());
+        let store = SessionStore::for_project(&project, cx);
+        if !sources.iter().any(|source| source.token == host.token) {
+            sources.push(RemoteSource {
+                token: host.token.clone(),
+                label: host.label.clone(),
+                store,
+            });
+        }
+    }
+    sources
+}
+
+/// The store a session on the host `token` names would be in, if a window on
+/// that host is open. Never creates one: a host whose last window has closed
+/// has nothing a device may open, whatever its store still holds.
+fn open_remote_store(
+    roots: &[OpenRoot],
+    token: &HostToken,
+    cx: &App,
+) -> Option<Entity<SessionStore>> {
+    roots
+        .iter()
+        .filter(|root| root.scope.host_token() == Some(token))
+        .find_map(|root| {
+            let workspace = root.workspace.upgrade()?;
+            SessionStore::try_for_project(workspace.read(cx).project(), cx)
+        })
+}
+
+/// What each remote host's store holds now, and what a reply says of those
+/// whose sessions are missing. A first page has each store read again, at most
+/// once every [`MIN_FRESH_READ_INTERVAL`], and never waits for it: a host that
+/// is slow or has stopped answering must not hold up this machine's list.
+fn remote_snapshots(
+    sources: &[RemoteSource],
+    refresh: bool,
+    cx: &mut App,
+) -> (Vec<(HostToken, Arc<SessionIndex>)>, Vec<UnavailableHost>) {
+    let now = cx.background_executor().now();
+    let mut asked_at = std::mem::take(&mut cx.default_global::<FreshReads>().remote_asked_at);
+    asked_at.retain(|store, _| {
+        sources
+            .iter()
+            .any(|source| source.store.entity_id() == *store)
+    });
+    let mut indexes = Vec::with_capacity(sources.len());
+    let mut notices = Vec::new();
+    for source in sources {
+        let store_id = source.store.entity_id();
+        let (generation, failed, index) = {
+            let store = source.store.read(cx);
+            (
+                store.generation(),
+                store.error().is_some(),
+                store.index().clone(),
+            )
+        };
+        let last_asked_at = asked_at.get(&store_id).copied();
+        if (refresh || generation == 0) && may_read_from_disk(generation, last_asked_at, now) {
+            source.store.update(cx, |store, cx| store.refresh(cx));
+            asked_at.insert(store_id, now);
+        }
+        notices.extend(host_notice(&source.label, generation, failed));
+        indexes.push((source.token.clone(), index));
+    }
+    cx.default_global::<FreshReads>().remote_asked_at = asked_at;
+    (indexes, notices)
+}
+
 /// Answers a `sessions_list`. A first page is read fresh from disk, a later
 /// one from what that read found, so a device paging through sees one
-/// consistent list.
+/// consistent list. A remote host's sessions are what its store holds when
+/// the list is asked for, and the hosts it could not include are named on the
+/// first page.
 pub(crate) async fn list(
     request_id: u32,
     before: Option<SessionCursor>,
@@ -513,14 +851,31 @@ pub(crate) async fn list(
     agents: Entity<AgentMirror>,
     cx: &mut AsyncApp,
 ) -> Result<Vec<Control>, BrowseError> {
-    let index = read_index(before.is_none(), cx).await?;
-    let scopes: Vec<RootScope> =
-        cx.update(|cx| open_roots(cx).into_iter().map(|root| root.scope).collect());
+    let first_page = before.is_none();
+    let index = read_index(first_page, cx).await?;
+    let (scopes, remote, notices) = cx.update(|cx| {
+        let roots = open_roots(cx);
+        let sources = remote_sources(&roots, cx);
+        let (remote, notices) = remote_snapshots(&sources, first_page, cx);
+        let scopes: Vec<RootScope> = roots.into_iter().map(|root| root.scope).collect();
+        (scopes, remote, notices)
+    });
     // Judging every session on disk, thousands of them for a heavy user, is
     // not work for the thread that draws the windows.
     let (mut entries, next) = cx
         .background_executor()
-        .spawn(async move { page(index.sessions(), &scopes, before.as_ref(), limit, |_| None) })
+        .spawn(async move {
+            let hosts: Vec<HostSessions> = std::iter::once(HostSessions {
+                host: None,
+                sessions: index.sessions(),
+            })
+            .chain(remote.iter().map(|(token, index)| HostSessions {
+                host: Some(token),
+                sessions: index.sessions(),
+            }))
+            .collect();
+            page_across(&hosts, &scopes, before.as_ref(), limit, |_| None)
+        })
         .await;
     cx.update(|cx| {
         let mirror = agents.read(cx);
@@ -528,11 +883,13 @@ pub(crate) async fn list(
             entry.open_agent_id = mirror.running_agent_for_session(&entry.id, cx);
         }
     });
-    Ok(session_replies(request_id, entries, next))
+    let notices = if first_page { notices } else { Vec::new() };
+    Ok(session_replies(request_id, entries, next, notices))
 }
 
 /// Answers a `session_resume`: opens a tab on the session, or on a fork of it,
-/// in the window whose folder holds the directory it ran in.
+/// in the window whose folder holds the directory it ran in, on the host the
+/// id names.
 ///
 /// Run from a task of its own and never from inside an update of the host:
 /// what it calls reaches workspaces, and a tab it opens is announced to the
@@ -545,12 +902,22 @@ pub(crate) async fn resume(
     agents: Entity<AgentMirror>,
     cx: &mut AsyncApp,
 ) -> Result<Vec<Control>, BrowseError> {
-    let index = read_index(false, cx).await?;
-    let session = index.find(&session_id).cloned().ok_or_else(not_found)?;
+    let (host, raw_id) = parse_wire_id(&session_id).ok_or_else(not_found)?;
+    let session = match &host {
+        None => read_index(false, cx).await?.find(raw_id).cloned(),
+        // Never reconnects or creates anything for a device: with no window
+        // open on the host there is nothing to open the session in.
+        Some(token) => cx.update(|cx| {
+            let roots = open_roots(cx);
+            let store = open_remote_store(&roots, token, cx)?;
+            store.read(cx).index().find(raw_id).cloned()
+        }),
+    }
+    .ok_or_else(not_found)?;
 
     let roots = cx.update(|cx| open_roots(cx));
     let scopes: Vec<RootScope> = roots.iter().map(|root| root.scope.clone()).collect();
-    let target = deepest_root_index(&scopes, &session.cwd)
+    let target = deepest_root_index(&scopes, host.as_ref(), &session.cwd)
         .and_then(|index| roots.get(index))
         .filter(|root| !root.scope.hides(&session.cwd))
         .ok_or_else(not_found)?;
@@ -565,24 +932,41 @@ pub(crate) async fn resume(
         }
     }
 
-    let refusal = cx
-        .update(|cx| {
-            resume_refusal_in_background(
-                &session,
-                if fork { Fork::New } else { Fork::Continue },
-                cx,
-            )
-        })
-        .await;
-    match refusal {
-        Some(ResumeRefusal::Unsupported) => {
+    // Asked of the host the target workspace's project is on, the one
+    // `resume_session` asks again: a directory is only there on that host.
+    let refusal = cx.update(|cx| {
+        let workspace = target.workspace.upgrade()?;
+        let host = workspace
+            .read(cx)
+            .project()
+            .read(cx)
+            .agent_session_host(cx)?;
+        Some(resume_refusal_on(
+            &host,
+            &session,
+            if fork { Fork::New } else { Fork::Continue },
+            cx,
+        ))
+    });
+    let Some(refusal) = refusal else {
+        return Err(not_found());
+    };
+    match refusal.await {
+        Ok(Some(ResumeRefusal::Unsupported)) => {
             return Err(BrowseError::new(
                 UNSUPPORTED,
                 "this agent cannot do that with a session",
             ));
         }
-        Some(ResumeRefusal::CwdGone) => return Err(not_found()),
-        None => {}
+        Ok(Some(ResumeRefusal::CwdGone)) => return Err(not_found()),
+        Ok(None) => {}
+        // A host that could not be asked -- its connection dropped, say -- is
+        // not one a tab may be opened on, and what went wrong there is not the
+        // device's to read.
+        Err(error) => {
+            log::warn!("not resuming a session for a device: {error:#}");
+            return Err(not_found());
+        }
     }
 
     let message = resume_toast(&device_name, fork, display_title(&session));

@@ -1,4 +1,5 @@
 use crate::connection_store::ConnectionConfig;
+use crate::driver_registry::DriverHost;
 use anyhow::{Context as _, Result};
 use database::client::{DEFAULT_REQUEST_TIMEOUT, DriverClient};
 use database::protocol::{
@@ -43,6 +44,66 @@ pub fn not_installed(driver: &str) -> String {
     )
 }
 
+/// The same, for a driver that is not installed on a remote host.
+pub fn not_installed_on(driver: &str, host: &str) -> String {
+    format!(
+        "the `{driver}` driver is not installed on {host} -- download it from the connection dialog"
+    )
+}
+
+/// Starts `descriptor`'s driver on `host`.
+///
+/// On a remote host the driver runs through the command that reaches it,
+/// never as a process of this machine, and the path is the host's own.
+pub(crate) async fn start_driver(
+    host: &DriverHost,
+    descriptor: &DriverDescriptor,
+    cx: &AsyncApp,
+) -> Result<Arc<dyn Transport>> {
+    let binary = descriptor
+        .binary()
+        .with_context(|| match host.host_name() {
+            Some(host_name) => not_installed_on(&descriptor.id, &host_name),
+            None => not_installed(&descriptor.id),
+        })?;
+    let transport = match host {
+        DriverHost::Local => StdioTransport::new(binary, None, cx),
+        DriverHost::Remote(remote) => {
+            let command_host = cx.update(|cx| remote.command_host(cx)).await?;
+            // A local command host would run the host's path on this machine.
+            anyhow::ensure!(
+                command_host.remote_name().is_some(),
+                "the command host for {} does not reach it: it runs commands on this machine",
+                remote.host_name()
+            );
+            let program = binary.executable.to_string_lossy();
+            let args: Vec<&str> = binary.args.iter().map(String::as_str).collect();
+            let env: Vec<(&str, &str)> = binary
+                .env
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect();
+            command_host
+                .command(&program, &args, &env, None)
+                .and_then(|command| StdioTransport::from_command(command, cx))
+        }
+    }
+    // Names the path it actually tried. The driver being absent altogether is
+    // a different sentence, said above -- conflating the two is what left
+    // "never installed" looking like the driver's own error.
+    .with_context(|| {
+        format!(
+            "could not start the `{}` driver at {}{}",
+            descriptor.id,
+            binary.executable.display(),
+            host.host_name()
+                .map(|host_name| format!(" on {host_name}"))
+                .unwrap_or_default()
+        )
+    })?;
+    Ok(Arc::new(transport))
+}
+
 /// Starts a driver, asks what it can do, and stops it again.
 ///
 /// What the add-connection dialog uses to find out which fields to show. A
@@ -50,21 +111,12 @@ pub fn not_installed(driver: &str) -> String {
 /// can stay unable to name an engine -- and it is a question asked once, when
 /// someone is already typing.
 pub fn driver_capabilities(
+    host: DriverHost,
     descriptor: DriverDescriptor,
     cx: &App,
 ) -> Task<Result<database::protocol::Capabilities>> {
     cx.spawn(async move |cx: &mut AsyncApp| {
-        let binary = descriptor
-            .binary()
-            .with_context(|| not_installed(&descriptor.id))?;
-        let transport: Arc<dyn Transport> =
-            Arc::new(StdioTransport::new(binary, None, cx).with_context(|| {
-                format!(
-                    "could not start the `{}` driver at {}",
-                    descriptor.id,
-                    binary.executable.display()
-                )
-            })?);
+        let transport = start_driver(&host, &descriptor, cx).await?;
         // Dropped at the end of this scope, which kills the process: the driver
         // has answered the only thing it was started for.
         let client = DriverClient::new(transport, DEFAULT_REQUEST_TIMEOUT, cx);
@@ -79,26 +131,13 @@ impl Session {
     /// it is of no use to anyone, and leaving that state reachable means every
     /// caller downstream has to handle it.
     pub async fn open(
+        host: DriverHost,
         descriptor: DriverDescriptor,
         config: ConnectionConfig,
         secret: Option<String>,
         cx: &AsyncApp,
     ) -> Result<Self> {
-        let binary = descriptor
-            .binary()
-            .with_context(|| not_installed(&config.driver))?;
-        let transport: Arc<dyn Transport> =
-            Arc::new(StdioTransport::new(binary, None, cx).with_context(|| {
-                // Names the path it actually tried. The driver being absent
-                // altogether is a different sentence, said above -- conflating
-                // the two is what left "never installed" looking like the
-                // driver's own error.
-                format!(
-                    "could not start the `{}` driver at {}",
-                    config.driver,
-                    binary.executable.display()
-                )
-            })?);
+        let transport = start_driver(&host, &descriptor, cx).await?;
         let client = Arc::new(DriverClient::new(transport, DEFAULT_REQUEST_TIMEOUT, cx));
 
         // Before anything else is asked of it: a driver speaking a different

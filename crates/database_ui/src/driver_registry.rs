@@ -1,12 +1,20 @@
+use anyhow::{Result, anyhow};
+use collections::HashMap;
 use database::install::{DriverEndpoint, DriverInstaller, store};
 use database::registry::{
     DriverDescriptor, DriverOrigin, DriverRegistry, DriverSource, DriverState,
 };
 use database::transport::DriverBinary;
 use extension::{ExtensionDatabaseDriver, ExtensionDatabaseDriverProxy, ExtensionHostProxy};
-use gpui::{App, AppContext as _, Entity, Global, SharedString};
+use gpui::{App, AppContext as _, Entity, Global, SharedString, Task, WeakEntity};
+use project::Project;
+use rpc::{AnyProtoClient, proto};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
+use util::command::CommandHost;
 
 /// The drivers Zode knows how to fetch.
 ///
@@ -21,100 +29,30 @@ use std::sync::Arc;
 /// install carries only the drivers its user actually asked for. The binary
 /// name each one has is `store::executable_name`, which is also the name the
 /// release publishes -- one spelling, not two.
-const BUILT_IN: &[(&str, &str)] = &[
-    ("sqlite", "SQLite"),
-    ("postgres", "PostgreSQL"),
-    ("mysql", "MySQL"),
-    ("mongodb", "MongoDB"),
-];
+const BUILT_IN: &[(&str, &str)] = store::PUBLISHED_DRIVERS;
 
-/// Where a driver binary lives, if it lives anywhere.
+/// Where a driver binary lives on this machine, if it lives anywhere: beside
+/// the executable, in the download store, or wherever `ZODE_DB_<ID>` names.
+/// See `store::locate_in` for the order and why.
 ///
-/// Four places, in order, and the fourth is the point:
-///
-/// 1. **Beside the running executable** -- true of a development build and of
-///    any bundle that still carries one. First deliberately: a checkout that has
-///    run `make drivers` must use the driver it just built, never a downloaded
-///    one from an older release. It is also the rollback: putting the drivers
-///    back into the bundle restores the old behaviour with no code change.
-/// 2. **The download store**, under `paths::database_drivers_dir()`. This is
-///    where a driver fetched on demand lands, and where someone with no route to
-///    the API can put one by hand -- told apart by the marker an install leaves
-///    (`DriverOrigin::Store` against `DriverOrigin::Manual`), because only the
-///    first is known to be one a click fetches back. Both are offered for
-///    removal; the second with a warning. It holds whichever published version was
-///    installed most recently, and a driver stays until someone removes it:
-///    there is no update check, and `DriverClient::initialize` is what refuses
-///    one whose protocol no longer matches.
-/// 3. **Whatever `ZODE_DB_<ID>` names** -- a full path to a file, not a name
-///    resolved on `PATH`. See [`path_override`], which is what actually
-///    decides this and requires the value to be an existing file.
-/// 4. **Nowhere** -- [`DriverState::NotInstalled`].
-///
-/// That fourth answer did not exist before. `driver_path` always returned a
-/// `PathBuf`, so `registry.get(id).is_some()` was always true, so every driver
-/// read as installed and the "not installed" path through the UI was
-/// unreachable code. Worse, the path it returned was a bare name handed to a
-/// *shell* (`StdioTransport::new` builds the command through `ShellBuilder`):
-/// `spawn` succeeded, the shell wrote `command not found` to what the client
-/// read as the driver's stderr, and the reconnect loop repeated it. The one
-/// fact worth knowing -- the driver was never installed -- appeared nowhere,
-/// and the message that did appear looked like the driver talking.
+/// A fourth answer, "nowhere", is the point. `driver_path` used to always
+/// return a `PathBuf`, so every driver read as installed, and a bare name was
+/// handed to a shell that wrote `command not found` to what the client read as
+/// the driver's stderr. The one fact worth knowing -- the driver was never
+/// installed -- appeared nowhere.
 fn resolve_driver(id: &str, store_root: &Path) -> DriverState {
-    let executable = store::executable_name(id);
-
-    let beside_exe = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(&executable)));
-    if let Some(path) = beside_exe.as_ref().filter(|path| path.is_file()) {
-        return DriverState::installed(path.clone(), DriverOrigin::BesideExecutable);
+    match store::locate_in(store_root, id, |key| std::env::var_os(key)) {
+        Some((path, location)) => DriverState::installed(path, origin_of(location)),
+        None => DriverState::NotInstalled,
     }
-
-    if let Some(path) = store::installed_path_in(store_root, id) {
-        let origin = if store::installed_by_zode(&path) {
-            DriverOrigin::Store
-        } else {
-            DriverOrigin::Manual
-        };
-        return DriverState::installed(path, origin);
-    }
-
-    // `PATH` is consulted only when someone has said, by setting an
-    // environment variable, that they mean it. Left implicit it was
-    // indistinguishable from "not installed", which is the whole defect above.
-    if let Some(path) = path_override(id) {
-        return DriverState::installed(path, DriverOrigin::Path);
-    }
-
-    log::info!(
-        "database driver `{executable}` is not installed{}; it will be offered for download",
-        beside_exe
-            .as_deref()
-            .map(|path| format!(" (looked beside the executable at {})", path.display()))
-            .unwrap_or_default()
-    );
-    DriverState::NotInstalled
 }
 
-/// An explicit escape hatch: `ZODE_DB_<ID>` naming a driver to run instead.
-///
-/// Deliberately explicit rather than a silent `PATH` search. Someone developing
-/// a driver, or running one Zode does not ship, needs a way to point at it --
-/// but guessing that a matching name on `PATH` was meant is how the old
-/// fallback turned "never built" into an error that read like the driver's own.
-fn path_override(id: &str) -> Option<PathBuf> {
-    let key = format!("ZODE_DB_{}", id.to_ascii_uppercase());
-    let value = std::env::var_os(&key)?;
-    let path = PathBuf::from(value);
-    if path.is_file() {
-        log::info!("using the `{id}` driver named by {key}: {}", path.display());
-        Some(path)
-    } else {
-        log::warn!(
-            "{key} names {}, which is not a file; ignoring it",
-            path.display()
-        );
-        None
+fn origin_of(location: store::DriverLocation) -> DriverOrigin {
+    match location {
+        store::DriverLocation::BesideExecutable => DriverOrigin::BesideExecutable,
+        store::DriverLocation::Store => DriverOrigin::Store,
+        store::DriverLocation::Manual => DriverOrigin::Manual,
+        store::DriverLocation::Override => DriverOrigin::Path,
     }
 }
 
@@ -291,14 +229,18 @@ pub fn driver_for_url(url: &str) -> Option<&'static str> {
     None
 }
 
-/// Every engine, with the driver each one needs and whether it is here.
+/// Every engine, with the driver each one needs and whether it is on `host`.
 ///
 /// A driver an extension added that no catalogue row names is appended: an
 /// engine Zode has never heard of must still be reachable, or the plugin
-/// architecture only works for engines someone already thought of.
-pub fn catalogue(cx: &mut App) -> Vec<CatalogueEntry> {
-    let registry = global(cx);
+/// architecture only works for engines someone already thought of. Not for a
+/// remote host, though: an extension's driver is a path on this machine.
+pub fn catalogue(host: &DriverHost, cx: &mut App) -> Vec<CatalogueEntry> {
+    let registry = host.registry(cx);
     let registry = registry.read(cx);
+    // Removing a driver from a remote host has no request of its own, and the
+    // only removal there is deletes this machine's copy instead.
+    let removable = matches!(host, DriverHost::Local);
 
     let mut entries: Vec<CatalogueEntry> = CATALOGUE
         .iter()
@@ -310,15 +252,17 @@ pub fn catalogue(cx: &mut App) -> Vec<CatalogueEntry> {
             installed: registry
                 .get(driver)
                 .is_some_and(|driver| driver.is_installed()),
-            downloaded: registry.get(driver).is_some_and(|driver| {
-                matches!(
-                    driver.origin(),
-                    Some(DriverOrigin::Store | DriverOrigin::Manual)
-                )
-            }),
-            hand_placed: registry
-                .get(driver)
-                .is_some_and(|driver| driver.origin() == Some(DriverOrigin::Manual)),
+            downloaded: removable
+                && registry.get(driver).is_some_and(|driver| {
+                    matches!(
+                        driver.origin(),
+                        Some(DriverOrigin::Store | DriverOrigin::Manual)
+                    )
+                }),
+            hand_placed: removable
+                && registry
+                    .get(driver)
+                    .is_some_and(|driver| driver.origin() == Some(DriverOrigin::Manual)),
         })
         .collect();
 
@@ -368,7 +312,7 @@ pub(crate) fn install_for_test(id: &str, cx: &mut App) {
 /// nothing here and wait on an extension. Offering to download a driver that no
 /// release contains would be a button that can only fail.
 pub fn is_publishable(id: &str) -> bool {
-    BUILT_IN.iter().any(|(built_in, _)| *built_in == id)
+    store::is_published(id)
 }
 
 /// Re-resolves one driver, after it has been downloaded.
@@ -545,6 +489,323 @@ impl ExtensionDatabaseDriverProxy for ExtensionDrivers {
     }
 }
 
+/// What a remote server says when it has no handler for a driver request.
+pub const REMOTE_SERVER_OUT_OF_DATE: &str = "Update the remote server to use database drivers here";
+
+/// How long a remote host may take to say whether it has a driver.
+///
+/// A current server answers a request it has no handler for. Only one built
+/// before unknown requests were answered drops it without a word, and without
+/// a deadline that question would never be answered.
+const REMOTE_RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long a remote host may take to download and install a driver.
+///
+/// One request rather than a start and a poll: the host's installer gives up
+/// by itself on a download that goes quiet for 30s, so this bounds only a
+/// download that keeps moving, slowly. It is asked only after a resolve has
+/// shown the server answers these requests at all.
+const REMOTE_INSTALL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// Where a project's database drivers are found, installed and run.
+#[derive(Clone)]
+pub enum DriverHost {
+    /// This machine: the global registry, its download store and extensions.
+    Local,
+    /// The host a WSL or SSH project lives on. Nothing on this machine stands
+    /// in for a driver there, not even one of the same name.
+    Remote(RemoteDrivers),
+}
+
+impl DriverHost {
+    pub fn registry(&self, cx: &mut App) -> Entity<DriverRegistry> {
+        match self {
+            Self::Local => global(cx),
+            Self::Remote(remote) => remote.registry.clone(),
+        }
+    }
+
+    /// The remote host's name for messages, `None` for this machine.
+    pub fn host_name(&self) -> Option<SharedString> {
+        match self {
+            Self::Local => None,
+            Self::Remote(remote) => Some(remote.host_name.clone()),
+        }
+    }
+
+    /// Asks a remote host again which drivers it has. This machine's are
+    /// resolved where they are installed, so there is nothing to ask.
+    pub fn refresh_all(&self, cx: &mut App) -> Task<Result<()>> {
+        let Self::Remote(remote) = self else {
+            return Task::ready(Ok(()));
+        };
+        let answers: Vec<_> = BUILT_IN
+            .iter()
+            .map(|(id, _)| remote.ensure(id, false, cx))
+            .collect();
+        // All awaited, not each in turn: returning at the first failure would
+        // drop, and so cancel, the questions still waiting on the host.
+        cx.spawn(async move |_| {
+            futures::future::join_all(answers)
+                .await
+                .into_iter()
+                .find_map(Result::err)
+                .map_or(Ok(()), Err)
+        })
+    }
+}
+
+/// Asks a remote host about its drivers, and reaches it to run one.
+///
+/// A trait so a test can stand in for the remote server and the wrapper
+/// command, and see exactly what this machine asked of each.
+pub trait RemoteDriverService {
+    fn ensure(&self, driver: &str, install: bool, cx: &mut App) -> Task<Result<DriverState>>;
+    fn command_host(&self, cx: &mut App) -> Task<Result<Arc<dyn CommandHost>>>;
+}
+
+#[derive(Clone)]
+pub struct RemoteDrivers {
+    host_name: SharedString,
+    registry: Entity<DriverRegistry>,
+    service: Rc<dyn RemoteDriverService>,
+}
+
+impl RemoteDrivers {
+    #[cfg(test)]
+    pub(crate) fn with_service(
+        host_name: &str,
+        service: Rc<dyn RemoteDriverService>,
+        cx: &mut App,
+    ) -> Self {
+        Self {
+            host_name: host_name.to_string().into(),
+            registry: cx.new(|_| remote_built_ins()),
+            service,
+        }
+    }
+
+    /// The driver as the host has it now, after asking it. With `install`, a
+    /// driver the host lacks is downloaded there first.
+    pub fn ensure(
+        &self,
+        id: &str,
+        install: bool,
+        cx: &mut App,
+    ) -> Task<Result<Option<DriverDescriptor>>> {
+        let answer = self.service.ensure(id, install, cx);
+        let registry = self.registry.clone();
+        let id = id.to_string();
+        cx.spawn(async move |cx| {
+            let state = answer.await?;
+            Ok(cx.update(|cx| {
+                registry.update(cx, |registry, cx| {
+                    if registry.set_state(&id, state) {
+                        cx.notify();
+                    }
+                    registry.get(&id).cloned()
+                })
+            }))
+        })
+    }
+
+    /// Installs a driver on the host, unless it is there already.
+    ///
+    /// Resolved first under the short deadline, so a server too old to know
+    /// the request is found out in seconds rather than at the install's.
+    pub fn install(&self, id: &str, cx: &mut App) -> Task<Result<()>> {
+        let resolved = self.ensure(id, false, cx);
+        let this = self.clone();
+        let id = id.to_string();
+        cx.spawn(async move |cx| {
+            if resolved.await?.is_some_and(|driver| driver.is_installed()) {
+                return Ok(());
+            }
+            let installed = cx.update(|cx| this.ensure(&id, true, cx)).await?;
+            anyhow::ensure!(
+                installed.is_some_and(|driver| driver.is_installed()),
+                "{} did not install the `{id}` driver",
+                this.host_name
+            );
+            Ok(())
+        })
+    }
+
+    pub fn command_host(&self, cx: &mut App) -> Task<Result<Arc<dyn CommandHost>>> {
+        self.service.command_host(cx)
+    }
+
+    pub fn host_name(&self) -> &SharedString {
+        &self.host_name
+    }
+}
+
+/// Every published driver, none of them known to be installed until the host
+/// says so -- and no extension's, which names a path on this machine.
+fn remote_built_ins() -> DriverRegistry {
+    let mut registry = DriverRegistry::new();
+    for (id, name) in BUILT_IN {
+        registry.register_built_in(*id, *name, DriverState::NotInstalled);
+    }
+    registry
+}
+
+/// The drivers of the machine `project` lives on.
+///
+/// A project opened over a remote server gets that host's drivers, in a
+/// registry shared by every window on the same host. Anything else -- a local
+/// project, or one joined from a collaborator -- keeps this machine's.
+pub fn for_project(project: &Entity<Project>, cx: &mut App) -> DriverHost {
+    let Some(remote_client) = project
+        .read(cx)
+        .remote_client()
+        .filter(|_| project.read(cx).is_via_remote_server())
+    else {
+        return DriverHost::Local;
+    };
+    let (options, client) = {
+        let remote_client = remote_client.read(cx);
+        (
+            remote_client.connection_options(),
+            remote_client.proto_client(),
+        )
+    };
+    let host_name: SharedString = options.display_name().into();
+    let key = remote::remote_connection_identity(&options).stable_key();
+    if !cx.has_global::<RemoteDriverRegistries>() {
+        cx.set_global(RemoteDriverRegistries(HashMap::default()));
+    }
+    let existing = cx.global::<RemoteDriverRegistries>().0.get(&key).cloned();
+    let registry = match existing {
+        Some(registry) => registry,
+        None => {
+            let registry = cx.new(|_| remote_built_ins());
+            cx.global_mut::<RemoteDriverRegistries>()
+                .0
+                .insert(key, registry.clone());
+            registry
+        }
+    };
+    DriverHost::Remote(RemoteDrivers {
+        host_name: host_name.clone(),
+        registry,
+        service: Rc::new(ProjectDriverService {
+            project: project.downgrade(),
+            client,
+            host_name,
+        }),
+    })
+}
+
+/// One registry per remote host, by `RemoteConnectionIdentity::stable_key`.
+/// Holds one entry per host connected to in this run, which is a handful.
+struct RemoteDriverRegistries(HashMap<String, Entity<DriverRegistry>>);
+
+impl Global for RemoteDriverRegistries {}
+
+struct ProjectDriverService {
+    project: WeakEntity<Project>,
+    client: AnyProtoClient,
+    host_name: SharedString,
+}
+
+impl RemoteDriverService for ProjectDriverService {
+    fn ensure(&self, driver: &str, install: bool, cx: &mut App) -> Task<Result<DriverState>> {
+        let request = self.client.request(proto::EnsureDatabaseDriver {
+            project_id: proto::REMOTE_SERVER_PROJECT_ID,
+            driver_id: driver.to_string(),
+            install,
+            api_url: zode_account::api_url(),
+        });
+        let timeout = if install {
+            REMOTE_INSTALL_TIMEOUT
+        } else {
+            REMOTE_RESOLVE_TIMEOUT
+        };
+        let timer = cx.background_executor().timer(timeout);
+        let host_name = self.host_name.clone();
+        cx.spawn(async move |_| {
+            let response = within_deadline(request, timer, timeout).await?;
+            state_from_answer(response, &host_name)
+        })
+    }
+
+    fn command_host(&self, cx: &mut App) -> Task<Result<Arc<dyn CommandHost>>> {
+        match self.project.upgrade() {
+            Some(project) => project.update(cx, |project, cx| project.command_host(cx)),
+            None => Task::ready(Err(anyhow!("the project on {} was closed", self.host_name))),
+        }
+    }
+}
+
+/// `request`, unless `timer` fires first, with a server that does not know
+/// the request named as one to update.
+async fn within_deadline<T>(
+    request: impl Future<Output = Result<T>>,
+    timer: impl Future<Output = ()>,
+    timeout: Duration,
+) -> Result<T> {
+    match futures::future::select(std::pin::pin!(request), std::pin::pin!(timer)).await {
+        futures::future::Either::Left((Ok(response), _)) => Ok(response),
+        futures::future::Either::Left((Err(error), _)) => {
+            if format!("{error:#}").contains("no handler registered") {
+                Err(anyhow!("{REMOTE_SERVER_OUT_OF_DATE}"))
+            } else {
+                Err(error)
+            }
+        }
+        // Not called out of date: a current server that is merely slow ends
+        // the same way.
+        futures::future::Either::Right(_) => Err(anyhow!(
+            "the remote server did not answer within {}. If it is older than this Zode: \
+             {REMOTE_SERVER_OUT_OF_DATE}",
+            spoken_duration(timeout)
+        )),
+    }
+}
+
+fn spoken_duration(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    if seconds == 0 || !seconds.is_multiple_of(60) {
+        return format!("{seconds}s");
+    }
+    match seconds / 60 {
+        1 => "1 minute".to_string(),
+        minutes => format!("{minutes} minutes"),
+    }
+}
+
+fn state_from_answer(
+    response: proto::EnsureDatabaseDriverResponse,
+    host_name: &str,
+) -> Result<DriverState> {
+    use proto::ensure_database_driver_response::State;
+    match response.state {
+        Some(State::Installed(installed)) => {
+            let origin = match proto::DatabaseDriverOrigin::from_i32(installed.origin) {
+                Some(proto::DatabaseDriverOrigin::BesideExecutable) => {
+                    DriverOrigin::BesideExecutable
+                }
+                Some(proto::DatabaseDriverOrigin::Store) => DriverOrigin::Store,
+                Some(proto::DatabaseDriverOrigin::Override) => DriverOrigin::Path,
+                // Left unset, or a newer server's origin: shown as placed by
+                // hand, which claims least.
+                Some(
+                    proto::DatabaseDriverOrigin::Manual | proto::DatabaseDriverOrigin::Unspecified,
+                )
+                | None => DriverOrigin::Manual,
+            };
+            Ok(DriverState::installed(
+                PathBuf::from(installed.executable),
+                origin,
+            ))
+        }
+        Some(State::NotInstalled(_)) => Ok(DriverState::NotInstalled),
+        Some(State::Failed(failed)) => Err(anyhow!("{host_name}: {}", failed.reason)),
+        None => Err(anyhow!("{host_name} answered with no driver state")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,7 +977,7 @@ mod tests {
                     .and_then(|driver| driver.origin()),
                 Some(DriverOrigin::Manual)
             );
-            for entry in catalogue(cx)
+            for entry in catalogue(&DriverHost::Local, cx)
                 .into_iter()
                 .filter(|entry| entry.driver == "postgres")
             {
@@ -745,7 +1006,7 @@ mod tests {
             refresh("postgres", cx);
 
             assert!(
-                catalogue(cx)
+                catalogue(&DriverHost::Local, cx)
                     .into_iter()
                     .filter(|entry| entry.driver == "postgres")
                     .all(|entry| entry.downloaded && !entry.hand_placed)
@@ -807,5 +1068,394 @@ mod url_scheme_tests {
         assert_eq!(driver_for_url("oracle://user@host/app"), None);
         assert_eq!(driver_for_url("redis://host:6379"), None);
         assert_eq!(driver_for_url(""), None);
+    }
+}
+
+/// A remote host for tests: answers driver questions from what it was told it
+/// has, and records what this machine asked of it and what it tried to run.
+#[cfg(test)]
+pub(crate) mod remote_test_support {
+    use super::*;
+    use std::cell::RefCell;
+    use std::sync::Mutex;
+
+    pub(crate) const HOST_NAME: &str = "WSL: Ubuntu";
+
+    /// Where the host keeps its `postgres` driver: a path of the host's, which
+    /// exists nowhere on this machine.
+    pub(crate) const REMOTE_POSTGRES: &str =
+        "/home/me/.local/share/zode/database_drivers/postgres/0.9.0/zode-db-postgres";
+
+    #[derive(Default)]
+    pub(crate) struct RecordingHost {
+        /// Every `(driver, install)` this machine asked, in order.
+        pub(crate) asked: RefCell<Vec<(String, bool)>>,
+        postgres_installed: RefCell<bool>,
+        pub(crate) command_host: Arc<RecordingCommandHost>,
+    }
+
+    impl RecordingHost {
+        pub(crate) fn with_postgres() -> Self {
+            let host = Self::default();
+            host.postgres_installed.replace(true);
+            host
+        }
+    }
+
+    impl RemoteDriverService for RecordingHost {
+        fn ensure(&self, driver: &str, install: bool, _cx: &mut App) -> Task<Result<DriverState>> {
+            self.asked.borrow_mut().push((driver.to_string(), install));
+            if driver == "postgres" && install {
+                self.postgres_installed.replace(true);
+            }
+            let state = if driver == "postgres" && *self.postgres_installed.borrow() {
+                DriverState::installed(PathBuf::from(REMOTE_POSTGRES), DriverOrigin::Store)
+            } else {
+                DriverState::NotInstalled
+            };
+            Task::ready(Ok(state))
+        }
+
+        fn command_host(&self, _cx: &mut App) -> Task<Result<Arc<dyn CommandHost>>> {
+            Task::ready(Ok(self.command_host.clone()))
+        }
+    }
+
+    /// Refuses to build any command, so nothing is ever spawned, and keeps
+    /// the program it was asked for.
+    #[derive(Default)]
+    pub(crate) struct RecordingCommandHost {
+        pub(crate) programs: Mutex<Vec<String>>,
+        /// Says it is this machine's rather than the host's.
+        pub(crate) local: bool,
+    }
+
+    impl CommandHost for RecordingCommandHost {
+        fn command(
+            &self,
+            program: &str,
+            _args: &[&str],
+            _env: &[(&str, &str)],
+            _cwd: Option<&Path>,
+        ) -> Result<util::command::Command> {
+            self.programs
+                .lock()
+                .map_err(|_| anyhow!("poisoned"))?
+                .push(program.to_string());
+            Err(anyhow!("the test host runs nothing"))
+        }
+
+        fn path_style(&self) -> util::paths::PathStyle {
+            util::paths::PathStyle::Posix
+        }
+
+        fn remote_name(&self) -> Option<String> {
+            (!self.local).then(|| HOST_NAME.to_string())
+        }
+
+        fn environment_variable(&self, _name: &str) -> Option<String> {
+            None
+        }
+    }
+
+    pub(crate) fn remote_host(service: Rc<RecordingHost>, cx: &mut App) -> DriverHost {
+        DriverHost::Remote(RemoteDrivers::with_service(HOST_NAME, service, cx))
+    }
+}
+
+#[cfg(test)]
+mod remote_driver_tests {
+    use super::remote_test_support::*;
+    use super::*;
+    use database::install::test_support::{directory_entries, plant_driver};
+
+    fn postgres_rows(host: &DriverHost, cx: &mut App) -> Vec<CatalogueEntry> {
+        catalogue(host, cx)
+            .into_iter()
+            .filter(|entry| entry.driver == "postgres")
+            .collect()
+    }
+
+    /// This machine has the driver; the host does not until it says so, and
+    /// once it does, the driver started is the host's, through the host.
+    #[gpui::test]
+    async fn a_remote_host_answers_for_its_drivers_and_this_machine_never_does(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let local_store = tempfile::tempdir().unwrap();
+        let local_postgres = plant_driver(local_store.path(), "postgres", "0.9.9", true);
+        let service = Rc::new(RecordingHost::with_postgres());
+        let host = cx.update(|cx| {
+            set_installer_for_test(local_store.path().to_path_buf(), cx);
+            assert!(refresh("postgres", cx), "this machine has the driver");
+            remote_host(service.clone(), cx)
+        });
+
+        cx.update(|cx| {
+            let rows = postgres_rows(&host, cx);
+            assert!(!rows.is_empty());
+            assert!(
+                rows.iter().all(|entry| !entry.installed),
+                "this machine's driver was offered for the host: {rows:?}"
+            );
+        });
+
+        cx.update(|cx| host.refresh_all(cx)).await.unwrap();
+        assert_eq!(
+            service.asked.borrow().clone(),
+            BUILT_IN
+                .iter()
+                .map(|(id, _)| (id.to_string(), false))
+                .collect::<Vec<_>>(),
+            "the host is asked about every published driver, and asked to install none"
+        );
+
+        let descriptor = cx.update(|cx| {
+            let rows = postgres_rows(&host, cx);
+            assert!(rows.iter().all(|entry| entry.installed), "{rows:?}");
+            assert!(
+                rows.iter()
+                    .all(|entry| !entry.downloaded && !entry.hand_placed),
+                "removal would delete this machine's copy, so a host's is not offered: {rows:?}"
+            );
+            host.registry(cx).read(cx).get("postgres").cloned()
+        });
+        let descriptor = descriptor.expect("the host's registry names postgres");
+        assert_eq!(
+            descriptor.binary().map(|binary| binary.executable.clone()),
+            Some(PathBuf::from(REMOTE_POSTGRES))
+        );
+
+        let async_cx = cx.to_async();
+        let started = crate::session::start_driver(&host, &descriptor, &async_cx).await;
+        let error = match started {
+            Ok(_) => panic!("the test host runs nothing"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(error.contains(&format!("on {HOST_NAME}")), "{error}");
+        assert_eq!(
+            service.command_host.programs.lock().unwrap().clone(),
+            vec![REMOTE_POSTGRES.to_string()],
+            "the host's path, run through the host"
+        );
+
+        cx.update(|cx| {
+            assert!(
+                postgres_rows(&DriverHost::Local, cx)
+                    .iter()
+                    .all(|entry| entry.installed),
+                "this machine's own catalogue is unchanged"
+            );
+            assert_eq!(
+                global(cx)
+                    .read(cx)
+                    .get("postgres")
+                    .and_then(|driver| driver.binary())
+                    .map(|binary| binary.executable.clone()),
+                Some(local_postgres)
+            );
+        });
+        assert_eq!(
+            directory_entries(local_store.path(), "postgres").len(),
+            1,
+            "nothing was added to this machine's store"
+        );
+    }
+
+    /// A server from before this request answers "no handler registered".
+    #[gpui::test]
+    async fn an_older_remote_server_is_named_as_one_to_update_and_nothing_runs_here(
+        cx: &mut gpui::TestAppContext,
+        server_cx: &mut gpui::TestAppContext,
+    ) {
+        let fs = fs::FakeFs::new(cx.executor());
+        let (project, _server) = project::Project::test_remote(fs, cx, server_cx).await;
+        let local_store = tempfile::tempdir().unwrap();
+        let host = cx.update(|cx| {
+            set_installer_for_test(local_store.path().to_path_buf(), cx);
+            for_project(&project, cx)
+        });
+        let DriverHost::Remote(remote) = host else {
+            panic!("a project on a remote server got this machine's drivers");
+        };
+
+        let install = cx.update(|cx| remote.install("postgres", cx));
+        cx.run_until_parked();
+        let error = install
+            .await
+            .expect_err("a server with no handler cannot install");
+        assert_eq!(format!("{error:#}"), REMOTE_SERVER_OUT_OF_DATE);
+
+        cx.update(|cx| {
+            assert_eq!(installer(cx).waiters("postgres"), 0);
+            assert!(
+                !global(cx)
+                    .read(cx)
+                    .get("postgres")
+                    .is_some_and(|driver| driver.is_installed()),
+                "no driver of this machine's stood in"
+            );
+        });
+        assert!(directory_entries(local_store.path(), "postgres").is_empty());
+    }
+
+    /// Answers `sqlite` with an error at once, and every other driver a
+    /// moment later, `postgres` as installed.
+    struct PartlyFailingHost;
+
+    impl RemoteDriverService for PartlyFailingHost {
+        fn ensure(&self, driver: &str, _install: bool, cx: &mut App) -> Task<Result<DriverState>> {
+            if driver == "sqlite" {
+                return Task::ready(Err(anyhow!("the sqlite driver is broken on the host")));
+            }
+            let state = if driver == "postgres" {
+                DriverState::installed(PathBuf::from(REMOTE_POSTGRES), DriverOrigin::Store)
+            } else {
+                DriverState::NotInstalled
+            };
+            let answered = cx.background_executor().timer(Duration::from_millis(10));
+            cx.background_spawn(async move {
+                answered.await;
+                Ok(state)
+            })
+        }
+
+        fn command_host(&self, _cx: &mut App) -> Task<Result<Arc<dyn CommandHost>>> {
+            Task::ready(Err(anyhow!("the test host runs nothing")))
+        }
+    }
+
+    #[gpui::test]
+    async fn one_driver_failing_on_the_host_leaves_the_answers_for_the_others(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let host = cx.update(|cx| {
+            DriverHost::Remote(RemoteDrivers::with_service(
+                HOST_NAME,
+                Rc::new(PartlyFailingHost),
+                cx,
+            ))
+        });
+
+        let refreshed = cx.update(|cx| host.refresh_all(cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(10));
+        cx.run_until_parked();
+
+        let error = format!("{:#}", refreshed.await.expect_err("sqlite failed"));
+        assert!(error.contains("the sqlite driver is broken"), "{error}");
+        cx.update(|cx| {
+            assert!(
+                host.registry(cx)
+                    .read(cx)
+                    .get("postgres")
+                    .is_some_and(|driver| driver.is_installed()),
+                "the host said it has postgres, and one failure elsewhere must not hide that"
+            );
+        });
+    }
+
+    /// A remote project's driver must run through something that reaches the
+    /// host. A command host of this machine's would run the host's path here.
+    #[gpui::test]
+    async fn a_remote_driver_is_never_run_through_this_machine(cx: &mut gpui::TestAppContext) {
+        let mut service = RecordingHost::with_postgres();
+        service.command_host = Arc::new(RecordingCommandHost {
+            local: true,
+            ..Default::default()
+        });
+        let service = Rc::new(service);
+        let host = cx.update(|cx| remote_host(service.clone(), cx));
+        let DriverHost::Remote(remote) = &host else {
+            panic!("a remote host was built");
+        };
+        let descriptor = cx
+            .update(|cx| remote.ensure("postgres", false, cx))
+            .await
+            .unwrap()
+            .expect("the host names postgres");
+
+        let started = crate::session::start_driver(&host, &descriptor, &cx.to_async()).await;
+        let error = match started {
+            Ok(_) => panic!("nothing may start through this machine"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(
+            service.command_host.programs.lock().unwrap().is_empty(),
+            "the host's path was handed to this machine to run"
+        );
+        assert!(error.contains("does not reach"), "{error}");
+    }
+
+    #[test]
+    fn a_long_deadline_is_said_in_minutes() {
+        let answer = futures::executor::block_on(within_deadline(
+            futures::future::pending::<Result<()>>(),
+            futures::future::ready(()),
+            REMOTE_INSTALL_TIMEOUT,
+        ));
+        let error = format!("{:#}", answer.expect_err("the deadline passed"));
+        assert!(
+            error.starts_with("the remote server did not answer within 30 minutes."),
+            "{error}"
+        );
+    }
+
+    /// An origin this machine cannot name, or one the host left unset, is
+    /// shown as the one that claims least.
+    #[test]
+    fn an_origin_the_host_does_not_name_claims_the_least() {
+        use proto::ensure_database_driver_response::{Installed, State};
+        for origin in [0, 99] {
+            let answer = state_from_answer(
+                proto::EnsureDatabaseDriverResponse {
+                    state: Some(State::Installed(Installed {
+                        executable: REMOTE_POSTGRES.to_string(),
+                        origin,
+                    })),
+                },
+                HOST_NAME,
+            );
+            match answer {
+                Ok(DriverState::Installed { origin: found, .. }) => assert_eq!(
+                    found,
+                    DriverOrigin::Manual,
+                    "origin {origin} must read as placed by hand"
+                ),
+                other => panic!("an installed driver, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_host_that_never_answers_is_not_called_out_of_date() {
+        let answer = futures::executor::block_on(within_deadline(
+            futures::future::pending::<Result<()>>(),
+            futures::future::ready(()),
+            REMOTE_RESOLVE_TIMEOUT,
+        ));
+        let error = format!("{:#}", answer.expect_err("the deadline passed"));
+        assert!(
+            error.starts_with("the remote server did not answer within 30s"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_failure_the_host_reports_is_said_with_its_name() {
+        use proto::ensure_database_driver_response::{Failed, State};
+        let answer = state_from_answer(
+            proto::EnsureDatabaseDriverResponse {
+                state: Some(State::Failed(Failed {
+                    reason: "the archive does not match the checksum".to_string(),
+                })),
+            },
+            HOST_NAME,
+        );
+        let error = format!("{:#}", answer.expect_err("a failure is an error"));
+        assert_eq!(
+            error,
+            format!("{HOST_NAME}: the archive does not match the checksum")
+        );
     }
 }

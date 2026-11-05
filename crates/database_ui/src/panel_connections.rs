@@ -6,11 +6,13 @@
 
 use crate::connection_store::read_secret;
 use crate::database_panel::{DatabasePanel, NodeState, OpenTable, SchemaNode};
+use crate::driver_registry::{self, DriverHost};
 use crate::session::Session;
 use crate::team_connections::choose_secret;
+use anyhow::Context as _;
 use database::client::DriverError;
 use database::protocol::ErrorCode;
-use gpui::{Context, Window};
+use gpui::{App, Context, Task, Window};
 use std::sync::Arc;
 
 /// What opening a connection came to, decided while the node is borrowed and
@@ -39,6 +41,16 @@ impl Outcome {
 }
 
 impl DatabasePanel {
+    /// The drivers of the machine this panel's project lives on, `None` once
+    /// its workspace is gone. Never this machine's in place of a remote host's.
+    pub(crate) fn drivers(&mut self, cx: &mut App) -> Option<DriverHost> {
+        if self.drivers.is_none() {
+            let project = self.workspace.upgrade()?.read(cx).project().clone();
+            self.drivers = Some(driver_registry::for_project(&project, cx));
+        }
+        self.drivers.clone()
+    }
+
     /// Opens a connection, or collapses it if it is already open.
     pub(crate) fn toggle_connection(
         &mut self,
@@ -72,33 +84,44 @@ impl DatabasePanel {
             .as_ref()
             .and_then(|team| team.shared_password.clone());
 
-        // Looked up before the node is borrowed again: the registry is a
-        // separate entity, and reading it needs the same `cx` the node is
-        // reached through.
-        // Two different failures that used to read as one. A driver Zode has
-        // never heard of is a settings or extension problem; a driver Zode
-        // ships but has not downloaded yet is a click away from working. The
-        // second said in the words of the first sends people looking for an
-        // extension that was never the answer.
-        let descriptor = self.registry.read(cx).get(&config.driver).cloned();
-        let failure = match &descriptor {
-            None => Some(format!(
-                "no database driver called `{}` -- is the extension that provides it installed?",
-                config.driver
-            )),
-            Some(descriptor) if !descriptor.is_installed() => {
-                Some(crate::session::not_installed(&config.driver))
-            }
-            Some(_) => None,
-        };
-        if let Some(message) = failure {
+        let Some(drivers) = self.drivers(cx) else {
             if let Some(node) = self.connections.get_mut(index) {
-                node.state = NodeState::Failed(message.into());
+                node.state = NodeState::Failed("This window is closing.".into());
             }
             cx.notify();
             return;
-        }
-        let descriptor = descriptor.expect("checked just above");
+        };
+        // A remote host is asked which drivers it has when a connection opens,
+        // never answered for from what this machine has.
+        let resolved = match &drivers {
+            DriverHost::Local => {
+                // Two different failures that used to read as one. A driver Zode
+                // has never heard of is a settings or extension problem; a driver
+                // Zode ships but has not downloaded yet is a click away from
+                // working. The second said in the words of the first sends people
+                // looking for an extension that was never the answer.
+                let descriptor = drivers.registry(cx).read(cx).get(&config.driver).cloned();
+                let failure = match &descriptor {
+                    None => Some(format!(
+                        "no database driver called `{}` -- is the extension that provides it installed?",
+                        config.driver
+                    )),
+                    Some(descriptor) if !descriptor.is_installed() => {
+                        Some(crate::session::not_installed(&config.driver))
+                    }
+                    Some(_) => None,
+                };
+                if let Some(message) = failure {
+                    if let Some(node) = self.connections.get_mut(index) {
+                        node.state = NodeState::Failed(message.into());
+                    }
+                    cx.notify();
+                    return;
+                }
+                Task::ready(Ok(descriptor))
+            }
+            DriverHost::Remote(remote) => remote.ensure(&config.driver, false, cx),
+        };
 
         if let Some(node) = self.connections.get_mut(index) {
             node.state = NodeState::Connecting;
@@ -109,8 +132,15 @@ impl DatabasePanel {
         let secret = read_secret(credentials, config.credential_key().to_string(), cx);
         self.tasks.push(cx.spawn_in(window, async move |this, cx| {
             let opened = async {
+                let descriptor = resolved.await?.with_context(|| {
+                    format!(
+                        "{} has no database driver called `{}`",
+                        drivers.host_name().unwrap_or_default(),
+                        config.driver
+                    )
+                })?;
                 let choice = choose_secret(secret.await?, shared_password);
-                let session = Session::open(descriptor, config, choice.secret, cx).await?;
+                let session = Session::open(drivers, descriptor, config, choice.secret, cx).await?;
                 anyhow::Ok((session, choice.remember))
             }
             .await;

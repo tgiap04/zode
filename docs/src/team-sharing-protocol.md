@@ -106,7 +106,7 @@ yields the key it already holds there, which is harmless.
    says sealed it (`wrappedByUserId`), or the member's own key for envelopes it
    sealed itself. A sealer with no pin is accepted only on a machine that has
    never opened this team (no key version seen, nothing pinned): its listed
-   key is then pinned as *seen*, not verified. On any later open an unpinned
+   key is then pinned as _seen_, not verified. On any later open an unpinned
    sealer is refused until the user verifies its fingerprint.
 
 Before any of that, the server's answer must hold at most one envelope per key
@@ -126,8 +126,8 @@ aimed at a key it no longer holds for them.
 Each entry, and the manifest, is sealed with the settings envelope under the
 team key of one version. The AAD:
 
-| Resource                        | AAD                                                                                          |
-| ------------------------------- | -------------------------------------------------------------------------------------------- |
+| Resource                        | AAD                                                                                                  |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------- |
 | `teams/<team>/vault/<entry_id>` | `team_id ‖ 0x1F ‖ "team-entry" ‖ 0x1F ‖ v ‖ 0x1F ‖ kid(team key) ‖ 0x1F ‖ team_id ‖ 0x1F ‖ entry_id` |
 
 The owner field is the team rather than a user, because many members write the
@@ -159,7 +159,12 @@ and is sealed like any entry. It names the entries; the server sees only ids:
 {
   "v": 1,
   "entries": [
-    { "entryId": "<32 hex>", "kind": "env", "label": ".env.production", "projectHint": "acme-api" },
+    {
+      "entryId": "<32 hex>",
+      "kind": "env",
+      "label": ".env.production",
+      "projectHint": "acme-api"
+    },
     { "entryId": "<32 hex>", "kind": "db_connection", "label": "staging" }
   ]
 }
@@ -225,23 +230,23 @@ from being readable with those keys.
 All of it only when you use team sharing — opening the team tab, pulling,
 sharing, granting or rotating. Nothing at startup and nothing on a timer.
 
-| Request | Sends |
-| --- | --- |
-| `GET`/`PUT /api/sync/sharing-key` | Your sharing private key, sealed under your recovery key (first use only) |
-| `GET`/`PUT /api/account/sharing-key` | Your sharing **public** key |
-| `GET /api/teams/:id/key` | Nothing; receives your sealed team-key envelopes |
-| `GET /api/teams/:id/members/keys` | Nothing; receives members' public keys and fingerprints |
-| `PUT /api/teams/:id/key/envelopes`, `POST /api/teams/:id/key/rotate` | Team keys sealed to members (admins) |
-| `GET`/`PUT`/`DELETE /api/teams/:id/vault[/:entryId]` | Entries sealed under the team key |
+| Request                                                              | Sends                                                                     |
+| -------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| `GET`/`PUT /api/sync/sharing-key`                                    | Your sharing private key, sealed under your recovery key (first use only) |
+| `GET`/`PUT /api/account/sharing-key`                                 | Your sharing **public** key                                               |
+| `GET /api/teams/:id/key`                                             | Nothing; receives your sealed team-key envelopes                          |
+| `GET /api/teams/:id/members/keys`                                    | Nothing; receives members' public keys and fingerprints                   |
+| `PUT /api/teams/:id/key/envelopes`, `POST /api/teams/:id/key/rotate` | Team keys sealed to members (admins)                                      |
+| `GET`/`PUT`/`DELETE /api/teams/:id/vault[/:entryId]`                 | Entries sealed under the team key                                         |
 
 ### What the server sees
 
-| Sees | Does not see |
-| --- | --- |
-| Your user id, your team id | Any team key or private key |
-| Members' public keys and fingerprints | Any project name, file name or path |
-| Opaque 32-character entry ids | Any variable name or value |
-| Entry length, rounded up to 4 KiB | Any connection string or password |
+| Sees                                                       | Does not see                                   |
+| ---------------------------------------------------------- | ---------------------------------------------- |
+| Your user id, your team id                                 | Any team key or private key                    |
+| Members' public keys and fingerprints                      | Any project name, file name or path            |
+| Opaque 32-character entry ids                              | Any variable name or value                     |
+| Entry length, rounded up to 4 KiB                          | Any connection string or password              |
 | Which key version sealed each entry, and who wrote it when | Which entry is a `.env` and which a connection |
 
 ## Fixed vectors

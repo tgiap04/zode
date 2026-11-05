@@ -85,7 +85,8 @@ pub enum DriverOrigin {
     /// tells someone with no route to the API to do. Found and used like any
     /// other, but never offered for removal: nothing can fetch it again.
     Manual,
-    /// A bare name left to `PATH`, put there deliberately by someone.
+    /// Named by the `ZODE_DB_<ID>` override, put there deliberately by
+    /// someone; a bare name there is left to `PATH`.
     Path,
     /// Declared by an extension, which names its own path.
     Extension,

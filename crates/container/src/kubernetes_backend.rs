@@ -16,10 +16,9 @@
 
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt as _};
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use util::command::Command;
+use util::command::{Command, CommandHost};
 
 use crate::backend::{BackendEvent, BackendKind, ContainerBackend, ContainerError};
 use crate::kubeconfig::{self, ConfigSource, ConfigTarget, Kubeconfig};
@@ -47,6 +46,10 @@ pub struct KubernetesBackend {
     /// the kubeconfig says is current", which is what a person running `kubectl`
     /// by hand would get.
     scope: Option<Scope>,
+    /// The machine `kubectl` runs on, and so whose kubeconfig it reads: a
+    /// remote project's cluster credentials are the host's, never this
+    /// machine's `~/.kube`.
+    host: Arc<dyn CommandHost>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,19 +59,21 @@ pub struct Scope {
 }
 
 impl KubernetesBackend {
-    pub fn new() -> Self {
+    pub fn new(host: Arc<dyn CommandHost>) -> Self {
         Self {
             program: "kubectl".into(),
             kubeconfig_path: None,
             scope: None,
+            host,
         }
     }
 
-    pub fn with_scope(scope: Scope) -> Self {
+    pub fn with_scope(host: Arc<dyn CommandHost>, scope: Scope) -> Self {
         Self {
             program: "kubectl".into(),
             kubeconfig_path: None,
             scope: Some(scope),
+            host,
         }
     }
 
@@ -77,11 +82,16 @@ impl KubernetesBackend {
     /// The one path `ContainerBackend::aimed_at` builds: a file with nothing
     /// chosen inside it yet is still a valid state (the caller is offering the
     /// contexts it found), so `scope` stays independently optional here.
-    pub fn with_kubeconfig(kubeconfig_path: Option<PathBuf>, scope: Option<Scope>) -> Self {
+    pub fn with_kubeconfig(
+        host: Arc<dyn CommandHost>,
+        kubeconfig_path: Option<PathBuf>,
+        scope: Option<Scope>,
+    ) -> Self {
         Self {
             program: "kubectl".into(),
             kubeconfig_path,
             scope,
+            host,
         }
     }
 
@@ -93,6 +103,7 @@ impl KubernetesBackend {
             program: program.into(),
             kubeconfig_path: None,
             scope: None,
+            host: Arc::new(util::command::LocalCommandHost),
         }
     }
 
@@ -102,9 +113,10 @@ impl KubernetesBackend {
     pub async fn kubeconfig(&self) -> Result<Kubeconfig, ContainerError> {
         let stdout = self
             .stdout(kubeconfig::command(
+                self.host.as_ref(),
                 &self.program,
                 self.kubeconfig_path.as_deref(),
-            ))
+            )?)
             .await?;
         kubeconfig::parse(&stdout)
     }
@@ -113,21 +125,25 @@ impl KubernetesBackend {
     /// where `--kubeconfig` lands relative to the subcommand -- can be asserted
     /// directly from `tests.rs` through [`util::command::Command::get_args`]
     /// without spawning anything.
-    pub(crate) fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(&self.program);
+    pub(crate) fn command(&self, args: &[&str]) -> Result<Command, ContainerError> {
+        let kubeconfig_path = self
+            .kubeconfig_path
+            .as_ref()
+            .map(|path| path.to_string_lossy());
+        let mut words: Vec<&str> = Vec::with_capacity(args.len() + 6);
         // Ahead of everything else, so it scopes every subcommand this backend
         // ever builds -- `list`, `act` and `watch` all funnel through here.
-        if let Some(path) = &self.kubeconfig_path {
-            command.arg("--kubeconfig").arg(path);
+        if let Some(path) = &kubeconfig_path {
+            words.extend(["--kubeconfig", path.as_ref()]);
         }
-        command.args(args);
+        words.extend_from_slice(args);
         if let Some(scope) = &self.scope {
-            command.args(["--context", &scope.context]);
+            words.extend(["--context", scope.context.as_str()]);
             if let Some(namespace) = &scope.namespace {
-                command.args(["--namespace", namespace]);
+                words.extend(["--namespace", namespace.as_str()]);
             }
         }
-        command
+        crate::backend::host_command(self.host.as_ref(), &self.program, &words)
     }
 
     /// `--kubeconfig` and `--context`/`--namespace`, as bare argument words
@@ -164,33 +180,24 @@ impl KubernetesBackend {
     /// returns exit 1 for all of it and the words are the only distinguishing
     /// signal there is.
     async fn stdout(&self, mut command: Command) -> Result<String, ContainerError> {
-        let output = match command.output().await {
-            Ok(output) => output,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(ContainerError::EngineMissing {
-                    program: self.program.clone(),
-                });
-            }
-            Err(error) => {
-                return Err(ContainerError::CommandFailed {
-                    program: self.program.clone(),
-                    stderr: error.to_string(),
-                });
-            }
-        };
+        let output = command.output().await.map_err(|error| {
+            crate::backend::spawn_failure(self.host.as_ref(), &self.program, error)
+        })?;
 
         if output.status.success() {
             return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
         }
 
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if let Some(error) = crate::backend::exit_failure(
+            self.host.as_ref(),
+            &self.program,
+            output.status.code(),
+            &stderr,
+        ) {
+            return Err(error);
+        }
         Err(classify(&self.program, &stderr))
-    }
-}
-
-impl Default for KubernetesBackend {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -273,7 +280,11 @@ impl ContainerBackend for KubernetesBackend {
     ) -> Result<Vec<ConfigTarget>, ContainerError> {
         let path = path.or(self.kubeconfig_path.as_deref());
         let stdout = self
-            .stdout(kubeconfig::command(&self.program, path))
+            .stdout(kubeconfig::command(
+                self.host.as_ref(),
+                &self.program,
+                path,
+            )?)
             .await?;
         let config = kubeconfig::parse(&stdout)?;
         Ok(config
@@ -295,7 +306,11 @@ impl ContainerBackend for KubernetesBackend {
             context: target.name,
             namespace: target.detail,
         });
-        Some(Arc::new(KubernetesBackend::with_kubeconfig(path, scope)))
+        Some(Arc::new(KubernetesBackend::with_kubeconfig(
+            self.host.clone(),
+            path,
+            scope,
+        )))
     }
 
     async fn list(&self, kind: ResourceKind) -> Result<Vec<Resource>, ContainerError> {
@@ -327,7 +342,7 @@ impl ContainerBackend for KubernetesBackend {
         }
 
         let stdout = self
-            .stdout(self.command(&["get", "pods", "-o", "json"]))
+            .stdout(self.command(&["get", "pods", "-o", "json"])?)
             .await?;
         let list: PodList =
             serde_json::from_str(&stdout).map_err(|error| ContainerError::Parse {
@@ -396,7 +411,7 @@ impl ContainerBackend for KubernetesBackend {
             args.push("--".into());
             args.push(name);
             let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-            self.stdout(self.command(&borrowed)).await?;
+            self.stdout(self.command(&borrowed)?).await?;
         }
         Ok(())
     }
@@ -462,14 +477,20 @@ impl ContainerBackend for KubernetesBackend {
         // and is restarted forever. A watch is only started once something has
         // been chosen.
         self.scope.as_ref()?;
-        let command = self.command(&[
+        let command = match self.command(&[
             "get",
             "pods",
             "--watch",
             "--output-watch-events",
             "-o",
             "json",
-        ]);
+        ]) {
+            Ok(command) => command,
+            Err(error) => {
+                log::warn!("could not start an event stream: {error}");
+                return None;
+            }
+        };
         let values = crate::event_stream::json_values::<WatchEvent>(command)?;
         Some(
             values

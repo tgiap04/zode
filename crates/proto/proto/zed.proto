@@ -492,7 +492,22 @@ message Envelope {
     TerminalInput terminal_input = 452;
     ResizeTerminal resize_terminal = 453;
     TerminalExited terminal_exited = 454;
-    CloseTerminal close_terminal = 455; // current max
+    CloseTerminal close_terminal = 455;
+
+    LocateAgentCli locate_agent_cli = 456;
+    LocateAgentCliResponse locate_agent_cli_response = 457;
+    ProbeAgentBypassFlag probe_agent_bypass_flag = 458;
+    ProbeAgentBypassFlagResponse probe_agent_bypass_flag_response = 459;
+
+    AgentSessionRequest agent_session_request = 460;
+    AgentSessionResponse agent_session_response = 461;
+
+    LoadPrivateFile load_private_file = 462;
+    LoadPrivateFileResponse load_private_file_response = 463;
+    WritePrivateFile write_private_file = 464;
+
+    EnsureDatabaseDriver ensure_database_driver = 465;
+    EnsureDatabaseDriverResponse ensure_database_driver_response = 466; // current max
   }
 
   reserved 87 to 88;

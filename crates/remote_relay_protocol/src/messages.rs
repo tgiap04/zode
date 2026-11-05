@@ -25,6 +25,16 @@ pub mod error_code {
     pub const INTERNAL: &str = "internal";
 }
 
+/// Why a host's sessions are missing from a `sessions_list_reply`. Fixed words
+/// on purpose: what went wrong on the host is never sent.
+pub mod host_status {
+    /// Its sessions have not been read yet; a later list will have them.
+    pub const READING: &str = "reading";
+    /// Its sessions could not be read: it is out of date, unreachable or no
+    /// longer connected.
+    pub const UNAVAILABLE: &str = "unavailable";
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum MessageError {
     #[error("message is not a valid control message: {0}")]
@@ -126,6 +136,20 @@ pub struct SessionEntry {
     /// The tab already running this session, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_agent_id: Option<String>,
+    /// The remote host the session is on, by the name it is shown under.
+    /// Absent for a session on the host's own machine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+}
+
+/// A remote host with a window open whose sessions a `sessions_list_reply`
+/// could not include.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnavailableHost {
+    /// The name the host is shown under, as [`SessionEntry::host`] has it.
+    pub host: String,
+    /// One of [`host_status`].
+    pub reason: String,
 }
 
 /// A message inside the encrypted channel.
@@ -290,6 +314,10 @@ pub enum Control {
         more: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next: Option<SessionCursor>,
+        /// Hosts whose sessions are not in the list. Only on the last message
+        /// of a first page.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unavailable_hosts: Vec<UnavailableHost>,
     },
     /// Opens a tab on a past session, or on a fork of it. The host takes
     /// nothing but the id from the device and finds the rest itself.

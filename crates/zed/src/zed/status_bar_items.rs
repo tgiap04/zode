@@ -344,7 +344,8 @@ pub(crate) fn register(
         cx,
     );
 
-    let agent_usage = cx.new(|cx| AgentUsageIndicator::new(window, cx));
+    let project = workspace.project().clone();
+    let agent_usage = cx.new(|cx| AgentUsageIndicator::for_project(&project, window, cx));
     workspace.register_action(
         move |workspace, _: &agent_usage::ToggleUsagePanel, window, cx| {
             // Hiding removes the entity, so a toggle fired while the item is off
@@ -477,9 +478,18 @@ pub(crate) fn register(
         let rank = status_bar.add_left_item(agent_usage, window, cx);
         status_bar.register_toggleable_item(AGENT_USAGE.spec(
             rank,
-            Box::new(|status_bar, rank, window, cx| {
-                let item = cx.new(|cx| AgentUsageIndicator::new(window, cx));
-                status_bar.insert_item_at_rank(StatusBarSide::Left, rank, item, window, cx);
+            Box::new({
+                // The account a window's agents spend is its project's host's,
+                // so a re-shown indicator must read that project's store.
+                let weak_workspace = weak_workspace.clone();
+                move |status_bar, rank, window, cx| {
+                    let Some(workspace) = weak_workspace.upgrade() else {
+                        return;
+                    };
+                    let project = workspace.read(cx).project().clone();
+                    let item = cx.new(|cx| AgentUsageIndicator::for_project(&project, window, cx));
+                    status_bar.insert_item_at_rank(StatusBarSide::Left, rank, item, window, cx);
+                }
             }),
         ));
 
@@ -793,6 +803,74 @@ mod tests {
             assert!(!(KEEP_AWAKE.is_shown)(cx));
             assert!(!KeepDisplayAwakeAlwaysSetting::get_global(cx).0);
         });
+    }
+
+    /// A window whose project lives on a remote host shows that host's
+    /// account: as first built, and again once hidden and shown, which builds
+    /// the indicator anew.
+    ///
+    /// The bar is registered by hand on a bare workspace rather than through
+    /// `initialize_workspace`, whose panels are not what this is about.
+    #[gpui::test]
+    async fn a_remote_project_s_bar_never_reads_this_machine_s_account(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let app_state = cx.update(|cx| {
+            let app_state = workspace::AppState::test(cx);
+            workspace::init(app_state.clone(), cx);
+            editor::init(cx);
+            app_state
+        });
+        let (project, _server) =
+            project::Project::test_remote(app_state.fs.clone(), cx, server_cx).await;
+        let window =
+            cx.add_window(|window, cx| workspace::MultiWorkspace::test_new(project, window, cx));
+        let workspace = window
+            .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+            .expect("the window was just built");
+        window
+            .update(cx, |_, window, cx| {
+                workspace.update(cx, |workspace_state, cx| {
+                    register(workspace_state, &workspace, window, cx);
+                });
+            })
+            .expect("the window is still open");
+
+        let reads_this_machine = |cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                let indicator = workspace
+                    .read(cx)
+                    .status_bar()
+                    .read(cx)
+                    .item_of_type::<AgentUsageIndicator>()?;
+                Some(indicator.update(cx, |indicator, cx| {
+                    indicator.reads_this_machine_s_account(cx)
+                }))
+            })
+        };
+        let set_shown = |shown: bool, cx: &mut TestAppContext| {
+            cx.update_global::<SettingsStore, ()>(|store, cx| {
+                store.update_user_settings(cx, |content| (AGENT_USAGE.set_shown)(content, shown));
+            });
+            cx.run_until_parked();
+        };
+
+        assert_eq!(
+            reads_this_machine(cx),
+            Some(false),
+            "the bar as first built reads the remote host's account"
+        );
+
+        set_shown(false, cx);
+        assert_eq!(reads_this_machine(cx), None, "hidden removes the indicator");
+
+        set_shown(true, cx);
+        assert_eq!(
+            reads_this_machine(cx),
+            Some(false),
+            "the indicator built when shown again reads the remote host's account"
+        );
     }
 
     #[gpui::test]

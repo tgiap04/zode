@@ -114,10 +114,15 @@ impl ContainerPanel {
         else {
             return;
         };
+        let Some(host) = self.command_host.clone() else {
+            return;
+        };
         let opened_for = detail.resource.id.clone();
         self.checkout_probe = Some(cx.spawn(async move |this, cx| {
             let outcome = cx
-                .background_spawn(compose_checkout::inspect(PathBuf::from(directory)))
+                .background_spawn(async move {
+                    compose_checkout::inspect(host.as_ref(), PathBuf::from(directory)).await
+                })
                 .await;
             let applied = this.update(cx, |this, cx| {
                 this.apply_checkout_probe(&opened_for, outcome, cx);
@@ -169,9 +174,12 @@ impl ContainerPanel {
         else {
             return;
         };
+        let Some(host) = self.command_host.clone() else {
+            return;
+        };
         let panel = cx.entity().downgrade();
         self.show_modal(window, cx, move |window, cx| {
-            BranchPicker::new(panel, root, window, cx)
+            BranchPicker::new(panel, root, host, window, cx)
         });
     }
 
@@ -194,13 +202,19 @@ impl ContainerPanel {
         else {
             return;
         };
+        let Some(host) = self.command_host.clone() else {
+            return;
+        };
         let containers = self.project_containers();
         let counting_root = root.clone();
         self.confirmation_prep = Some(cx.spawn_in(window, async move |this, cx| {
             let read = cx
                 .background_spawn(async move {
-                    let changes = compose_checkout::uncommitted_changes(&counting_root).await?;
-                    let orphan = compose_checkout::orphaned_head(&counting_root).await?;
+                    let changes =
+                        compose_checkout::uncommitted_changes(host.as_ref(), &counting_root)
+                            .await?;
+                    let orphan =
+                        compose_checkout::orphaned_head(host.as_ref(), &counting_root).await?;
                     Ok::<_, GitFailure>((changes, orphan))
                 })
                 .await;
@@ -251,6 +265,9 @@ impl ContainerPanel {
         if self.branch_switch.is_some() {
             return;
         }
+        let Some(host) = self.command_host.clone() else {
+            return;
+        };
         self.branch_switch = Some(SwitchStage::Switching);
         self.last_error = None;
         cx.notify();
@@ -263,7 +280,7 @@ impl ContainerPanel {
             } = request;
             let switching = cx.background_spawn({
                 let target = target.clone();
-                async move { compose_checkout::switch(&root, &target).await }
+                async move { compose_checkout::switch(host.as_ref(), &root, &target).await }
             });
             let commit = match switching.await {
                 Ok(commit) => commit,

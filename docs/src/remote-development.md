@@ -117,6 +117,34 @@ To open a local folder inside a WSL container, use the `projects: open in wsl` a
 
 To open a folder that's already located inside of a WSL container, use the `projects: open wsl` action and select the WSL distribution. The distribution will be added to the `Remote Projects` window where you will be able to open the folder.
 
+## What runs where
+
+In a WSL, SSH or dev container window, a project's tools run on the machine the project lives on, not on the machine whose screen you are looking at. Zode needs its remote server running there to do this.
+
+| Feature                                                                                               | Where it runs                                                                                                     |
+| ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Agent CLIs (Claude Code, Codex, Copilot, opencode)                                                    | On the host, in the project folder. Their sessions, history and resume are read from the host's agent folders.    |
+| [Session history](./agent-sessions.md#remote-projects)                                                | Lists, resumes, forks and deletes the sessions stored on the host.                                                |
+| [Remote control](./remote-control.md)                                                                 | Sessions of every open remote host appear in the device's History; a current device app marks each with its host. |
+| Container and cluster tools (`docker`, `podman`, `kubectl`, `docker compose`), `gh`, `glab` and `git` | The copy found on the host's `PATH`. In WSL the Windows programs under `/mnt/<letter>` are not used.              |
+| `.env` sync and the vault                                                                             | Read and written through the host's files. See [.env files in remote windows](#env-files-in-remote-windows).      |
+| Database drivers                                                                                      | Downloaded, installed and started on the host. See [Database drivers on a host](#database-drivers-on-a-host).     |
+| [Agent usage](./agent-usage.md#remote-windows)                                                        | The usage of the account signed in on the host.                                                                   |
+
+If the host cannot be reached, the feature says so; it does not fall back to your local machine.
+
+### .env files in remote windows
+
+Syncing a `.env` file in a remote window reads and writes it on the host. In a WSL window, a project on a Windows drive (`/mnt/c`, `/mnt/d`, and so on) is not synced: those files belong to the Windows machine, not to the distro, so move the project into the distro's own file system to sync its `.env` files.
+
+### Database drivers on a host
+
+The database panel's drivers are per host. The first time you connect to an engine in a remote window, the driver is downloaded and installed on that host, and every window on that host reuses it. A driver installed on your local machine does not help a remote project, and the reverse.
+
+### "Update the remote server…"
+
+Zode replaces the remote server on the host when its version differs, but a window can still be connected to an older server that predates a feature. Such a feature says so instead of doing nothing, for example "Update the remote server to use database drivers here" or "Update the remote server to sync this file", and the session history says "Remote server is out of date — reconnect, then refresh". Reconnecting the window makes Zode install the matching server (see [Initializing the remote server](#initializing-the-remote-server)).
+
 ## Port forwarding
 
 If you'd like to be able to connect to ports on your remote server from your local machine, you can configure port forwarding in your settings file. This is particularly useful for developing websites so you can load the site in your browser while working.

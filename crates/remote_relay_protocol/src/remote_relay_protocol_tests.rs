@@ -244,6 +244,7 @@ fn sample_controls() -> Vec<Control> {
             sessions: vec![session_entry()],
             more: true,
             next: Some(cursor()),
+            unavailable_hosts: Vec::new(),
         },
         Control::SessionResume {
             request_id: 9,
@@ -278,6 +279,7 @@ fn session_entry() -> SessionEntry {
         updated_at: 1_760_572_800_000,
         can_fork: true,
         open_agent_id: Some("terminal-42".into()),
+        host: None,
     }
 }
 
@@ -325,6 +327,7 @@ fn the_session_messages_encode_to_the_published_vectors() {
             sessions: vec![session_entry()],
             more: false,
             next: Some(cursor()),
+            unavailable_hosts: Vec::new(),
         },
         r#"{"t":"sessions_list_reply","request_id":7,"sessions":[{"id":"0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f","agent":"claude","title":"Fix the terminal snapshot","preview":"Carry the scroll region","worktree_id":"3","folder":"zode/crates/terminal","branch":"main","updated_at":1760572800000,"can_fork":true,"open_agent_id":"terminal-42"}],"more":false,"next":{"updated_at":1760572800000,"id":"0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f"}}"#,
     );
@@ -378,7 +381,56 @@ fn a_session_entry_with_nothing_optional_to_say_omits_it_but_always_says_whether
     assert!(!json.contains("preview"), "{json}");
     assert!(!json.contains("branch"), "{json}");
     assert!(!json.contains("open_agent_id"), "{json}");
+    assert!(!json.contains("host"), "{json}");
     assert!(json.contains(r#""can_fork":false"#), "{json}");
+}
+
+/// A session on a remote host and a host whose sessions are missing, as the
+/// browser reads them. A list of this machine's alone spells neither field
+/// (see the vectors above), so a device from before remote hosts reads it as
+/// it always has.
+#[test]
+fn a_remote_session_and_an_unavailable_host_encode_to_the_published_vectors() {
+    assert_encodes_to(
+        &Control::SessionsListReply {
+            request_id: 7,
+            sessions: vec![SessionEntry {
+                id: format!("0123456789ab:{SESSION_ID}"),
+                worktree_id: "0123456789ab:3".into(),
+                preview: None,
+                branch: None,
+                open_agent_id: None,
+                host: Some("Ubuntu".into()),
+                ..session_entry()
+            }],
+            more: false,
+            next: None,
+            unavailable_hosts: vec![UnavailableHost {
+                host: "build-box".into(),
+                reason: host_status::UNAVAILABLE.into(),
+            }],
+        },
+        r#"{"t":"sessions_list_reply","request_id":7,"sessions":[{"id":"0123456789ab:0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f","agent":"claude","title":"Fix the terminal snapshot","worktree_id":"0123456789ab:3","folder":"zode/crates/terminal","updated_at":1760572800000,"can_fork":true,"host":"Ubuntu"}],"more":false,"unavailable_hosts":[{"host":"build-box","reason":"unavailable"}]}"#,
+    );
+}
+
+/// What an older host sends has neither field, and still reads.
+#[test]
+fn a_list_reply_from_before_remote_hosts_still_decodes() {
+    let control = decode_control(
+        br#"{"t":"sessions_list_reply","request_id":1,"sessions":[{"id":"a","agent":"claude","title":"t","worktree_id":"1","folder":"f","updated_at":1}]}"#,
+    )
+    .expect("decodes");
+    let Control::SessionsListReply {
+        sessions,
+        unavailable_hosts,
+        ..
+    } = control
+    else {
+        panic!("a list reply: {control:?}");
+    };
+    assert!(unavailable_hosts.is_empty());
+    assert_eq!(sessions[0].host, None);
 }
 
 #[test]

@@ -19,7 +19,7 @@ use project::builtin_agent;
 use remote_relay_protocol::{AgentStatus, AgentSummary};
 use util::ResultExt as _;
 
-use crate::session_history::wire_agent;
+use crate::session_history::{tab_session_id, wire_agent};
 
 /// The id a terminal is listed and attached under.
 pub fn terminal_id(entity_id: EntityId) -> String {
@@ -99,7 +99,9 @@ fn summarize(view: &AgentView, view_id: EntityId, cx: &App) -> AgentSummary {
             view.awaiting_approval(),
         ),
         title: Some(view.tab_label().to_string()),
-        session_id: view.session_id().map(str::to_string),
+        session_id: view
+            .session_id()
+            .map(|id| tab_session_id(&view.workspace(), id, cx)),
         agent: AgentKind::from_builtin_agent_id(agent.as_ref())
             .map(|kind| wire_agent(kind).to_string()),
     }
@@ -248,7 +250,8 @@ impl AgentMirror {
         cx.emit(AgentMirrorEvent::Changed(summary));
     }
 
-    /// The id a tab running `session_id` is listed under, if one is.
+    /// The id a tab running `session_id` -- as a device knows it, with its
+    /// host -- is listed under, if one is.
     ///
     /// Running, not merely open: a tab whose CLI ended is a screen of scrollback
     /// that nothing writes to any more, and resuming the session must still
@@ -262,8 +265,11 @@ impl AgentMirror {
             .filter_map(|(id, tracked)| {
                 let view = tracked.view.upgrade()?;
                 let view = view.read(cx);
-                (view.session_id() == Some(session_id) && view.is_working(cx))
-                    .then(|| (*id, summarize(view, *id, cx).id))
+                if !view.is_working(cx) {
+                    return None;
+                }
+                let summary = summarize(view, *id, cx);
+                (summary.session_id.as_deref() == Some(session_id)).then_some((*id, summary.id))
             })
             .min_by_key(|(id, _)| id.as_u64())
             .map(|(_, listed_as)| listed_as)

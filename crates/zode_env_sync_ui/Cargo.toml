@@ -23,6 +23,7 @@ menu.workspace = true
 notifications.workspace = true
 os_auth.workspace = true
 paths.workspace = true
+project.workspace = true
 ui.workspace = true
 ui_input.workspace = true
 util.workspace = true
