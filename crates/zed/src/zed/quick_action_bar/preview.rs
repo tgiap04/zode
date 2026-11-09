@@ -20,6 +20,8 @@ use super::QuickActionBar;
 #[derive(Clone, Copy)]
 enum PreviewType {
     Markdown,
+    /// The active tab is a markdown preview that took the editor's tab; the button gives it back.
+    MarkdownSource,
     Svg,
     Csv,
 }
@@ -34,7 +36,9 @@ impl QuickActionBar {
 
         if let Some(workspace) = self.workspace.upgrade() {
             workspace.update(cx, |workspace, cx| {
-                if MarkdownPreviewView::resolve_active_item_as_markdown_editor(workspace, cx)
+                if MarkdownPreviewView::active_replacing_preview(workspace, cx).is_some() {
+                    preview_type = Some(PreviewType::MarkdownSource);
+                } else if MarkdownPreviewView::resolve_active_item_as_markdown_editor(workspace, cx)
                     .is_some()
                 {
                     preview_type = Some(PreviewType::Markdown);
@@ -53,6 +57,13 @@ impl QuickActionBar {
 
         let (button_id, tooltip_text, open_action, open_to_side_action, open_action_for_tooltip) =
             match preview_type {
+                PreviewType::MarkdownSource => (
+                    "toggle-markdown-preview",
+                    "Edit Markdown",
+                    Box::new(MarkdownOpenPreview) as Box<dyn gpui::Action>,
+                    Box::new(MarkdownOpenPreviewToTheSide) as Box<dyn gpui::Action>,
+                    &markdown_preview::OpenPreview as &dyn gpui::Action,
+                ),
                 PreviewType::Markdown => (
                     "toggle-markdown-preview",
                     "Preview Markdown",
@@ -82,10 +93,20 @@ impl QuickActionBar {
             ..Default::default()
         };
 
-        let button = IconButton::new(button_id, IconName::Eye)
+        let is_source = matches!(preview_type, PreviewType::MarkdownSource);
+        let icon = if is_source {
+            IconName::Pencil
+        } else {
+            IconName::Eye
+        };
+        let button = IconButton::new(button_id, icon)
             .icon_size(IconSize::Small)
             .style(ButtonStyle::Subtle)
             .tooltip(move |_window, cx| {
+                // Going back to the editor has no split variant to advertise.
+                if is_source {
+                    return Tooltip::for_action(tooltip_text, open_action_for_tooltip, cx);
+                }
                 Tooltip::with_meta(
                     tooltip_text,
                     Some(open_action_for_tooltip),
@@ -99,7 +120,7 @@ impl QuickActionBar {
             .on_click(move |_, window, cx| {
                 if let Some(workspace) = workspace_handle.upgrade() {
                     workspace.update(cx, |_, cx| {
-                        if window.modifiers().alt {
+                        if window.modifiers().alt && !is_source {
                             window.dispatch_action(open_to_side_action.boxed_clone(), cx);
                         } else {
                             window.dispatch_action(open_action.boxed_clone(), cx);
