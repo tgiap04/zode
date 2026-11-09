@@ -714,3 +714,59 @@ message RunGitHook {
   uint64 repository_id = 2;
   GitHook hook = 3;
 }
+
+message GitGetGraphPage {
+  uint64 project_id = 1;
+  uint64 repository_id = 2;
+  GitLogSource log_source = 3;
+  GitLogOrder log_order = 4;
+  uint64 offset = 5;
+  uint64 limit = 6;
+  optional uint64 generation = 7;
+}
+
+message GitLogSource {
+  oneof source {
+    bool all = 1;
+    string branch = 2;
+    string sha = 3;
+  }
+}
+
+enum GitLogOrder {
+  DATE_ORDER = 0;
+  TOPO_ORDER = 1;
+  AUTHOR_DATE_ORDER = 2;
+  REVERSE_CHRONOLOGICAL = 3;
+}
+
+message GitGetGraphPageResponse {
+  repeated GitGraphCommit commits = 1;
+  bool is_complete = 2;
+  uint64 generation = 3;
+}
+
+message GitGraphCommit {
+  string sha = 1;
+  repeated string parents = 2;
+  repeated string ref_names = 3;
+}
+
+message GitGetCommitData {
+  uint64 project_id = 1;
+  uint64 repository_id = 2;
+  repeated string shas = 3;
+}
+
+message GitGetCommitDataResponse {
+  repeated GitGraphCommitData commits = 1;
+}
+
+message GitGraphCommitData {
+  string sha = 1;
+  repeated string parents = 2;
+  string author_name = 3;
+  string author_email = 4;
+  int64 commit_timestamp = 5;
+  string subject = 6;
+}

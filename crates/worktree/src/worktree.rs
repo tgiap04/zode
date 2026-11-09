@@ -154,6 +154,7 @@ pub struct PathPrefixScanRequest {
 
 struct ScanRequest {
     relative_paths: Vec<Arc<RelPath>>,
+    full_rescan: bool,
     done: SmallVec<[barrier::Sender; 1]>,
 }
 
@@ -1011,6 +1012,33 @@ impl Worktree {
         }
     }
 
+    pub fn rescan(&mut self, cx: &Context<Worktree>) -> Task<Result<()>> {
+        match self {
+            Worktree::Local(this) => {
+                let mut done = this.rescan();
+                cx.background_spawn(async move {
+                    done.recv().await;
+                    Ok(())
+                })
+            }
+            Worktree::Remote(this) => {
+                let response = this.client.request(proto::RescanWorktree {
+                    project_id: this.project_id,
+                    worktree_id: this.id().to_proto(),
+                });
+                cx.spawn(async move |this, cx| {
+                    let response = response.await?;
+                    this.update(cx, |this, _| {
+                        this.as_remote_mut()
+                            .context("worktree is no longer remote")
+                            .map(|this| this.wait_for_snapshot(response.worktree_scan_id as usize))
+                    })??
+                    .await
+                })
+            }
+        }
+    }
+
     pub async fn handle_create_entry(
         this: Entity<Self>,
         request: proto::CreateProjectEntry,
@@ -1245,6 +1273,7 @@ impl LocalWorktree {
                     executor: background,
                     scan_requests_rx,
                     path_prefixes_to_scan_rx,
+                    pending_full_rescan: Mutex::new(None),
                     next_entry_id,
                     state: async_lock::Mutex::new(BackgroundScannerState {
                         prev_snapshot: snapshot.snapshot.clone(),
@@ -1995,9 +2024,24 @@ impl LocalWorktree {
         self.scan_requests_tx
             .try_send(ScanRequest {
                 relative_paths: paths,
+                full_rescan: false,
                 done: smallvec![tx],
             })
             .ok();
+        rx
+    }
+
+    /// Rescans the whole worktree recursively, picking up entries and git repositories that the
+    /// file watcher missed. The receiver resolves once the rescan is reflected in the snapshot.
+    pub fn rescan(&self) -> barrier::Receiver {
+        let (tx, rx) = barrier::channel();
+        self.scan_requests_tx
+            .try_send(ScanRequest {
+                relative_paths: Vec::new(),
+                full_rescan: true,
+                done: smallvec![tx],
+            })
+            .log_err();
         rx
     }
 
@@ -4022,6 +4066,10 @@ struct BackgroundScanner {
     executor: BackgroundExecutor,
     scan_requests_rx: channel::Receiver<ScanRequest>,
     path_prefixes_to_scan_rx: channel::Receiver<PathPrefixScanRequest>,
+    /// Completion senders of requested full rescans. A full rescan runs `process_events`, which
+    /// can itself pick up scan requests while scanning, so it is deferred to the scanner's main
+    /// loop instead of running nested inside another scan.
+    pending_full_rescan: Mutex<Option<SmallVec<[barrier::Sender; 1]>>>,
     next_entry_id: Arc<AtomicUsize>,
     phase: BackgroundScannerPhase,
     watcher: Arc<dyn Watcher>,
@@ -4194,6 +4242,18 @@ impl BackgroundScanner {
         self.phase = BackgroundScannerPhase::Events;
 
         loop {
+            // A rescan can be requested while another one runs; it is parked again, so keep
+            // draining until none is left before waiting for new work.
+            loop {
+                let pending_full_rescan = self.pending_full_rescan.lock().take();
+                let Some(done) = pending_full_rescan else {
+                    break;
+                };
+                if !self.run_full_rescan(done).await {
+                    return;
+                }
+            }
+
             select_biased! {
                 // Process any path refresh requests from the worktree. Prioritize
                 // these before handling changes reported by the filesystem.
@@ -4248,6 +4308,19 @@ impl BackgroundScanner {
     async fn process_scan_request(&self, mut request: ScanRequest, scanning: bool) -> bool {
         log::debug!("rescanning paths {:?}", request.relative_paths);
 
+        let done = if request.full_rescan {
+            self.pending_full_rescan
+                .lock()
+                .get_or_insert_with(SmallVec::new)
+                .extend(request.done);
+            SmallVec::new()
+        } else {
+            request.done
+        };
+        if request.relative_paths.is_empty() {
+            return done.is_empty() || self.send_status_update(scanning, done, &[]).await;
+        }
+
         request.relative_paths.sort_unstable();
         self.forcibly_load_paths(&request.relative_paths).await;
 
@@ -4290,7 +4363,24 @@ impl BackgroundScanner {
         )
         .await;
 
-        self.send_status_update(scanning, request.done, &[]).await
+        self.send_status_update(scanning, done, &[]).await
+    }
+
+    async fn run_full_rescan(&self, done: SmallVec<[barrier::Sender; 1]>) -> bool {
+        log::debug!("rescanning the whole worktree");
+        let root_path = self.state.lock().await.snapshot.abs_path.clone();
+        // When the root cannot be canonicalized, `process_events` handles a renamed or deleted
+        // root and logs the failure, so the raw root path is enough to reach that handling.
+        let root_event_path = match self.fs.canonicalize(root_path.as_path()).await {
+            Ok(canonical_path) => canonical_path,
+            Err(_) => root_path.as_path().to_path_buf(),
+        };
+        self.process_events(vec![PathEvent {
+            path: root_event_path,
+            kind: Some(fs::PathEventKind::Rescan),
+        }])
+        .await;
+        self.send_status_update(false, done, &[]).await
     }
 
     fn normalized_events_for_worktree(
@@ -5591,6 +5681,7 @@ impl BackgroundScanner {
         let mut request = self.scan_requests_rx.recv().await?;
         while let Ok(next_request) = self.scan_requests_rx.try_recv() {
             request.relative_paths.extend(next_request.relative_paths);
+            request.full_rescan |= next_request.full_rescan;
             request.done.extend(next_request.done);
         }
         Ok(request)

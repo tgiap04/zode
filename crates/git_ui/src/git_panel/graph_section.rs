@@ -22,9 +22,11 @@ fn subject_indent(lanes: usize) -> Pixels {
 /// building this is what asks a repository for graph data, and asking is what starts the fetch.
 pub(super) struct GraphSectionState {
     pub(super) graph_data: GraphData,
-    /// `Branch(_)` is "Auto" — follow HEAD; `All` shows every ref.
-    log_source: LogSource,
-    loaded_for_branch: Option<SharedString>,
+    /// "Auto" follows the checked-out branch; otherwise the section shows every ref.
+    follows_head: bool,
+    /// The log `graph_data` is built from. `None` until one is asked for, and while "Auto" has no
+    /// branch to follow.
+    log_source: Option<LogSource>,
     /// How many commits have already been fed to `graph_data`, so the stream can be appended
     /// rather than rebuilt from scratch on every batch.
     consumed_commits: usize,
@@ -33,48 +35,89 @@ pub(super) struct GraphSectionState {
     pub(super) scroll_handle: UniformListScrollHandle,
 }
 
+/// What the section shows in place of, or above, its rows.
+enum GraphStatus {
+    Failed(SharedString),
+    Empty,
+    Loading,
+    NoBranch,
+}
+
+impl GraphStatus {
+    fn message(&self) -> SharedString {
+        match self {
+            Self::Failed(error) => format!("Could not load the graph: {error}").into(),
+            Self::Empty => "No commits".into(),
+            Self::Loading => "Loading graph…".into(),
+            Self::NoBranch => "No branch checked out".into(),
+        }
+    }
+}
+
 impl GraphSectionState {
     fn is_auto(&self) -> bool {
-        matches!(self.log_source, LogSource::Branch(_))
+        self.follows_head
+    }
+
+    /// Forgets the rows, so the next `ensure_graph_loaded` builds them again from the repository.
+    fn reset(&mut self) {
+        self.log_source = None;
+        self.consumed_commits = 0;
+        self.graph_data.clear();
     }
 }
 
 impl GitPanel {
-    /// Only ever called from the expand path and from the invalidation, never from `render` —
-    /// `Repository::graph_data` starts the fetch.
+    /// Only ever called from the expand path, the status updates and the invalidation, never from
+    /// `render` — `Repository::graph_data` starts the fetch.
     pub(super) fn ensure_graph_loaded(&mut self, cx: &mut Context<Self>) {
         let Some(repository) = self.active_repository.clone() else {
             return;
         };
-        let Some(branch) = self.current_branch_ref(cx) else {
-            return;
-        };
         let accents = accent_colors_count(cx.theme().accents());
-
-        let state = self.graph_section.get_or_insert_with(|| GraphSectionState {
+        self.graph_section.get_or_insert_with(|| GraphSectionState {
             graph_data: GraphData::new(accents),
-            log_source: LogSource::Branch(branch.clone()),
-            loaded_for_branch: None,
+            follows_head: true,
+            log_source: None,
             consumed_commits: 0,
             scroll_handle: UniformListScrollHandle::new(),
         });
+        let log_source = self.graph_log_source(cx);
+        let Some(state) = self.graph_section.as_mut() else {
+            return;
+        };
+        let Some(log_source) = log_source else {
+            state.reset();
+            return;
+        };
 
-        // "Auto" follows HEAD, so a checkout re-resolves which branch is being shown.
-        if state.is_auto() {
-            state.log_source = LogSource::Branch(branch.clone());
-        }
-        if state.loaded_for_branch.as_ref() == Some(&branch) && state.consumed_commits > 0 {
+        // A log the repository already holds is never asked for again from here, failed or not:
+        // this runs on every status update, and only an explicit reload retries a failed log.
+        let is_cached = repository
+            .read(cx)
+            .get_graph_data(log_source.clone(), LogOrder::default())
+            .is_some();
+        if state.log_source.as_ref() == Some(&log_source) && is_cached {
             return;
         }
-        state.loaded_for_branch = Some(branch);
-        state.graph_data.clear();
-        state.consumed_commits = 0;
+        state.reset();
+        state.log_source = Some(log_source.clone());
 
-        let log_source = state.log_source.clone();
         repository.update(cx, |repository, cx| {
-            repository.graph_data(log_source, LogOrder::default(), 0..usize::MAX, cx);
+            repository.graph_data(log_source, LogOrder::default(), 0..0, cx);
         });
         self.sync_graph_section(cx);
+    }
+
+    /// The log the section should show: the checked-out branch on "Auto", which follows HEAD so a
+    /// checkout re-resolves it, and every ref otherwise. `None` on "Auto" with no branch.
+    fn graph_log_source(&self, cx: &App) -> Option<LogSource> {
+        let state = self.graph_section.as_ref()?;
+        if state.follows_head {
+            self.current_branch_ref(cx).map(LogSource::Branch)
+        } else {
+            Some(LogSource::All)
+        }
     }
 
     /// Appends whatever the fetch has streamed in since last time. Reads through `get_graph_data`,
@@ -86,7 +129,9 @@ impl GitPanel {
         let Some(state) = self.graph_section.as_mut() else {
             return;
         };
-        let log_source = state.log_source.clone();
+        let Some(log_source) = state.log_source.clone() else {
+            return;
+        };
         let repository = repository.read(cx);
         let Some(data) = repository.get_graph_data(log_source, LogOrder::default()) else {
             return;
@@ -100,15 +145,23 @@ impl GitPanel {
         cx.notify();
     }
 
+    /// Rebuilds the section from the repository. Runs on the events that drop the repository's
+    /// graph cache and from the reload button, all of them a change the user made or asked for, so
+    /// it is also what fetches a failed log again.
     pub(super) fn invalidate_graph(&mut self, cx: &mut Context<Self>) {
         if self.graph_section.is_none() {
             return;
         }
         if self.section_expanded(PanelSectionKind::Graph) {
             if let Some(state) = self.graph_section.as_mut() {
-                state.loaded_for_branch = None;
-                state.consumed_commits = 0;
-                state.graph_data.clear();
+                state.reset();
+            }
+            if let Some(repository) = self.active_repository.clone()
+                && let Some(log_source) = self.graph_log_source(cx)
+            {
+                repository.update(cx, |repository, cx| {
+                    repository.retry_graph_data(log_source, LogOrder::default(), cx);
+                });
             }
             self.ensure_graph_loaded(cx);
         } else {
@@ -124,18 +177,9 @@ impl GitPanel {
     }
 
     pub(super) fn toggle_graph_log_source(&mut self, cx: &mut Context<Self>) {
-        let Some(branch) = self.current_branch_ref(cx) else {
-            return;
-        };
         if let Some(state) = self.graph_section.as_mut() {
-            state.log_source = if state.is_auto() {
-                LogSource::All
-            } else {
-                LogSource::Branch(branch)
-            };
-            state.loaded_for_branch = None;
-            state.consumed_commits = 0;
-            state.graph_data.clear();
+            state.follows_head = !state.follows_head;
+            state.reset();
         }
         self.ensure_graph_loaded(cx);
     }
@@ -205,23 +249,74 @@ impl GitPanel {
         ]
     }
 
+    #[cfg(test)]
+    pub(super) fn graph_status_message(&self, cx: &App) -> Option<SharedString> {
+        self.graph_status(cx).map(|status| status.message())
+    }
+
+    /// Why the section has nothing (more) to show. Reads through `get_graph_data`, so it never
+    /// starts a fetch and is safe in `render`. An error outranks the other states: a log that died
+    /// partway still has rows, and the reason has to sit beside them.
+    fn graph_status(&self, cx: &App) -> Option<GraphStatus> {
+        let state = self.graph_section.as_ref()?;
+        let repository = self.active_repository.as_ref()?.read(cx);
+        let Some(log_source) = state.log_source.clone() else {
+            if state.follows_head && self.current_branch_ref(cx).is_none() {
+                return Some(GraphStatus::NoBranch);
+            }
+            return Some(GraphStatus::Loading);
+        };
+        let Some(data) = repository.get_graph_data(log_source, LogOrder::default()) else {
+            return Some(GraphStatus::Loading);
+        };
+
+        if let Some(error) = &data.error {
+            return Some(GraphStatus::Failed(error.clone()));
+        }
+        // The section's own rows trail the repository's by one sync, so either one counts.
+        let has_commits = !state.graph_data.commits.is_empty() || !data.commit_data.is_empty();
+        if has_commits {
+            None
+        } else if data.is_loading() {
+            Some(GraphStatus::Loading)
+        } else {
+            Some(GraphStatus::Empty)
+        }
+    }
+
+    fn render_graph_status(status: &GraphStatus) -> Div {
+        let color = match status {
+            GraphStatus::Failed(_) => Color::Error,
+            GraphStatus::Empty | GraphStatus::Loading | GraphStatus::NoBranch => Color::Muted,
+        };
+        h_flex()
+            .w_full()
+            .px_2()
+            .py_1()
+            // Compiles away outside tests, which measure the row through it.
+            .debug_selector(|| "graph-section-status".into())
+            .child(
+                Label::new(status.message())
+                    .size(LabelSize::Small)
+                    .color(color)
+                    .single_line()
+                    .truncate(),
+            )
+    }
+
     fn render_graph_rows(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(state) = self.graph_section.as_ref() else {
             return div().into_any_element();
         };
         let commit_count = state.graph_data.commits.len();
 
+        let status = self.graph_status(cx);
+
         if commit_count == 0 {
-            return h_flex()
-                .w_full()
-                .px_2()
-                .py_1()
-                .child(
-                    Label::new("Loading graph…")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                )
-                .into_any_element();
+            // `None` here is the one-sync gap where the repository has rows the section has not
+            // taken yet; the next repaint draws them.
+            let status = status.unwrap_or(GraphStatus::Loading);
+            return Self::render_graph_status(&status).into_any_element();
         }
 
         // The canvas alone is sized to the whole log: it is absolutely positioned, so its width
@@ -232,7 +327,7 @@ impl GitPanel {
         // below grows the list's width and leaves its height at zero. A `uniform_list` contributes
         // no height of its own, so in a row it renders no rows at all — the lane canvas, which sets
         // `h_full` outright, would be the only thing on screen.
-        v_flex()
+        let rows = v_flex()
             .relative()
             .size_full()
             .child(self.render_lane_canvas(lane_column_width, window, cx))
@@ -277,6 +372,17 @@ impl GitPanel {
                 .flex_1()
                 .track_scroll(&state.scroll_handle),
             )
+            .into_any_element();
+
+        let Some(status) = status else {
+            return rows;
+        };
+        // The lane canvas is absolutely positioned at the top of its container, so the message has
+        // to sit outside that container or every lane would drift a row off its subject.
+        v_flex()
+            .size_full()
+            .child(Self::render_graph_status(&status))
+            .child(v_flex().flex_1().min_h_0().child(rows))
             .into_any_element()
     }
 
@@ -364,9 +470,16 @@ impl GitPanel {
         let data = repository.update(cx, |repository, cx| {
             repository.fetch_commit_data(sha, cx).clone()
         });
-        let subject = match &data {
-            project::git_store::CommitDataState::Loaded(data) => data.subject.clone(),
-            project::git_store::CommitDataState::Loading => SharedString::from("…"),
+        let (subject, subject_color) = match &data {
+            project::git_store::CommitDataState::Loaded(data) => {
+                (data.subject.clone(), Color::Default)
+            }
+            project::git_store::CommitDataState::Loading => {
+                (SharedString::from("…"), Color::Default)
+            }
+            project::git_store::CommitDataState::Failed(_) => {
+                (SharedString::from("Unavailable"), Color::Muted)
+            }
         };
         let sha = SharedString::from(sha.to_string());
         let workspace = self.workspace.clone();
@@ -400,6 +513,7 @@ impl GitPanel {
                 div().flex_1().overflow_hidden().child(
                     Label::new(subject)
                         .size(LabelSize::Small)
+                        .color(subject_color)
                         .single_line()
                         .truncate(),
                 ),

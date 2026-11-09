@@ -61,9 +61,30 @@ worktrees opened together. Like the other sections, you can collapse it from its
 - With no repository open, this section shows "No Git repositories" and, if a folder is open, an
   **Initialize Repository** button.
 - The section shows up to five repositories before it scrolls.
+- The reload button (↻) in the section header rescans every project folder from disk, picking up
+  newly created Git repositories that the file watcher missed. See
+  [Reloading a project folder](./visual-customization.md#project-panel).
 
 You can also switch the active repository from anywhere in Zode via the {#action git::SelectRepo}
 action in the Command Palette.
+
+## Commit Graph
+
+The **Graph** section of the Git Panel and the Git Graph tab (the **Open Git Graph** button in the section header) show the commit history as a graph. The section's **Auto**/**All** button picks the log source: **Auto** follows the checked-out branch, **All** shows every ref.
+
+It also works in WSL and SSH windows: commits are fetched from the host in pages and commit details in batches. See [Remote Development](./remote-development.md#the-git-graph-in-remote-windows).
+
+Instead of rows, the section can show:
+
+| Message                                     | Meaning                                                                                                       |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| "Loading graph…"                            | The commits are still being fetched.                                                                          |
+| "No commits"                                | The log has no commits.                                                                                       |
+| "No branch checked out"                     | **Auto** with a detached HEAD. Switch to **All** to load the graph anyway.                                    |
+| "Could not load the graph: _error_"         | The log failed. It is not retried automatically; reload the panel, or reopen the Git Graph tab, to try again. |
+| "Git graph is not supported for collab yet" | Collab guests do not get the graph.                                                                           |
+
+A commit whose details cannot be read shows "Unavailable". A branch name that starts with `-` is refused as a log source.
 
 ## Project Diff
 

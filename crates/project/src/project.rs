@@ -80,7 +80,7 @@ pub use environment::ProjectEnvironment;
 use futures::{
     StreamExt,
     channel::mpsc::{self, UnboundedReceiver},
-    future::try_join_all,
+    future::{FutureExt as _, Shared, try_join_all},
 };
 pub use image_store::{ImageItem, ImageStore};
 use image_store::{ImageItemEvent, ImageStoreEvent};
@@ -270,6 +270,9 @@ pub struct Project {
     /// Every host built for this project that is still in use, kept or not.
     command_host_followers: Vec<std::sync::Weak<command_host::RemoteCommandHost>>,
     command_host_observer: Option<gpui::Subscription>,
+    /// The rescan in flight for each worktree, so that a second reload joins the first instead
+    /// of queueing another full scan. An entry is removed when its rescan finishes.
+    worktree_rescans: HashMap<WorktreeId, Shared<Task<Result<(), Arc<anyhow::Error>>>>>,
 }
 
 struct DownloadingFile {
@@ -1421,6 +1424,7 @@ impl Project {
                 remote_command_host: None,
                 command_host_followers: Vec::new(),
                 command_host_observer: None,
+                worktree_rescans: HashMap::default(),
             }
         })
     }
@@ -1666,6 +1670,7 @@ impl Project {
                 remote_command_host: None,
                 command_host_followers: Vec::new(),
                 command_host_observer: None,
+                worktree_rescans: HashMap::default(),
             };
 
             // remote server -> local machine handlers
@@ -2516,6 +2521,60 @@ impl Project {
             })?;
             Ok(())
         }))
+    }
+
+    /// Rescans the whole worktree on the machine that owns it and re-reads every repository in
+    /// it, picking up files and repositories the file watcher missed. A call made while a rescan
+    /// of the same worktree is running waits for that rescan instead of starting another.
+    pub fn rescan_worktree(
+        &mut self,
+        worktree_id: WorktreeId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        // Collab hosts do not forward this request, so a guest would wait for nothing.
+        if self.is_via_collab() {
+            return Task::ready(Err(anyhow!(
+                "Reload is not available to guests of a shared project"
+            )));
+        }
+        let rescan = match self.worktree_rescans.get(&worktree_id) {
+            Some(rescan) => rescan.clone(),
+            None => {
+                let Some(worktree) = self.worktree_for_id(worktree_id, cx) else {
+                    return Task::ready(Err(anyhow!("no worktree with id {worktree_id}")));
+                };
+                let worktree_rescan = worktree.update(cx, |worktree, cx| worktree.rescan(cx));
+                let git_store = self.git_store.clone();
+                let rescan = cx
+                    .spawn(async move |this, cx| {
+                        let result = match worktree_rescan.await {
+                            Ok(()) => {
+                                git_store
+                                    .update(cx, |git_store, cx| {
+                                        git_store.rescan_repositories_in_worktree(worktree_id, cx)
+                                    })
+                                    .await;
+                                Ok(())
+                            }
+                            Err(error) => Err(Arc::new(anyhow!(rescan_error_message(&error)))),
+                        };
+                        this.update(cx, |this, _| {
+                            this.worktree_rescans.remove(&worktree_id);
+                        })
+                        .log_err();
+                        result
+                    })
+                    .shared();
+                self.worktree_rescans.insert(worktree_id, rescan.clone());
+                rescan
+            }
+        };
+        cx.background_spawn(async move { rescan.await.map_err(|error| anyhow!("{error:#}")) })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn has_worktree_rescan_in_flight(&self, worktree_id: WorktreeId) -> bool {
+        self.worktree_rescans.contains_key(&worktree_id)
     }
 
     pub fn shared(&mut self, project_id: u64, cx: &mut Context<Self>) -> Result<()> {
@@ -3485,6 +3544,9 @@ impl Project {
     ) {
         match event {
             &remote::RemoteClientEvent::Disconnected { server_not_running } => {
+                // A remote rescan waits for a snapshot that will no longer arrive; drop it so a
+                // later reload starts over instead of joining it.
+                self.worktree_rescans.clear();
                 self.worktree_store.update(cx, |store, cx| {
                     store.disconnected_from_host(cx);
                 });
@@ -3568,6 +3630,7 @@ impl Project {
                 self.emit_group_key_changed_if_needed(cx);
             }
             WorktreeStoreEvent::WorktreeRemoved(_, id) => {
+                self.worktree_rescans.remove(id);
                 cx.emit(Event::WorktreeRemoved(*id));
                 self.emit_group_key_changed_if_needed(cx);
             }
@@ -6628,6 +6691,23 @@ impl ProjectGroupKey {
 
     pub fn host(&self) -> Option<RemoteConnectionOptions> {
         self.host.clone()
+    }
+}
+
+/// Turns a failed worktree rescan into text a user can act on.
+pub fn rescan_error_message(error: &anyhow::Error) -> String {
+    remote_request_error_message(error, "Reconnect to update it, then reload again.")
+}
+
+/// Turns a failed request to a remote server into text a user can act on. A server that predates
+/// the request answers it as an unknown message, which means nothing to the user, so that case
+/// says the server is outdated followed by `remedy`.
+pub(crate) fn remote_request_error_message(error: &anyhow::Error, remedy: &str) -> String {
+    let message = format!("{error:#}");
+    if message.contains("no handler registered") {
+        format!("The remote server is older than this version of Zode. {remedy}")
+    } else {
+        message
     }
 }
 

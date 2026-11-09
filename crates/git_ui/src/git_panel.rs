@@ -286,6 +286,9 @@ struct SerializedGitPanel {
     commits_section_height: Option<f32>,
     #[serde(default)]
     graph_section_height: Option<f32>,
+    /// `None` until the `Repositories` section is first resized, and in older blobs.
+    #[serde(default)]
+    repositories_section_height: Option<f32>,
 }
 
 // The enum mirrors `SectionCollapseState`, which persists all four sections so that a fold
@@ -738,6 +741,14 @@ pub struct GitPanel {
     /// Repositories section on every render. This is rebuilt off the render path, on the events
     /// that change the repository set.
     sorted_repo_ids: Vec<RepositoryId>,
+    /// Single-flight guard for the Repositories header's reload, and what keeps its spinner up.
+    reloading_repositories: bool,
+    _reload_repositories_task: Option<Task<()>>,
+    /// `None` keeps the rows at their natural height, up to [`MAX_REPOSITORY_ROWS_HEIGHT`]. Set once
+    /// the user drags the section's bottom edge, after which the height no longer follows the
+    /// number of repositories.
+    repositories_section_height: Option<Pixels>,
+    repositories_resize_drag_start: Option<Pixels>,
     commits_section: Option<CommitsSectionState>,
     commits_section_height: Pixels,
     /// Pointer position at the last resize step, so the drag can move by delta.
@@ -755,8 +766,12 @@ struct BulkStaging {
 
 const MAX_PANEL_EDITOR_LINES: usize = 6;
 
-/// Five rows of `RepositoryRow`, which is `px(36.)` tall.
+const REPOSITORY_ROW_HEIGHT: Pixels = px(36.);
+/// Five rows of `RepositoryRow`.
 const MAX_REPOSITORY_ROWS_HEIGHT: Pixels = px(180.);
+/// A rescan of a small folder finishes in a frame, and an icon that spins for one frame reads as
+/// a click that did nothing.
+const MIN_RELOAD_SPINNER: Duration = Duration::from_millis(500);
 
 const COMMITS_SECTION_DEFAULT_HEIGHT: Pixels = px(200.);
 const COMMITS_SECTION_MIN_HEIGHT: Pixels = px(80.);
@@ -792,6 +807,21 @@ fn height_dragged_from_top_edge(height: Pixels, previous_y: Pixels, position_y: 
     (height + (previous_y - position_y))
         .clamp(COMMITS_SECTION_MIN_HEIGHT, COMMITS_SECTION_MAX_HEIGHT)
 }
+
+/// The `Repositories` handle sits on the section's *bottom* edge, so unlike
+/// [`height_dragged_from_top_edge`] dragging it down makes the section taller, and `Changes` below
+/// gives up the space.
+fn height_dragged_from_bottom_edge(
+    height: Pixels,
+    previous_y: Pixels,
+    position_y: Pixels,
+) -> Pixels {
+    (height + (position_y - previous_y)).clamp(REPOSITORY_ROW_HEIGHT, COMMITS_SECTION_MAX_HEIGHT)
+}
+
+/// Marks the drag that resizes the `Repositories` section.
+#[derive(Clone)]
+struct DraggedRepositoriesSectionHandle;
 
 /// Marks the drag that resizes the `Commits` section.
 #[derive(Clone)]
@@ -1020,6 +1050,10 @@ impl GitPanel {
                 section_collapse: SectionCollapseState::default(),
                 zoomed: false,
                 sorted_repo_ids: Vec::new(),
+                reloading_repositories: false,
+                _reload_repositories_task: None,
+                repositories_section_height: None,
+                repositories_resize_drag_start: None,
                 commits_section: None,
                 commits_section_height: COMMITS_SECTION_DEFAULT_HEIGHT,
                 commits_resize_drag_start: None,
@@ -1115,6 +1149,7 @@ impl GitPanel {
             section_collapse: Some(self.section_collapse),
             commits_section_height: Some(f32::from(self.commits_section_height)),
             graph_section_height: Some(f32::from(self.graph_section_height)),
+            repositories_section_height: self.repositories_section_height.map(f32::from),
         }
     }
 
@@ -1133,6 +1168,10 @@ impl GitPanel {
             .map(px)
             .map(|height| height.clamp(COMMITS_SECTION_MIN_HEIGHT, COMMITS_SECTION_MAX_HEIGHT))
             .unwrap_or(COMMITS_SECTION_DEFAULT_HEIGHT);
+        self.repositories_section_height = serialized
+            .repositories_section_height
+            .map(px)
+            .map(|height| height.clamp(REPOSITORY_ROW_HEIGHT, COMMITS_SECTION_MAX_HEIGHT));
         cx.notify();
     }
 
@@ -4437,6 +4476,12 @@ impl Render for GitPanel {
             .on_action(cx.listener(Self::toggle_sort_by_path))
             .on_action(cx.listener(Self::toggle_tree_view))
             .on_action(cx.listener(Self::toggle_zoom))
+            .on_drag_move::<DraggedRepositoriesSectionHandle>(
+                cx.listener(Self::resize_repositories_section),
+            )
+            .on_drop::<DraggedRepositoriesSectionHandle>(cx.listener(|this, _, _, cx| {
+                this.end_repositories_section_resize(cx);
+            }))
             .on_drag_move::<DraggedCommitsSectionHandle>(cx.listener(Self::resize_commits_section))
             .on_drop::<DraggedCommitsSectionHandle>(cx.listener(|this, _, _, cx| {
                 this.end_commits_section_resize(cx);
@@ -4902,7 +4947,7 @@ impl RenderOnce for RepositoryRow {
 
         h_flex()
             .id(("repository-row", repo_id.map_or(0, |id| id.0)))
-            .h(px(36.))
+            .h(REPOSITORY_ROW_HEIGHT)
             .w_full()
             .px_2()
             .justify_between()

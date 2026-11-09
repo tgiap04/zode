@@ -56,7 +56,7 @@ use collections::{BTreeMap, btree_map};
 use fake_git_repo::FakeGitRepositoryState;
 #[cfg(feature = "test-support")]
 use git::{
-    repository::{InitialGraphCommitData, RepoPath, Worktree, repo_path},
+    repository::{GraphCommitData, InitialGraphCommitData, RepoPath, Worktree, repo_path},
     status::{FileStatus, StatusCode, TrackedStatus, UnmergedStatus},
 };
 #[cfg(feature = "test-support")]
@@ -2238,11 +2238,35 @@ impl FakeFs {
         .unwrap();
     }
 
+    pub fn set_graph_commit_details(&self, dot_git: &Path, details: Vec<GraphCommitData>) {
+        self.with_git_state(dot_git, true, |state| {
+            state.graph_commit_details = details
+                .into_iter()
+                .map(|commit| (commit.sha, commit))
+                .collect();
+        })
+        .unwrap();
+    }
+
     pub fn set_graph_error(&self, dot_git: &Path, error: Option<String>) {
         self.with_git_state(dot_git, true, |state| {
             state.simulated_graph_error = error;
         })
         .unwrap();
+    }
+
+    pub fn set_commit_data_error(&self, dot_git: &Path, error: Option<String>) {
+        self.with_git_state(dot_git, true, |state| {
+            state.simulated_commit_data_error = error;
+        })
+        .unwrap();
+    }
+
+    /// How many graph logs the repository has started, so a test can tell a cached graph from a
+    /// refetched one.
+    pub fn graph_fetch_count(&self, dot_git: &Path) -> usize {
+        self.with_git_state(dot_git, false, |state| state.graph_fetch_count)
+            .unwrap()
     }
 
     /// Put the given git repository into a state with the given status,

@@ -3,6 +3,8 @@ mod headless_terminals;
 
 #[cfg(test)]
 mod remote_editing_tests;
+#[cfg(test)]
+mod remote_git_graph_tests;
 
 #[cfg(windows)]
 pub mod windows;
