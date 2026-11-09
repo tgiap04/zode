@@ -863,6 +863,10 @@ calloop = { git = "https://github.com/zed-industries/calloop" }
 
 [profile.dev]
 split-debuginfo = "unpacked"
+# Line tables keep backtraces readable at a fraction of full debug info's size. Set here rather
+# than by `make build` alone: a build with any other debug level is a second copy of every crate,
+# and switching between `make build` and a plain `cargo test` would rebuild nearly everything.
+debug = "line-tables-only"
 incremental = true
 codegen-units = 16
 
