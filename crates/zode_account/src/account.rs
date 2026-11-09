@@ -297,13 +297,13 @@ impl Account {
 
     /// Reads the plan from the server.
     ///
-    /// Called only where the user did something: signing in, opening the
-    /// account menu or a sync window, a request the plan just refused, and
-    /// team sharing finding the membership gone.
-    /// Never at restore and never on a timer -- the README lists this request
-    /// with exactly those triggers, and `offline_invariants.rs` holds it to
-    /// them. Signed out, it sends nothing. A read already in flight is joined
-    /// rather than repeated.
+    /// Called when a saved session is restored, and otherwise only where the
+    /// user did something: signing in, opening the account menu or a sync
+    /// window, a request the plan just refused, and team sharing finding the
+    /// membership gone. Never on a timer -- `docs/src/account.md` lists this
+    /// request with exactly those triggers, and `offline_invariants.rs` holds
+    /// it to them. Signed out, it sends nothing. A read already in flight is
+    /// joined rather than repeated.
     pub fn refresh_plan(&mut self, cx: &mut gpui::Context<Self>) {
         if self.tokens.is_none() || !self.status.is_signed_in() || self.plan_request.is_some() {
             return;
@@ -630,6 +630,10 @@ impl Account {
                             this.tokens = Some(tokens);
                             this.record_save(persisted, 0, finished_at, cx);
                             this.set_status(AccountStatus::SignedIn(user), cx);
+                            // The status bar names a paid plan from the start, so a session
+                            // that came back reads it once. Not when the server could not be
+                            // reached: the next moment the user acts reads it then.
+                            this.refresh_plan(cx);
                         }
                         Err(IdentityError::Unauthorized) => {
                             this.forget_locally(cx);
@@ -720,8 +724,7 @@ impl Account {
                     _ = this.update(cx, |this, cx| {
                         this.tokens = Some(tokens);
                         this.set_status(AccountStatus::SignedIn(user), cx);
-                        // Signing in is one of the moments the plan is read;
-                        // restoring a saved session is not.
+                        // Signing in is one of the moments the plan is read.
                         this.refresh_plan(cx);
                     });
                 }

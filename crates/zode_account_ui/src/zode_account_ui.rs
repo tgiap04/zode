@@ -7,6 +7,7 @@
 //! sidebar.
 
 mod diff_modal;
+mod plan_badge;
 mod recovery_key_modal;
 mod sign_in_modal;
 mod sync_modal;
@@ -18,6 +19,7 @@ use zode_account::{Account, AccountStatus, PlanSource, PlanStatus, PlanSummary, 
 use zode_sync::{SyncSession, SyncStatus};
 
 pub use diff_modal::DiffModal;
+pub use plan_badge::{PlanBadge, PlanBadgeKind, plan_badge};
 pub use recovery_key_modal::{RecoveryKeyModal, RecoveryKeyMode};
 pub use sign_in_modal::SignInModal;
 pub use sync_modal::SyncModal;
