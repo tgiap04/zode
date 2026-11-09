@@ -10,6 +10,7 @@
 mod connection_modal;
 mod connection_modal_download;
 mod connection_modal_render;
+mod connection_modal_url_import;
 mod connection_store;
 mod connection_tree;
 mod database_panel;
@@ -22,6 +23,7 @@ mod password_prompt;
 mod query;
 mod render;
 mod result_grid;
+mod row_detail;
 mod session;
 mod standalone;
 mod team_connections;

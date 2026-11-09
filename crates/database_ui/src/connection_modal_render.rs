@@ -338,6 +338,7 @@ impl ConnectionModal {
                         .max_h(LIST_HEIGHT)
                         .overflow_y_scroll()
                         .child(self.render_group(0, None, vec![("Name", self.name_editor.clone())]))
+                        .children(self.render_url_import(cx))
                         .children(self.render_driver_groups(cx))
                         .children(self.render_status(cx)),
                 ),

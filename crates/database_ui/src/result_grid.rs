@@ -77,39 +77,87 @@ impl DatabasePanel {
                 let result = Rc::new(page.result.clone());
                 let columns = result.columns.len();
                 let row_count = result.rows.len();
+                let selected_row = page.selected_row;
+                let selected_background = cx.theme().colors().element_selected;
+                let panel = cx.entity().downgrade();
+
+                let grid = div().flex_1().min_w_0().min_h_0().overflow_hidden().child(
+                    // Virtualised even though a page is bounded: `page_size`
+                    // is a setting, and someone will set it to 10_000.
+                    Table::new(columns)
+                        .striped()
+                        .header(
+                            result
+                                .columns
+                                .iter()
+                                .map(|column| {
+                                    Label::new(column.name.clone())
+                                        .size(LabelSize::Small)
+                                        .truncate()
+                                })
+                                .collect::<Vec<_>>(),
+                        )
+                        .uniform_list("database-results", row_count, {
+                            let result = result.clone();
+                            move |range, _window, _cx| {
+                                range
+                                    .filter_map(|index| result.rows.get(index))
+                                    .map(|row| row.iter().map(render_cell).collect::<Vec<_>>())
+                                    .collect()
+                            }
+                        })
+                        .map_row(move |(index, row), _window, _cx| {
+                            let panel = panel.clone();
+                            row.debug_selector(move || format!("database-result-row-{index}"))
+                                .cursor_pointer()
+                                .when(selected_row == Some(index), |row| {
+                                    row.bg(selected_background)
+                                })
+                                .on_click(move |_event, _window, cx| {
+                                    panel
+                                        .update(cx, |panel, cx| panel.toggle_row_detail(index, cx))
+                                        .ok();
+                                })
+                                .into_any_element()
+                        }),
+                );
+
+                // Beside the rows when the view is wide; under them in the
+                // docked column, where a side pane would leave neither readable.
+                let side_by_side = self.side_by_side();
+                let detail = page.selected().map(|(index, row)| {
+                    let detail = self.render_row_detail(page, index, row, cx);
+                    let border = cx.theme().colors().border;
+                    if side_by_side {
+                        div()
+                            .flex_none()
+                            .w(rems(20.))
+                            .h_full()
+                            .border_l_1()
+                            .border_color(border)
+                            .child(detail)
+                    } else {
+                        div()
+                            .flex_none()
+                            .w_full()
+                            .h(relative(0.5))
+                            .border_t_1()
+                            .border_color(border)
+                            .child(detail)
+                    }
+                });
 
                 v_flex()
                     .size_full()
                     .min_h_0()
                     .child(
-                        // Virtualised even though a page is bounded: `page_size`
-                        // is a setting, and someone will set it to 10_000.
-                        div().flex_1().min_h_0().overflow_hidden().child(
-                            Table::new(columns)
-                                .striped()
-                                .header(
-                                    result
-                                        .columns
-                                        .iter()
-                                        .map(|column| {
-                                            Label::new(column.name.clone())
-                                                .size(LabelSize::Small)
-                                                .truncate()
-                                        })
-                                        .collect::<Vec<_>>(),
-                                )
-                                .uniform_list("database-results", row_count, {
-                                    let result = result.clone();
-                                    move |range, _window, _cx| {
-                                        range
-                                            .filter_map(|index| result.rows.get(index))
-                                            .map(|row| {
-                                                row.iter().map(render_cell).collect::<Vec<_>>()
-                                            })
-                                            .collect()
-                                    }
-                                }),
-                        ),
+                        div()
+                            .flex()
+                            .when(!side_by_side, |body| body.flex_col())
+                            .flex_1()
+                            .min_h_0()
+                            .child(grid)
+                            .children(detail),
                     )
                     .child(self.render_pager(cx))
                     .into_any_element()

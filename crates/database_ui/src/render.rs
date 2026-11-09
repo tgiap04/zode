@@ -35,6 +35,11 @@ impl Render for DatabasePanel {
                     this.copy_page_as_csv(cx)
                 }),
             )
+            .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| {
+                if !this.close_row_detail(cx) {
+                    cx.propagate();
+                }
+            }))
             .size_full()
             .min_h_0()
             // For the measuring canvas below, which is positioned against this.

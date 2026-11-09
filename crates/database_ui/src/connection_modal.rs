@@ -119,6 +119,11 @@ pub(crate) struct ConnectionModal {
     pub(crate) name_editor: Entity<InputField>,
     pub(crate) test: TestState,
     pub(crate) error: Option<SharedString>,
+    /// Where a URL is pasted to fill the chosen engine's form.
+    pub(crate) url_import: Entity<InputField>,
+    /// What the last import filled, and what the URL held that the form has no
+    /// field for.
+    pub(crate) url_import_note: Option<SharedString>,
     _task: Option<Task<()>>,
     _test_task: Option<Task<()>>,
     _refresh_task: Task<()>,
@@ -135,6 +140,7 @@ impl ConnectionModal {
         cx: &mut Context<Self>,
     ) -> Self {
         let name_editor = cx.new(|cx| InputField::new(window, cx, "Connection name"));
+        let url_import = cx.new(|cx| InputField::new(window, cx, "Paste a connection URL"));
         let search_editor = cx
             .new(|cx| InputField::new(window, cx, "Search").start_icon(IconName::MagnifyingGlass));
         // Redrawn on every keystroke so the list narrows as it is typed.
@@ -175,6 +181,8 @@ impl ConnectionModal {
             name_editor,
             test: TestState::Untested,
             error: None,
+            url_import,
+            url_import_note: None,
             _task: None,
             _test_task: None,
             _refresh_task: refresh_task,
@@ -383,6 +391,9 @@ impl ConnectionModal {
             });
         }
         self.test = TestState::Untested;
+        self.url_import_note = None;
+        self.url_import
+            .update(cx, |input, cx| input.set_text("", window, cx));
         self.step = Step::Filling {
             engine,
             form,
@@ -414,7 +425,7 @@ impl ConnectionModal {
     }
 
     /// Reads the form, and says what is missing rather than saving half of it.
-    fn filled(&self, cx: &App) -> Result<Filled, SharedString> {
+    pub(crate) fn filled(&self, cx: &App) -> Result<Filled, SharedString> {
         let Step::Filling {
             engine,
             form,
@@ -592,13 +603,13 @@ impl ConnectionModal {
 }
 
 /// A form that has been read and found complete.
-struct Filled {
+pub(crate) struct Filled {
     name: String,
     driver: String,
-    url: String,
+    pub(crate) url: String,
     /// Kept apart from `url` the whole way down: this goes to the keychain and
     /// nowhere else.
-    secret: Option<String>,
+    pub(crate) secret: Option<String>,
 }
 
 impl Filled {
