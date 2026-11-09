@@ -114,7 +114,9 @@ impl Watcher for FsWatcher {
 
                     let is_rescan_event = event.need_rescan();
                     if is_rescan_event {
-                        log::warn!(
+                        // `handle_event` warns once per lost sync; every watched
+                        // directory sees it, so a warning here filled the log.
+                        log::trace!(
                             "filesystem watcher lost sync for {callback_path:?}; scheduling rescan"
                         );
                         // we only keep the first event per path below, this ensures it will be the rescan event
@@ -219,10 +221,93 @@ struct WatcherRegistrationState {
     path: Arc<std::path::Path>,
 }
 
+#[derive(Default)]
 struct WatcherState {
     watchers: HashMap<WatcherRegistrationId, WatcherRegistrationState>,
     path_registrations: HashMap<Arc<std::path::Path>, u32>,
+    /// Registrations by their sanitized path, the form a registration's
+    /// callback compares event paths against.
+    registrations_by_path: HashMap<Arc<std::path::Path>, Vec<WatcherRegistrationId>>,
     last_registration: WatcherRegistrationId,
+}
+
+impl WatcherState {
+    fn insert(
+        &mut self,
+        path: Arc<std::path::Path>,
+        callback: Arc<dyn Fn(&notify::Event) + Send + Sync>,
+    ) -> WatcherRegistrationId {
+        let id = self.last_registration;
+        self.last_registration = WatcherRegistrationId(id.0 + 1);
+        self.registrations_by_path
+            .entry(SanitizedPath::new(path.as_ref()).as_path().into())
+            .or_default()
+            .push(id);
+        self.watchers.insert(
+            id,
+            WatcherRegistrationState {
+                callback,
+                path: path.clone(),
+            },
+        );
+        *self.path_registrations.entry(path).or_insert(0) += 1;
+        id
+    }
+
+    /// Forgets a registration. Returns its path when that was the path's last
+    /// registration, so the caller stops watching it.
+    fn remove_registration(&mut self, id: WatcherRegistrationId) -> Option<Arc<std::path::Path>> {
+        let registration_state = self.watchers.remove(&id)?;
+        let sanitized: &std::path::Path =
+            SanitizedPath::new(registration_state.path.as_ref()).as_path();
+        if let Some(ids) = self.registrations_by_path.get_mut(sanitized) {
+            ids.retain(|registered| *registered != id);
+            if ids.is_empty() {
+                self.registrations_by_path.remove(sanitized);
+            }
+        }
+
+        let count = self.path_registrations.get_mut(&registration_state.path)?;
+        *count -= 1;
+        if *count > 0 {
+            return None;
+        }
+        self.path_registrations.remove(&registration_state.path);
+        Some(registration_state.path)
+    }
+
+    /// The callbacks an event concerns: those registered on a path of the
+    /// event or on one of its ancestors -- every other callback would discard
+    /// it. Handing each event to every callback costs as much as there are
+    /// watched directories, and with one per directory on Linux a large tree
+    /// slowed the event thread until the kernel queue overflowed.
+    fn callbacks_for(
+        &self,
+        event: &notify::Event,
+    ) -> Vec<Arc<dyn Fn(&notify::Event) + Send + Sync>> {
+        if event.need_rescan() {
+            return self
+                .watchers
+                .values()
+                .map(|registration| registration.callback.clone())
+                .collect();
+        }
+
+        let mut ids = event
+            .paths
+            .iter()
+            .flat_map(|path| SanitizedPath::new(path).as_path().ancestors())
+            .filter_map(|ancestor| self.registrations_by_path.get(ancestor))
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        ids.sort_unstable_by_key(|id| id.0);
+        ids.dedup();
+        ids.iter()
+            .filter_map(|id| self.watchers.get(id))
+            .map(|registration| registration.callback.clone())
+            .collect()
+    }
 }
 
 pub struct GlobalWatcher {
@@ -269,39 +354,17 @@ impl GlobalWatcher {
             state = self.state.lock();
         }
 
-        let id = state.last_registration;
-        state.last_registration = WatcherRegistrationId(id.0 + 1);
-
-        let registration_state = WatcherRegistrationState {
-            callback: Arc::new(cb),
-            path: path.clone(),
-        };
-        state.watchers.insert(id, registration_state);
-        *state.path_registrations.entry(path).or_insert(0) += 1;
-
-        Ok(id)
+        Ok(state.insert(path, Arc::new(cb)))
     }
 
     pub fn remove(&self, id: WatcherRegistrationId) {
         use notify::Watcher;
         let mut state = self.state.lock();
-        let Some(registration_state) = state.watchers.remove(&id) else {
+        let Some(unwatched_path) = state.remove_registration(id) else {
             return;
         };
-
-        let Some(count) = state.path_registrations.get_mut(&registration_state.path) else {
-            return;
-        };
-        *count -= 1;
-        if *count == 0 {
-            state.path_registrations.remove(&registration_state.path);
-
-            drop(state);
-            self.watcher
-                .lock()
-                .unwatch(&registration_state.path)
-                .log_err();
-        }
+        drop(state);
+        self.watcher.lock().unwatch(&unwatched_path).log_err();
     }
 }
 
@@ -333,6 +396,88 @@ mod tests {
         path_events: Vec<PathEvent>,
         expected_pending_paths: Vec<PathEvent>,
         expected_path_events: Vec<PathEvent>,
+    }
+
+    fn recording_state(paths: &[&str]) -> (WatcherState, Arc<Mutex<Vec<String>>>) {
+        let called = Arc::new(Mutex::new(Vec::new()));
+        let mut state = WatcherState::default();
+        for path in paths {
+            let called = called.clone();
+            let name = path.to_string();
+            state.insert(
+                Arc::from(Path::new(path)),
+                Arc::new(move |_: &notify::Event| called.lock().push(name.clone())),
+            );
+        }
+        (state, called)
+    }
+
+    fn dispatched(
+        state: &WatcherState,
+        called: &Mutex<Vec<String>>,
+        event: &notify::Event,
+    ) -> Vec<String> {
+        called.lock().clear();
+        for callback in state.callbacks_for(event) {
+            callback(event);
+        }
+        let mut names = called.lock().clone();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn an_event_reaches_only_the_registrations_above_it() {
+        let (state, called) = recording_state(&["/root", "/root/src", "/root/src/deep", "/other"]);
+
+        let edit = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(PathBuf::from("/root/src/main.rs"));
+        assert_eq!(dispatched(&state, &called, &edit), ["/root", "/root/src"]);
+
+        let rename = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(PathBuf::from("/root/src/deep/a.rs"))
+            .add_path(PathBuf::from("/other/b.rs"));
+        assert_eq!(
+            dispatched(&state, &called, &rename),
+            ["/other", "/root", "/root/src", "/root/src/deep"],
+            "each path of the event reaches its own ancestors, once each"
+        );
+
+        let elsewhere = notify::Event::new(EventKind::Create(notify::event::CreateKind::Any))
+            .add_path(PathBuf::from("/unwatched/file"));
+        assert!(dispatched(&state, &called, &elsewhere).is_empty());
+    }
+
+    #[test]
+    fn a_lost_sync_event_reaches_every_registration() {
+        let (state, called) = recording_state(&["/root", "/root/src", "/other"]);
+        // An overflowed queue names no path: every watcher has to rescan.
+        let overflow = notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        assert_eq!(
+            dispatched(&state, &called, &overflow),
+            ["/other", "/root", "/root/src"]
+        );
+    }
+
+    #[test]
+    fn a_removed_registration_no_longer_receives_events() {
+        let (mut state, called) = recording_state(&["/root", "/root/src"]);
+        let id = state.registrations_by_path[Path::new("/root/src")][0];
+        state.remove_registration(id);
+
+        let edit = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(PathBuf::from("/root/src/main.rs"));
+        assert_eq!(dispatched(&state, &called, &edit), ["/root"]);
+        assert!(
+            !state
+                .registrations_by_path
+                .contains_key(Path::new("/root/src"))
+        );
+        assert!(
+            !state
+                .path_registrations
+                .contains_key(Path::new("/root/src"))
+        );
     }
 
     #[test]
@@ -410,14 +555,13 @@ fn handle_event(event: Result<notify::Event, notify::Error>) {
         return;
     };
     global::<()>(move |watcher| {
-        let callbacks = {
-            let state = watcher.state.lock();
-            state
-                .watchers
-                .values()
-                .map(|r| r.callback.clone())
-                .collect::<Vec<_>>()
-        };
+        let callbacks = watcher.state.lock().callbacks_for(&event);
+        if event.need_rescan() {
+            log::warn!(
+                "filesystem watcher lost sync; rescanning {} registrations",
+                callbacks.len()
+            );
+        }
         for callback in callbacks {
             callback(&event);
         }
@@ -428,11 +572,7 @@ fn handle_event(event: Result<notify::Event, notify::Error>) {
 pub fn global<T>(f: impl FnOnce(&GlobalWatcher) -> T) -> anyhow::Result<T> {
     let result = FS_WATCHER_INSTANCE.get_or_init(|| {
         notify::recommended_watcher(handle_event).map(|file_watcher| GlobalWatcher {
-            state: Mutex::new(WatcherState {
-                watchers: Default::default(),
-                path_registrations: Default::default(),
-                last_registration: Default::default(),
-            }),
+            state: Mutex::new(WatcherState::default()),
             watcher: Mutex::new(file_watcher),
         })
     });
