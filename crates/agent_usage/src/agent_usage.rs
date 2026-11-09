@@ -29,7 +29,7 @@ use settings::AgentUsageDisplay;
 use ui::prelude::*;
 use ui::{
     ButtonLike, CommonAnimationExt as _, ContextMenu, IconPosition, PopoverMenu, PopoverMenuHandle,
-    right_click_menu,
+    ProgressBar, right_click_menu,
 };
 use workspace::{ItemHandle, StatusBarSettings, StatusItemView, item::Settings as _};
 
@@ -529,27 +529,32 @@ impl Render for AgentUsageIndicator {
                 })
                 .collect::<Vec<_>>()
         } else {
+            let mut position = 0;
             Self::visible_sources(&sources, settings)
                 .map(|source| {
                     // Compact keeps one window per agent rather than one window
                     // overall: which agent a number belongs to is the thing the icon
                     // is there to say, and dropping an agent entirely would make its
                     // icon disappear rather than its detail.
-                    let line = if compact {
-                        most_constrained(&source.windows, now)
-                            .map(|window| render_window(window, now))
-                            .unwrap_or_default()
+                    let windows: Vec<&UsageWindow> = if compact {
+                        most_constrained(&source.windows, now).into_iter().collect()
                     } else {
-                        render_windows(&source.windows, now)
+                        source.windows.iter().collect()
                     };
-                    h_flex()
-                        .gap_1()
-                        .child(
-                            Icon::new(agent_icon(&source.agent))
-                                .size(IconSize::Small)
-                                .color(Color::Muted),
-                        )
-                        .child(Label::new(line).size(LabelSize::Small).color(Color::Muted))
+                    let mut row = h_flex().gap_1().child(
+                        Icon::new(agent_icon(&source.agent))
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
+                    );
+                    for (index, window) in windows.into_iter().enumerate() {
+                        if index > 0 {
+                            row = row
+                                .child(Label::new("·").size(LabelSize::Small).color(Color::Muted));
+                        }
+                        row = row.child(render_window_item(window, now, position, cx));
+                        position += 1;
+                    }
+                    row
                 })
                 .collect::<Vec<_>>()
         };
@@ -764,6 +769,63 @@ pub fn render_window(window: &UsageWindow, now: DateTime<Utc>) -> String {
     rendered
 }
 
+/// How full a window is, for the colour of its bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UsageLevel {
+    Normal,
+    Warning,
+    Critical,
+}
+
+/// Warning from three quarters, critical from nine tenths: late enough that a
+/// normal day stays calm, early enough to change plans before the window stops.
+pub(crate) fn usage_level(percent: u8) -> UsageLevel {
+    match percent {
+        90.. => UsageLevel::Critical,
+        75.. => UsageLevel::Warning,
+        _ => UsageLevel::Normal,
+    }
+}
+
+/// One window on the status bar: a short bar of how full it is, then its words.
+///
+/// The bar says at a glance what the number says on reading -- and, by its
+/// colour, how close the window is to stopping you.
+fn render_window_item(
+    window: &UsageWindow,
+    now: DateTime<Utc>,
+    position: usize,
+    cx: &App,
+) -> impl IntoElement + use<> {
+    let fill = match usage_level(window.percent) {
+        UsageLevel::Normal => ui::brand_accent(cx),
+        UsageLevel::Warning => cx.theme().status().warning,
+        UsageLevel::Critical => cx.theme().status().error,
+    };
+    h_flex()
+        .gap_1()
+        .child(
+            div()
+                .debug_selector(move || format!("agent-usage-bar-{position}"))
+                .w(px(28.))
+                .child(
+                    ProgressBar::new(
+                        ("agent-usage-bar", position),
+                        f32::from(window.percent.min(100)),
+                        100.,
+                        cx,
+                    )
+                    .bg_color(cx.theme().colors().element_background)
+                    .fg_color(fill),
+                ),
+        )
+        .child(
+            Label::new(render_window(window, now))
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+        )
+}
+
 /// Every window of one agent, joined the way the reference display joins them.
 pub fn render_windows(windows: &[UsageWindow], now: DateTime<Utc>) -> String {
     windows
@@ -955,6 +1017,18 @@ mod tests {
             "53% used",
             "a negative countdown is not rendered at all"
         );
+    }
+
+    /// The bar beside each number turns as the window fills: the colour has to
+    /// change before the number is the only thing that says you are nearly out.
+    #[test]
+    fn the_bar_warns_from_three_quarters_and_alarms_from_nine_tenths() {
+        assert_eq!(usage_level(0), UsageLevel::Normal);
+        assert_eq!(usage_level(74), UsageLevel::Normal);
+        assert_eq!(usage_level(75), UsageLevel::Warning);
+        assert_eq!(usage_level(89), UsageLevel::Warning);
+        assert_eq!(usage_level(90), UsageLevel::Critical);
+        assert_eq!(usage_level(100), UsageLevel::Critical);
     }
 
     /// A window with neither a reset time nor a name is just its percentage.
