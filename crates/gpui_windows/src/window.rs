@@ -810,6 +810,17 @@ impl PlatformWindow for WindowsWindow {
             .ok();
     }
 
+    fn set_content_opacity(&self, opacity: f32) {
+        self.state
+            .renderer
+            .borrow_mut()
+            .set_content_opacity(opacity);
+    }
+
+    fn content_opacity(&self) -> f32 {
+        self.state.renderer.borrow().content_opacity()
+    }
+
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         self.state.background_appearance.set(background_appearance);
         let hwnd = self.0.hwnd;
@@ -823,7 +834,7 @@ impl PlatformWindow for WindowsWindow {
             WindowBackgroundAppearance::Transparent => {
                 set_window_composition_attribute(hwnd, None, 2);
             }
-            WindowBackgroundAppearance::Blurred => {
+            WindowBackgroundAppearance::Blurred | WindowBackgroundAppearance::Vibrancy => {
                 set_window_composition_attribute(hwnd, Some((0, 0, 0, 0)), 4);
             }
             WindowBackgroundAppearance::MicaBackdrop => {

@@ -1051,8 +1051,56 @@ fn appearance_page() -> SettingsPage {
         ]
     }
 
+    fn window_section() -> [SettingsPageItem; 4] {
+        [
+            SettingsPageItem::SectionHeader("Window"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Window Opacity",
+                description: "How opaque the window's backgrounds are, from 0 (see-through) to 1 (solid). On macOS text and icons stay solid. With vibrancy or an image, backgrounds keep 88% of this, as in Tabby.",
+                field: Box::new(SettingField {
+                    json_path: Some("window_opacity"),
+                    pick: |settings_content| settings_content.theme.window_opacity.as_ref(),
+                    write: |settings_content, value| {
+                        settings_content.theme.window_opacity = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Vibrancy",
+                description: "Show what is behind the window through its backgrounds, blurred: the desktop, or the background image when one is set. Text and icons stay solid.",
+                field: Box::new(SettingField {
+                    json_path: Some("window_vibrancy"),
+                    pick: |settings_content| settings_content.theme.window_vibrancy.as_ref(),
+                    write: |settings_content, value| {
+                        settings_content.theme.window_vibrancy = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Background Image",
+                description: "An image shown behind the window's backgrounds, read from its path and never copied: deleting the file removes it.",
+                field: Box::new(SettingField {
+                    json_path: Some("window_background_image"),
+                    pick: |settings_content| {
+                        settings_content.theme.window_background_image.as_ref()
+                    },
+                    write: |settings_content, value| {
+                        settings_content.theme.window_background_image = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
     let items: Box<[SettingsPageItem]> = concat_sections!(
         theme_section(),
+        window_section(),
         buffer_font_section(),
         ui_font_section(),
         text_rendering_section(),
@@ -3663,7 +3711,7 @@ fn window_and_layout_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Show Menus",
-                description: "Show the menus in the titlebar.",
+                description: "Show the menus on their own row above the titlebar. On Windows and Linux the menus are always shown in the titlebar.",
                 field: Box::new(SettingField {
                     json_path: Some("title_bar.show_menus"),
                     pick: |settings_content| {

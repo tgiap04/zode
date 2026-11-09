@@ -2209,6 +2209,28 @@ impl Window {
             .set_background_appearance(background_appearance);
     }
 
+    /// Fades everything this window draws to `opacity` (0 to 1) as it is
+    /// composited. See [`PlatformWindow::set_content_opacity`].
+    pub fn set_content_opacity(&self, opacity: f32) {
+        self.platform_window
+            .set_content_opacity(opacity.clamp(0.0, 1.0));
+    }
+
+    /// The opacity last given to [`Self::set_content_opacity`].
+    pub fn content_opacity(&self) -> f32 {
+        self.platform_window.content_opacity()
+    }
+
+    /// See [`PlatformWindow::supports_vibrancy`].
+    pub fn supports_vibrancy(&self) -> bool {
+        self.platform_window.supports_vibrancy()
+    }
+
+    /// See [`PlatformWindow::set_backdrop_image`].
+    pub fn set_backdrop_image(&self, image: Option<Arc<RenderImage>>) {
+        self.platform_window.set_backdrop_image(image);
+    }
+
     /// Mark the window as dirty at the platform level.
     pub fn set_window_edited(&mut self, edited: bool) {
         self.platform_window.set_edited(edited);

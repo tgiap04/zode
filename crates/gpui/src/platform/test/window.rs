@@ -33,6 +33,7 @@ pub(crate) struct TestWindowState {
     moved_callback: Option<Box<dyn FnMut()>>,
     input_handler: Option<PlatformInputHandler>,
     is_fullscreen: bool,
+    content_opacity: f32,
 }
 
 #[derive(Clone)]
@@ -84,6 +85,7 @@ impl TestWindow {
             moved_callback: None,
             input_handler: None,
             is_fullscreen: false,
+            content_opacity: 1.0,
         })))
     }
 
@@ -225,6 +227,14 @@ impl PlatformWindow for TestWindow {
     fn set_app_id(&mut self, _app_id: &str) {}
 
     fn set_background_appearance(&self, _background: WindowBackgroundAppearance) {}
+
+    fn set_content_opacity(&self, opacity: f32) {
+        self.0.lock().content_opacity = opacity;
+    }
+
+    fn content_opacity(&self) -> f32 {
+        self.0.lock().content_opacity
+    }
 
     fn set_edited(&mut self, edited: bool) {
         self.0.lock().edited = edited;
