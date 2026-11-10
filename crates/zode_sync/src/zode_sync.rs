@@ -45,13 +45,13 @@ pub mod sync;
 pub use dek::{DEK_LEN, Dek, KID_LEN};
 pub use diff::TextDiff;
 pub use envelope::{
-    ENVELOPE_VERSION, Envelope, Kind, Resource, SyncCryptoError, decrypt, decrypt_at, encrypt,
-    encrypt_at, from_blob, to_blob,
+    ENVELOPE_VERSION, Envelope, Kind, Resource, SHARING_KEY_RESOURCE, SyncCryptoError, TeamRoute,
+    decrypt, decrypt_at, encrypt, encrypt_at, from_blob, to_blob,
 };
 pub use extensions::ExtensionComparison;
 pub use recovery_key::RecoveryKeyError;
-pub use rotate::{RotationOutcome, RotationPlan};
-pub use session::{PendingDivergence, SyncSession, SyncStatus, SyncStatusChanged};
+pub use rotate::{RotationOutcome, RotationPlan, Slot};
+pub use session::{KeyRotation, PendingDivergence, SyncSession, SyncStatus, SyncStatusChanged};
 pub use state::SyncState;
 pub use sync::{PullOutcome, PushOutcome, SyncError, pull, push};
 

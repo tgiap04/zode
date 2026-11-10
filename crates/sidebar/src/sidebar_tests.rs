@@ -165,7 +165,21 @@ async fn test_rebuild_contents_reflects_open_projects(cx: &mut TestAppContext) {
 
 /// A stand-in for the real title bar: `Workspace` renders whatever view is
 /// mounted in that slot, and the sidebar column only reserves a row when one is.
-struct TestTitleBar;
+struct TestTitleBar {
+    /// How many title-bar rows tall it is; `show_menus` puts the menus on a row
+    /// of their own above the title bar.
+    rows: f32,
+    focus_handle: gpui::FocusHandle,
+}
+
+impl TestTitleBar {
+    fn new(rows: f32, cx: &mut gpui::App) -> Self {
+        Self {
+            rows,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+}
 
 impl gpui::Render for TestTitleBar {
     fn render(
@@ -173,9 +187,28 @@ impl gpui::Render for TestTitleBar {
         window: &mut gpui::Window,
         _cx: &mut gpui::Context<Self>,
     ) -> impl gpui::IntoElement {
-        use gpui::Styled as _;
-        gpui::div().h(ui::utils::platform_title_bar_height(window))
+        use gpui::{InteractiveElement as _, Styled as _};
+        gpui::div()
+            .debug_selector(|| "test-title-bar".into())
+            .track_focus(&self.focus_handle)
+            .w_full()
+            .flex_none()
+            .h(ui::utils::platform_title_bar_height(window) * self.rows)
     }
+}
+
+fn mount_test_title_bar(
+    multi_workspace: &gpui::Entity<MultiWorkspace>,
+    rows: f32,
+    cx: &mut gpui::VisualTestContext,
+) -> gpui::Entity<TestTitleBar> {
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        let title_bar = cx.new(|cx| TestTitleBar::new(rows, cx));
+        mw.workspace().update(cx, |workspace, cx| {
+            workspace.set_titlebar_item(title_bar.clone().into(), window, cx);
+        });
+        title_bar
+    })
 }
 
 /// The sidebar is a sibling of the whole `Workspace`, so left to itself it runs
@@ -211,12 +244,7 @@ async fn test_sidebar_box_starts_below_the_title_bar(cx: &mut TestAppContext) {
         before.origin.y
     );
 
-    multi_workspace.update_in(cx, |mw, window, cx| {
-        let title_bar = cx.new(|_| TestTitleBar);
-        mw.workspace().update(cx, |workspace, cx| {
-            workspace.set_titlebar_item(title_bar.into(), window, cx);
-        });
-    });
+    mount_test_title_bar(&multi_workspace, 1., cx);
     cx.run_until_parked();
 
     let after = cx
@@ -227,6 +255,137 @@ async fn test_sidebar_box_starts_below_the_title_bar(cx: &mut TestAppContext) {
         "the sidebar box must clear the {:?} title bar row, started at {:?}",
         title_bar_height,
         after.origin.y
+    );
+}
+
+/// On Windows and Linux nothing needs the corner above the rail, so the title bar
+/// runs the whole width of the window and the sidebar starts under it. A strip
+/// left above the rail reads as a blank gap before the menus.
+#[gpui::test]
+async fn the_title_bar_spans_the_window_above_the_sidebar(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let project = Project::test(fs, ["/root".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        let mw_entity = cx.entity();
+        let sidebar = cx.new(|cx| Sidebar::new(mw_entity, window, cx));
+        mw.register_sidebar(sidebar, cx);
+    });
+    // Two rows, as with `show_menus`: a layout that reserves a fixed one-row
+    // strip above the sidebar would leave the rail half under the bar.
+    mount_test_title_bar(&multi_workspace, 2., cx);
+    cx.run_until_parked();
+
+    let row_height = cx.update(|window, _| ui::utils::platform_title_bar_height(window));
+    let window_width = cx.update(|window, _| window.viewport_size().width);
+
+    // The macOS layout, which tests get by default: the bar starts where the
+    // sidebar ends. Without this half, a bar that was always full width would
+    // pass the assertions below without the switch doing anything.
+    multi_workspace.update(cx, |mw, cx| {
+        mw.set_title_bar_spans_the_window_for_test(false, cx)
+    });
+    cx.run_until_parked();
+    let bar = cx
+        .debug_bounds("test-title-bar")
+        .expect("the title bar should be drawn");
+    let sidebar = cx
+        .debug_bounds("sidebar-container")
+        .expect("the sidebar container should be drawn");
+    assert_eq!(
+        bar.origin.x,
+        sidebar.right(),
+        "beside the sidebar the bar starts where it ends, bar {bar:?} sidebar {sidebar:?}"
+    );
+
+    multi_workspace.update(cx, |mw, cx| {
+        mw.set_title_bar_spans_the_window_for_test(true, cx)
+    });
+    for panel_open in [false, true] {
+        multi_workspace.update(cx, |mw, cx| {
+            if panel_open {
+                mw.open_sidebar(cx);
+            }
+        });
+        cx.run_until_parked();
+
+        let bar = cx
+            .debug_bounds("test-title-bar")
+            .expect("the title bar should be drawn");
+        let sidebar = cx
+            .debug_bounds("sidebar-container")
+            .expect("the sidebar container should be drawn");
+        assert_eq!(
+            bar.origin.x,
+            gpui::px(0.),
+            "the bar starts at the window edge (panel open: {panel_open}), was {bar:?}"
+        );
+        assert_eq!(
+            bar.size.width, window_width,
+            "the bar spans the window (panel open: {panel_open}), was {bar:?}"
+        );
+        assert_eq!(
+            bar.size.height,
+            row_height * 2.,
+            "the bar keeps both of its rows (panel open: {panel_open}), was {bar:?}"
+        );
+        assert_eq!(
+            sidebar.origin.y,
+            bar.bottom(),
+            "the sidebar starts right under the bar (panel open: {panel_open}), \
+             bar {bar:?} sidebar {sidebar:?}"
+        );
+    }
+}
+
+gpui::actions!(sidebar_tests, [ProbeWorkspaceAction]);
+
+/// The title bar's menus dispatch workspace actions from inside the bar
+/// (`OpenApplicationMenu`, `ActivateMenuLeft`), so drawing it outside the
+/// element that carries the workspace's actions would silently disconnect them.
+#[gpui::test]
+async fn actions_from_the_spanning_title_bar_reach_the_workspace(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let project = Project::test(fs, ["/root".as_ref()], cx).await;
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        let mw_entity = cx.entity();
+        let sidebar = cx.new(|cx| Sidebar::new(mw_entity, window, cx));
+        mw.register_sidebar(sidebar, cx);
+        mw.set_title_bar_spans_the_window_for_test(true, cx);
+    });
+    let handled = std::rc::Rc::new(std::cell::Cell::new(false));
+    multi_workspace.update(cx, |mw, cx| {
+        mw.workspace().update(cx, |workspace, _| {
+            let handled = handled.clone();
+            workspace.register_action(move |_, _: &ProbeWorkspaceAction, _, _| {
+                handled.set(true);
+            });
+        });
+    });
+    let title_bar = mount_test_title_bar(&multi_workspace, 1., cx);
+    cx.run_until_parked();
+
+    title_bar.update_in(cx, |title_bar, window, cx| {
+        window.focus(&title_bar.focus_handle, cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.dispatch_action(Box::new(ProbeWorkspaceAction), cx);
+    });
+    cx.run_until_parked();
+
+    assert!(
+        handled.get(),
+        "an action dispatched from inside the spanning title bar must reach the workspace"
     );
 }
 

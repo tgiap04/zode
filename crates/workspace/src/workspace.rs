@@ -33,6 +33,7 @@ mod theme_preview;
 mod toast_layer;
 mod toolbar;
 pub mod welcome;
+pub mod window_backdrop;
 mod workspace_settings;
 
 pub use crate::notifications::NotificationFrame;
@@ -782,6 +783,7 @@ pub fn init(app_state: Arc<AppState>, cx: &mut App) {
     theme_preview::init(cx);
     toast_layer::init(cx);
     history_manager::init(app_state.fs.clone(), cx);
+    window_backdrop::init(app_state.fs.clone(), cx);
 
     cx.on_action(|_: &CloseWindow, cx| Workspace::close_global(cx))
         .on_action(|_: &Reload, cx| reload(cx))
@@ -2929,6 +2931,15 @@ impl Workspace {
 
     pub fn multi_workspace(&self) -> Option<&WeakEntity<MultiWorkspace>> {
         self.multi_workspace.as_ref()
+    }
+
+    /// A workspace with no `MultiWorkspace` around it (tests, mostly) still
+    /// draws its own title bar.
+    fn title_bar_drawn_by_multi_workspace(&self, cx: &App) -> bool {
+        self.multi_workspace
+            .as_ref()
+            .and_then(|multi_workspace| multi_workspace.upgrade())
+            .is_some_and(|multi_workspace| multi_workspace.read(cx).title_bar_spans_the_window())
     }
 
     pub fn set_multi_workspace(
@@ -9022,7 +9033,9 @@ impl Render for Workspace {
             .items_start()
             .text_color(colors.text)
             .overflow_hidden()
-            .children(self.titlebar_item.clone())
+            .when(!self.title_bar_drawn_by_multi_workspace(cx), |this| {
+                this.children(self.titlebar_item.clone())
+            })
             .on_modifiers_changed(move |_, _, cx| {
                 for &id in &notification_entities {
                     cx.notify(id);

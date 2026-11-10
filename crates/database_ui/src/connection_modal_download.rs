@@ -12,7 +12,7 @@
 //! that adding a fourth screen to it would be the wrong kind of convenient.
 
 use crate::connection_modal::{ConnectionModal, Step};
-use crate::driver_registry::{self, CatalogueEntry};
+use crate::driver_registry::{self, CatalogueEntry, DriverHost, RemoteDrivers};
 use database::install::{DriverInstaller, InstallProgress};
 use futures::{StreamExt as _, select_biased};
 use gpui::{Context, Window};
@@ -59,6 +59,10 @@ impl ConnectionModal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let DriverHost::Remote(remote) = self.drivers.clone() {
+            self.download_on_host(remote, engine, window, cx);
+            return;
+        }
         let id = engine.driver.to_string();
         let installer = driver_registry::installer(cx);
         // Registered before the install is asked for, so a second window
@@ -123,6 +127,50 @@ impl ConnectionModal {
         }));
     }
 
+    /// Installs the driver for `engine` on the remote host, then continues into
+    /// its form.
+    ///
+    /// The host downloads it for its own platform and checks it exactly as
+    /// this machine would; nothing is downloaded here. Cancelling stops the
+    /// wait, not the host's install, which finishes there for the next try.
+    fn download_on_host(
+        &mut self,
+        remote: RemoteDrivers,
+        engine: CatalogueEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let install = remote.install(&engine.driver, cx);
+        self.error = None;
+        self.step = Step::Downloading {
+            engine: engine.clone(),
+            progress: InstallProgress::FetchingManifest,
+        };
+        cx.notify();
+
+        self.set_task(cx.spawn_in(window, async move |this, cx| {
+            let outcome = install.await;
+            this.update_in(cx, |this, window, cx| match outcome {
+                Ok(()) => {
+                    this.reload_engines(cx);
+                    let engine = CatalogueEntry {
+                        installed: true,
+                        ..engine
+                    };
+                    this.open(engine, window, cx);
+                }
+                Err(error) => {
+                    this.step = Step::Unreachable {
+                        engine,
+                        message: format!("{error:#}").into(),
+                    };
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
     /// Abandons a download and goes back to the engine list.
     ///
     /// Dropping the task is what gives up this window's place in the download
@@ -167,7 +215,9 @@ impl ConnectionModal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !engine.downloaded {
+        // What follows deletes from this machine's store, which never holds a
+        // remote host's driver.
+        if !engine.downloaded || !matches!(self.drivers, DriverHost::Local) {
             return;
         }
         let driver = engine.driver.clone();

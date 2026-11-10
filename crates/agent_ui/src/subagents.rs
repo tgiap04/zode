@@ -14,11 +14,10 @@
 //! apart, so no staleness threshold separates a thinking subagent from a
 //! finished one.
 
-use agent_sessions::{
-    AgentKind, SessionProvider, SessionSummary, SubagentEvent, SubagentSummary, TurnMark,
-};
+use agent_sessions::{AgentKind, SessionSummary, SubagentEvent, SubagentSummary, TurnMark};
 use collections::HashSet;
-use gpui::SharedString;
+use gpui::{AsyncApp, SharedString};
+use project::agent_session_host::AgentSessionHost;
 use std::{sync::Arc, time::SystemTime};
 
 /// How many passes an open tool call may go by before the sidecar directory is
@@ -41,6 +40,11 @@ const REMEMBERED_SESSIONS: usize = 64;
 /// Each look reads a directory; the first one after a stall begins is not
 /// delayed.
 const SUCCESSOR_SEARCH_EVERY_PASSES: u32 = 5;
+
+/// How much of a remote transcript one pass reads at most. Its marks cross the
+/// connection as one answer, and a first pass over a transcript of tens of
+/// megabytes would otherwise send every mark in it at once.
+pub(crate) const REMOTE_PASS_BYTES: u64 = 2 * 1024 * 1024;
 
 /// What one background pass over a session's store found.
 ///
@@ -74,6 +78,10 @@ pub struct SubagentPass {
     /// The store could not be read, as opposed to holding nothing yet. Such a
     /// pass says nothing about whether the session existed when the tab opened.
     unreadable: bool,
+    /// The pass stopped at its byte cap with more of the transcript after it.
+    /// What it read is the past until a pass reaches the end: the turns a
+    /// tab opened onto are not news just because they took two passes to read.
+    behind: bool,
     /// What went wrong, if anything did. Kept as a message rather than logged
     /// where it happened: a failure that persists is met again on every pass,
     /// and the tracker is what knows it has said so already.
@@ -266,8 +274,36 @@ impl SubagentTracker {
         }
     }
 
-    /// Reads the store. For a background thread only.
-    pub fn scan(provider: &Arc<dyn SessionProvider>, request: ScanRequest) -> SubagentPass {
+    /// Asks `host` what the next pass needs to know.
+    ///
+    /// One request at a time, each awaited before the next is sent: a host
+    /// that is slow to answer holds this pass, and the tab's loop does not ask
+    /// again until it has folded the answer, so a slow link is never sent a
+    /// second request for the same tab while the first is out.
+    pub async fn scan(
+        host: &AgentSessionHost,
+        agent: AgentKind,
+        request: ScanRequest,
+        cx: &AsyncApp,
+    ) -> SubagentPass {
+        // A remote answer crosses the connection whole, so it is read in
+        // slices; this machine's store is read to its end.
+        let max_bytes = if host.is_remote() {
+            REMOTE_PASS_BYTES
+        } else {
+            u64::MAX
+        };
+        Self::scan_within(host, agent, request, max_bytes, cx).await
+    }
+
+    /// [`Self::scan`], reading at most about `max_bytes` of the transcript.
+    async fn scan_within(
+        host: &AgentSessionHost,
+        agent: AgentKind,
+        request: ScanRequest,
+        max_bytes: u64,
+        cx: &AsyncApp,
+    ) -> SubagentPass {
         let ScanRequest {
             session,
             session_id,
@@ -282,7 +318,7 @@ impl SubagentTracker {
         // nothing to read, and the next pass asks again.
         let session = match session {
             Some(session) => session,
-            None => match provider.find(&session_id) {
+            None => match cx.update(|cx| host.find(agent, &session_id, cx)).await {
                 Ok(Some(session)) => session,
                 Ok(None) => return SubagentPass::empty(from),
                 Err(error) => {
@@ -297,7 +333,10 @@ impl SubagentTracker {
             },
         };
 
-        let (completed, mut failure) = match provider.transcript_progress(&session, from) {
+        let progress = cx
+            .update(|cx| host.transcript_progress(&session, from, max_bytes, cx))
+            .await;
+        let (completed, mut failure) = match progress {
             Ok(completed) => (completed, None),
             Err(error) => (
                 agent_sessions::TranscriptProgress {
@@ -310,6 +349,7 @@ impl SubagentTracker {
             ),
         };
         let unreadable = failure.is_some();
+        let behind = !unreadable && completed.more_to_read;
 
         // The sidecar is re-listed only when something could have changed, and
         // that gate is exact rather than approximate: a subagent cannot appear
@@ -323,46 +363,60 @@ impl SubagentTracker {
         // `from == 0` is the first pass, which has to list whatever is already
         // there.
         let grew = completed.scanned_to != from;
-        let subagents = (grew || from == 0 || relist).then(|| {
-            provider
-                .subagents(&session)
-                .map_err(|error| {
+        let subagents = if grew || from == 0 || relist {
+            match cx.update(|cx| host.subagents(&session, cx)).await {
+                Ok(subagents) => Some(subagents),
+                Err(error) => {
                     failure.get_or_insert_with(|| {
                         format!("reading subagents of {session_id}: {error}")
                     });
-                })
-                .ok()
-        });
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let background_quiet_for = if quiet {
-            provider
-                .background_quiet_for(&session)
-                .unwrap_or_else(|error| {
+            match cx
+                .update(|cx| host.background_quiet_for(&session, cx))
+                .await
+            {
+                Ok(quiet_for) => quiet_for,
+                Err(error) => {
                     failure.get_or_insert_with(|| {
                         format!("reading subagent activity of {session_id}: {error}")
                     });
                     None
-                })
+                }
+            }
         } else {
             None
         };
 
         // Only a transcript that did not move can have been left behind.
-        let followed = search.filter(|_| !grew && !unreadable).and_then(|search| {
-            provider
-                .successor(&session, search.since, &search.claimed)
-                .unwrap_or_else(|error| {
-                    failure.get_or_insert_with(|| {
-                        format!("looking for the session {session_id} moved to: {error}")
-                    });
-                    None
-                })
-        });
+        let followed = match search.filter(|_| !grew && !unreadable) {
+            Some(search) => {
+                let successor = cx
+                    .update(|cx| host.successor(&session, search.since, &search.claimed, cx))
+                    .await;
+                match successor {
+                    Ok(successor) => successor,
+                    Err(error) => {
+                        failure.get_or_insert_with(|| {
+                            format!("looking for the session {session_id} moved to: {error}")
+                        });
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
 
         SubagentPass {
             background_quiet_for,
             session: Some(session),
-            subagents: subagents.flatten(),
+            subagents,
             finished: completed.tool_use_ids,
             events: completed.subagent_events,
             turn_marks: completed.turn_marks,
@@ -371,6 +425,7 @@ impl SubagentTracker {
             identity: completed.identity,
             followed,
             unreadable,
+            behind,
             failure,
         }
     }
@@ -406,12 +461,16 @@ impl SubagentTracker {
             self.identity = pass.identity;
         }
         let read_bytes = pass.scanned_to > self.scanned_to;
+        let read_before = self.scanned_to > 0;
         if !pass.unreadable && !self.first_pass_seen {
             self.first_pass_seen = true;
             self.opened_on_nothing = !read_bytes;
         }
         let live = self.baselined || self.opened_on_nothing;
-        self.baselined |= read_bytes;
+        // A pass that reaches the end has caught up even when it read nothing:
+        // a capped slice can stop inside the line the CLI is still writing, and
+        // the pass after it then finds no complete line to read.
+        self.baselined |= !pass.behind && !pass.unreadable && (read_bytes || read_before);
         self.background_quiet_for = pass.background_quiet_for;
         if pass.session.is_some() {
             self.session = pass.session;
@@ -623,6 +682,12 @@ impl SubagentPass {
         }
     }
 
+    /// Whether more of the transcript is waiting past where this pass stopped,
+    /// so the next one should not wait its turn.
+    pub fn behind(&self) -> bool {
+        self.behind
+    }
+
     /// The id of the session this pass found the CLI had moved to, if it did.
     pub fn followed_id(&self) -> Option<&str> {
         self.followed.as_ref().map(|session| &*session.id)
@@ -664,10 +729,12 @@ impl SubagentPass {
     }
 }
 
-/// The store to ask about this agent's sessions, or `None` for an agent this
-/// editor has no reader for.
-pub fn provider_for_agent(agent: &project::AgentId) -> Option<Arc<dyn SessionProvider>> {
-    AgentKind::from_builtin_agent_id(agent.as_ref()).map(agent_sessions::provider_for)
+/// Whether this agent's transcripts carry turn marks. A question about the
+/// agent, not its store: the provider it asks reads nothing to answer, which
+/// is what lets a tab of a remote project ask it here.
+pub fn agent_reports_turns(agent: &project::AgentId) -> bool {
+    AgentKind::from_builtin_agent_id(agent.as_ref())
+        .is_some_and(|kind| agent_sessions::provider_for(kind).reports_turns())
 }
 
 #[cfg(test)]
@@ -1226,6 +1293,29 @@ mod tests {
         assert!(tracker.apply(reading(200)).live);
     }
 
+    /// A remote transcript is read in slices. Every slice before the one that
+    /// reaches the end is the history the tab opened onto, and none of it is
+    /// news however many passes it takes.
+    #[test]
+    fn a_transcript_read_in_slices_is_the_past_until_a_pass_reaches_its_end() {
+        let mut tracker = SubagentTracker::default();
+        let slice = |scanned_to: u64, behind: bool| SubagentPass {
+            behind,
+            ..reading(scanned_to)
+        };
+
+        assert!(!tracker.apply(slice(REMOTE_PASS_BYTES, true)).live);
+        assert!(!tracker.apply(slice(2 * REMOTE_PASS_BYTES, true)).live);
+        assert!(
+            !tracker.apply(slice(2 * REMOTE_PASS_BYTES + 10, false)).live,
+            "the slice that reaches the end is still the past"
+        );
+        assert!(
+            tracker.apply(slice(2 * REMOTE_PASS_BYTES + 20, false)).live,
+            "what is written after it is news"
+        );
+    }
+
     #[test]
     fn a_replaced_transcript_with_no_complete_line_yet_is_still_the_past() {
         let mut tracker = SubagentTracker::default();
@@ -1245,8 +1335,10 @@ mod tests {
     // --- reading a store, with a provider that says exactly what it is told to ---
 
     use agent_sessions::{
-        AgentCommand, Availability, Deletion, Fork, SessionCounts, TranscriptProgress,
+        AgentCommand, Availability, Deletion, Fork, SessionCounts, SessionProvider,
+        TranscriptProgress,
     };
+    use gpui::TestAppContext;
     use std::{
         collections::VecDeque,
         path::{Path, PathBuf},
@@ -1369,15 +1461,28 @@ mod tests {
 
     /// One pass as the tab runs it: ask the tracker what to read, read it, fold
     /// the answer back in.
-    fn run_pass(
+    async fn run_pass(
         tracker: &mut SubagentTracker,
         provider: &Arc<dyn SessionProvider>,
         call_open: bool,
         quiet_wanted: bool,
         search: Option<SuccessorSearch>,
+        cx: &mut TestAppContext,
     ) -> TurnInput {
         let request = tracker.next_request("session-one".into(), call_open, quiet_wanted, search);
-        tracker.apply(SubagentTracker::scan(provider, request))
+        let pass = scan_here(provider, request, cx).await;
+        tracker.apply(pass)
+    }
+
+    /// One scan through a host built over `provider`, the way a tab of a local
+    /// project reads its store.
+    async fn scan_here(
+        provider: &Arc<dyn SessionProvider>,
+        request: ScanRequest,
+        cx: &mut TestAppContext,
+    ) -> SubagentPass {
+        let host = AgentSessionHost::Local(vec![provider.clone()]);
+        SubagentTracker::scan(&host, AgentKind::Claude, request, &cx.to_async()).await
     }
 
     fn search() -> Option<SuccessorSearch> {
@@ -1391,13 +1496,15 @@ mod tests {
     /// running, after the parent line that announces it. A pass that lands in
     /// between lists a directory that does not have it yet, and a lone
     /// foreground subagent leaves the parent silent for as long as it runs.
-    #[test]
-    fn the_sidecars_are_listed_again_while_a_call_is_open_though_the_transcript_is_still() {
+    #[gpui::test]
+    async fn the_sidecars_are_listed_again_while_a_call_is_open_though_the_transcript_is_still(
+        cx: &mut TestAppContext,
+    ) {
         let scripted = Arc::new(Scripted::default().then(Ok(progress(100, Some(1)))));
         let provider: Arc<dyn SessionProvider> = scripted.clone();
         let mut tracker = SubagentTracker::default();
 
-        run_pass(&mut tracker, &provider, true, false, None);
+        run_pass(&mut tracker, &provider, true, false, None, cx).await;
         assert_eq!(
             scripted.lists.load(Ordering::SeqCst),
             1,
@@ -1405,14 +1512,14 @@ mod tests {
         );
 
         for _ in 0..(RELIST_EVERY_PASSES - 1) {
-            run_pass(&mut tracker, &provider, true, false, None);
+            run_pass(&mut tracker, &provider, true, false, None, cx).await;
         }
         assert_eq!(
             scripted.lists.load(Ordering::SeqCst),
             1,
             "not every second: each listing opens every sidecar"
         );
-        run_pass(&mut tracker, &provider, true, false, None);
+        run_pass(&mut tracker, &provider, true, false, None, cx).await;
         assert_eq!(
             scripted.lists.load(Ordering::SeqCst),
             2,
@@ -1420,39 +1527,41 @@ mod tests {
         );
     }
 
-    #[test]
-    fn with_no_call_open_a_still_transcript_is_never_listed_again() {
+    #[gpui::test]
+    async fn with_no_call_open_a_still_transcript_is_never_listed_again(cx: &mut TestAppContext) {
         let scripted = Arc::new(Scripted::default().then(Ok(progress(100, Some(1)))));
         let provider: Arc<dyn SessionProvider> = scripted.clone();
         let mut tracker = SubagentTracker::default();
         for _ in 0..(RELIST_EVERY_PASSES * 3) {
-            run_pass(&mut tracker, &provider, false, false, None);
+            run_pass(&mut tracker, &provider, false, false, None, cx).await;
         }
         assert_eq!(scripted.lists.load(Ordering::SeqCst), 1);
     }
 
     /// `background_quiet_for` stats every file of every subagent. Only a held
     /// turn reads the answer.
-    #[test]
-    fn the_subagent_files_are_only_consulted_while_a_turn_is_held() {
+    #[gpui::test]
+    async fn the_subagent_files_are_only_consulted_while_a_turn_is_held(cx: &mut TestAppContext) {
         let scripted = Arc::new(Scripted::default());
         let provider: Arc<dyn SessionProvider> = scripted.clone();
         let mut tracker = SubagentTracker::default();
 
         for _ in 0..4 {
-            let input = run_pass(&mut tracker, &provider, false, false, None);
+            let input = run_pass(&mut tracker, &provider, false, false, None, cx).await;
             assert_eq!(input.background_quiet_for, None);
         }
         assert_eq!(scripted.quiets.load(Ordering::SeqCst), 0);
 
-        let input = run_pass(&mut tracker, &provider, false, true, None);
+        let input = run_pass(&mut tracker, &provider, false, true, None, cx).await;
         assert_eq!(scripted.quiets.load(Ordering::SeqCst), 1);
         assert_eq!(input.background_quiet_for, Some(Duration::from_secs(5)));
     }
 
     /// The same bytes a pass later, or more, is not proof of the same file.
-    #[test]
-    fn a_different_file_at_the_same_path_is_read_again_from_its_first_line() {
+    #[gpui::test]
+    async fn a_different_file_at_the_same_path_is_read_again_from_its_first_line(
+        cx: &mut TestAppContext,
+    ) {
         let scripted = Arc::new(
             Scripted::default()
                 .then(Ok(progress(500, Some(1))))
@@ -1464,10 +1573,14 @@ mod tests {
         let provider: Arc<dyn SessionProvider> = scripted;
         let mut tracker = SubagentTracker::default();
 
-        run_pass(&mut tracker, &provider, false, false, None);
-        assert!(run_pass(&mut tracker, &provider, false, false, None).live);
+        run_pass(&mut tracker, &provider, false, false, None, cx).await;
+        assert!(
+            run_pass(&mut tracker, &provider, false, false, None, cx)
+                .await
+                .live
+        );
 
-        let replaced = run_pass(&mut tracker, &provider, false, false, None);
+        let replaced = run_pass(&mut tracker, &provider, false, false, None, cx).await;
         assert!(replaced.restarted, "the tab is told to drop what it folded");
         assert!(
             replaced.marks.is_empty() && replaced.finished.is_empty(),
@@ -1478,15 +1591,21 @@ mod tests {
             "the next pass starts at its first line"
         );
 
-        let reread = run_pass(&mut tracker, &provider, false, false, None);
+        let reread = run_pass(&mut tracker, &provider, false, false, None, cx).await;
         assert!(!reread.restarted);
         assert!(!reread.live, "the new file's contents are the past");
         assert_eq!(tracker.scanned_to, 300);
-        assert!(run_pass(&mut tracker, &provider, false, false, None).live);
+        assert!(
+            run_pass(&mut tracker, &provider, false, false, None, cx)
+                .await
+                .live
+        );
     }
 
-    #[test]
-    fn a_first_line_that_is_not_whole_yet_never_reads_as_a_different_file() {
+    #[gpui::test]
+    async fn a_first_line_that_is_not_whole_yet_never_reads_as_a_different_file(
+        cx: &mut TestAppContext,
+    ) {
         let scripted = Arc::new(
             Scripted::default()
                 .then(Ok(progress(500, Some(1))))
@@ -1494,14 +1613,14 @@ mod tests {
         );
         let provider: Arc<dyn SessionProvider> = scripted;
         let mut tracker = SubagentTracker::default();
-        run_pass(&mut tracker, &provider, false, false, None);
-        let next = run_pass(&mut tracker, &provider, false, false, None);
+        run_pass(&mut tracker, &provider, false, false, None, cx).await;
+        let next = run_pass(&mut tracker, &provider, false, false, None, cx).await;
         assert!(!next.restarted);
         assert_eq!(tracker.scanned_to, 600);
     }
 
-    #[test]
-    fn a_transcript_that_shrank_takes_its_new_identity() {
+    #[gpui::test]
+    async fn a_transcript_that_shrank_takes_its_new_identity(cx: &mut TestAppContext) {
         let scripted = Arc::new(
             Scripted::default()
                 .then(Ok(progress(500, Some(1))))
@@ -1513,9 +1632,13 @@ mod tests {
         );
         let provider: Arc<dyn SessionProvider> = scripted;
         let mut tracker = SubagentTracker::default();
-        run_pass(&mut tracker, &provider, false, false, None);
-        assert!(run_pass(&mut tracker, &provider, false, false, None).restarted);
-        let after = run_pass(&mut tracker, &provider, false, false, None);
+        run_pass(&mut tracker, &provider, false, false, None, cx).await;
+        assert!(
+            run_pass(&mut tracker, &provider, false, false, None, cx)
+                .await
+                .restarted
+        );
+        let after = run_pass(&mut tracker, &provider, false, false, None, cx).await;
         assert!(
             !after.restarted,
             "the replacement's own identity is the one held now, so it is not replaced again"
@@ -1524,8 +1647,10 @@ mod tests {
 
     /// What clearing a conversation does: the old transcript never grows again
     /// and a new one opens beside it.
-    #[test]
-    fn a_session_the_cli_moved_to_is_followed_through_the_restart_path() {
+    #[gpui::test]
+    async fn a_session_the_cli_moved_to_is_followed_through_the_restart_path(
+        cx: &mut TestAppContext,
+    ) {
         let moved_to = summary("session-two");
         let scripted = Arc::new(
             Scripted {
@@ -1537,10 +1662,14 @@ mod tests {
         );
         let provider: Arc<dyn SessionProvider> = scripted;
         let mut tracker = SubagentTracker::default();
-        run_pass(&mut tracker, &provider, false, false, None);
-        assert!(run_pass(&mut tracker, &provider, false, false, None).live);
+        run_pass(&mut tracker, &provider, false, false, None, cx).await;
+        assert!(
+            run_pass(&mut tracker, &provider, false, false, None, cx)
+                .await
+                .live
+        );
 
-        let moved = run_pass(&mut tracker, &provider, false, false, search());
+        let moved = run_pass(&mut tracker, &provider, false, false, search(), cx).await;
 
         assert!(
             moved.restarted,
@@ -1562,7 +1691,9 @@ mod tests {
             "later passes read the new session and never look the old id up again"
         );
         assert!(
-            !run_pass(&mut tracker, &provider, false, false, None).live,
+            !run_pass(&mut tracker, &provider, false, false, None, cx)
+                .await
+                .live,
             "what the new transcript already holds is the past"
         );
     }
@@ -1571,8 +1702,8 @@ mod tests {
     /// written during the tab's life, so nothing but having been left marks it
     /// as not the way forward -- and a tab that went back to it would be sent on
     /// to the third again, and back, for as long as it stalled.
-    #[test]
-    fn a_tab_never_follows_its_way_back_to_a_session_it_has_left() {
+    #[gpui::test]
+    async fn a_tab_never_follows_its_way_back_to_a_session_it_has_left(cx: &mut TestAppContext) {
         let scripted = Arc::new(Scripted {
             successors: vec![summary("session-two"), summary("session-three")],
             ..Scripted::default()
@@ -1582,19 +1713,19 @@ mod tests {
         let followed = |input: TurnInput| input.followed.map(|session| session.id.to_string());
 
         assert_eq!(
-            followed(run_pass(&mut tracker, &provider, false, false, search())),
+            followed(run_pass(&mut tracker, &provider, false, false, search(), cx).await),
             Some("session-two".to_string()),
             "the first clear"
         );
         assert_eq!(
-            followed(run_pass(&mut tracker, &provider, false, false, search())),
+            followed(run_pass(&mut tracker, &provider, false, false, search(), cx).await),
             Some("session-three".to_string()),
             "the second"
         );
 
         for _ in 0..3 {
             assert_eq!(
-                followed(run_pass(&mut tracker, &provider, false, false, search())),
+                followed(run_pass(&mut tracker, &provider, false, false, search(), cx).await),
                 None,
                 "every other transcript there is, is one the tab left"
             );
@@ -1649,8 +1780,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_session_is_only_looked_for_when_the_transcript_did_not_grow() {
+    #[gpui::test]
+    async fn a_session_is_only_looked_for_when_the_transcript_did_not_grow(
+        cx: &mut TestAppContext,
+    ) {
         let scripted = Arc::new(
             Scripted {
                 successors: vec![summary("session-two")],
@@ -1661,16 +1794,16 @@ mod tests {
         );
         let provider: Arc<dyn SessionProvider> = scripted.clone();
         let mut tracker = SubagentTracker::default();
-        run_pass(&mut tracker, &provider, false, false, None);
+        run_pass(&mut tracker, &provider, false, false, None, cx).await;
 
-        let grown = run_pass(&mut tracker, &provider, false, false, search());
+        let grown = run_pass(&mut tracker, &provider, false, false, search(), cx).await;
         assert!(
             grown.followed.is_none(),
             "a transcript that moved is not abandoned"
         );
         assert_eq!(scripted.searches.load(Ordering::SeqCst), 0);
 
-        let still = run_pass(&mut tracker, &provider, false, false, search());
+        let still = run_pass(&mut tracker, &provider, false, false, search(), cx).await;
         assert!(still.followed.is_some());
         assert_eq!(scripted.searches.load(Ordering::SeqCst), 1);
     }
@@ -1741,14 +1874,16 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_failing_read_is_carried_back_as_a_message_and_not_logged_per_pass() {
+    #[gpui::test]
+    async fn a_failing_read_is_carried_back_as_a_message_and_not_logged_per_pass(
+        cx: &mut TestAppContext,
+    ) {
         let scripted =
             Arc::new(Scripted::default().then(Err(anyhow::anyhow!("permission denied"))));
         let provider: Arc<dyn SessionProvider> = scripted;
         let mut tracker = SubagentTracker::default();
         let request = tracker.next_request("session-one".into(), false, false, None);
-        let pass = SubagentTracker::scan(&provider, request);
+        let pass = scan_here(&provider, request, cx).await;
         assert!(pass.unreadable);
         assert!(
             pass.failure
@@ -1756,6 +1891,132 @@ mod tests {
                 .is_some_and(|message| message.contains("permission denied")),
             "{:?}",
             pass.failure
+        );
+    }
+
+    /// A capped reader stops at the last whole line inside its cap, so a slice
+    /// that stopped short reads fewer bytes than the cap allows. Whether the
+    /// end was reached is the reader's to say, and until it is, nothing read
+    /// is news.
+    #[gpui::test]
+    async fn a_store_read_in_capped_slices_is_the_past_until_a_pass_reaches_its_end(
+        cx: &mut TestAppContext,
+    ) {
+        const SESSION: &str = "0b1c2d3e-4f50-4617-8899-aabbccddeeff";
+        const CAP: u64 = 1024;
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let project_dir = root.path().join("-project");
+        std::fs::create_dir(&project_dir).expect("the project's transcript directory");
+        let log = project_dir.join(format!("{SESSION}.jsonl"));
+        let result_line = |number: usize| {
+            format!(
+                r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_{number}"}}]}},"cwd":"/project"}}"#
+            ) + "\n"
+        };
+        let mut text = String::new();
+        let mut lines = 0;
+        while (text.len() as u64) < 3 * CAP {
+            text.push_str(&result_line(lines));
+            lines += 1;
+        }
+        std::fs::write(&log, &text).expect("the transcript is written");
+        let host = AgentSessionHost::Local(vec![Arc::new(agent_sessions::ClaudeProvider::new(
+            root.path().to_path_buf(),
+        ))]);
+        let mut tracker = SubagentTracker::default();
+        let async_cx = cx.to_async();
+        let scan = |tracker: &mut SubagentTracker| {
+            let request = tracker.next_request(SESSION.into(), false, false, None);
+            SubagentTracker::scan_within(&host, AgentKind::Claude, request, CAP, &async_cx)
+        };
+
+        let mut passes = 0;
+        while tracker.scanned_to < text.len() as u64 {
+            passes += 1;
+            assert!(passes <= 8, "the passes never reached the end");
+            let pass = scan(&mut tracker).await;
+            let input = tracker.apply(pass);
+            assert!(
+                !input.live,
+                "pass {passes}, read to {} of {}, is the history the tab opened onto",
+                tracker.scanned_to,
+                text.len()
+            );
+        }
+        assert!(passes >= 3, "the cap cut the transcript into slices");
+
+        let mut appended = text.clone();
+        appended.push_str(&result_line(lines));
+        std::fs::write(&log, &appended).expect("a line is appended");
+        let pass = scan(&mut tracker).await;
+        assert!(
+            tracker.apply(pass).live,
+            "what is written after the end is news"
+        );
+    }
+
+    /// The cap lands inside the line the CLI is still writing: the pass that
+    /// stops there is behind, and the one after reads nothing because the line
+    /// has no end yet. Once it ends, what follows is news, not history.
+    #[gpui::test]
+    async fn a_line_still_being_written_at_the_cap_does_not_hide_the_next_turn(
+        cx: &mut TestAppContext,
+    ) {
+        const SESSION: &str = "1c2d3e4f-5061-4728-899a-abbccddeeff0";
+        const CAP: u64 = 1024;
+        let root = tempfile::tempdir().expect("a temporary directory");
+        let project_dir = root.path().join("-project");
+        std::fs::create_dir(&project_dir).expect("the project's transcript directory");
+        let log = project_dir.join(format!("{SESSION}.jsonl"));
+        let result_line = |number: usize| {
+            format!(
+                r#"{{"type":"user","message":{{"role":"user","content":[{{"type":"tool_result","tool_use_id":"toolu_{number}"}}]}},"cwd":"/project"}}"#
+            ) + "\n"
+        };
+        let mut text = String::new();
+        let mut lines = 0;
+        while (text.len() as u64) < 2 * CAP {
+            text.push_str(&result_line(lines));
+            lines += 1;
+        }
+        let unfinished = format!(
+            r#"{{"type":"assistant","note":"{}"#,
+            "x".repeat(CAP as usize * 3 / 2)
+        );
+        std::fs::write(&log, format!("{text}{unfinished}")).expect("the transcript is written");
+        let host = AgentSessionHost::Local(vec![Arc::new(agent_sessions::ClaudeProvider::new(
+            root.path().to_path_buf(),
+        ))]);
+        let mut tracker = SubagentTracker::default();
+        let async_cx = cx.to_async();
+        let scan = |tracker: &mut SubagentTracker| {
+            let request = tracker.next_request(SESSION.into(), false, false, None);
+            SubagentTracker::scan_within(&host, AgentKind::Claude, request, CAP, &async_cx)
+        };
+
+        let mut pass_number = 0;
+        loop {
+            pass_number += 1;
+            assert!(pass_number <= 8, "the passes never caught up");
+            let pass = scan(&mut tracker).await;
+            let caught_up = !pass.behind;
+            let input = tracker.apply(pass);
+            assert!(
+                !input.live,
+                "pass {pass_number} is still the history the tab opened onto"
+            );
+            if caught_up {
+                break;
+            }
+        }
+        assert_eq!(tracker.scanned_to, text.len() as u64);
+
+        let finished = format!("{text}{unfinished}\"}}\n{}", result_line(lines));
+        std::fs::write(&log, finished).expect("the line ends and another follows");
+        let pass = scan(&mut tracker).await;
+        assert!(
+            tracker.apply(pass).live,
+            "what is written after the history ends is news"
         );
     }
 

@@ -10,7 +10,7 @@ use remote_relay_protocol::{
 
 use crate::{
     file_browse::FileRequest,
-    session_history::{SessionRequest, clamp_limit, is_plausible_session_id},
+    session_history::{SessionRequest, clamp_limit, parse_wire_id},
 };
 
 /// What this host always does for a device. Files, the project server and
@@ -245,10 +245,10 @@ fn sessions_action(
     // could not be one is simply a session there is not. That goes for the id a
     // page is asked to start after as much as for one to open.
     let names_an_id_that_cannot_exist = match &request {
-        SessionRequest::Resume { session_id, .. } => !is_plausible_session_id(session_id),
+        SessionRequest::Resume { session_id, .. } => parse_wire_id(session_id).is_none(),
         SessionRequest::List { before, .. } => before
             .as_ref()
-            .is_some_and(|cursor| !is_plausible_session_id(&cursor.id)),
+            .is_some_and(|cursor| parse_wire_id(&cursor.id).is_none()),
     };
     if names_an_id_that_cannot_exist {
         return RouterAction::Reply(request_error(
@@ -1058,6 +1058,55 @@ mod tests {
         ));
     }
 
+    /// A remote host's sessions are named `{token}:{id}`, and both the id to
+    /// open and the one a page starts after may be one. Anything else with a
+    /// `:` in it names nothing.
+    #[test]
+    fn an_id_on_a_remote_host_is_routed_and_a_malformed_one_is_not_found() {
+        let mut state = greeted();
+        let remote = "0123456789ab:0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f";
+        assert!(matches!(
+            route_control(
+                &mut state,
+                session_resume(11, remote, true),
+                &sessions_facts()
+            )[..],
+            [RouterAction::Sessions { request_id: 11, .. }]
+        ));
+        let cursor = SessionCursor {
+            updated_at: 1,
+            id: remote.into(),
+        };
+        assert!(matches!(
+            route_control(
+                &mut state,
+                sessions_list(12, Some(cursor), None),
+                &sessions_facts()
+            )[..],
+            [RouterAction::Sessions { request_id: 12, .. }]
+        ));
+        for session_id in [
+            "0123456789ab:",
+            ":abc",
+            "0123456789ab::abc",
+            "0123456789AB:abc",
+            "0123456789a:abc",
+            "0123456789ab:../x",
+            &format!("0123456789ab:{}", "x".repeat(129)),
+        ] {
+            let actions = route_control(
+                &mut state,
+                session_resume(13, session_id, false),
+                &sessions_facts(),
+            );
+            assert_eq!(
+                error_code_of(&actions[0]),
+                error_code::NOT_FOUND,
+                "{session_id:?}"
+            );
+        }
+    }
+
     #[test]
     fn answers_to_session_requests_are_refused_from_a_device() {
         let mut state = greeted();
@@ -1067,6 +1116,7 @@ mod tests {
                 sessions: Vec::new(),
                 more: false,
                 next: None,
+                unavailable_hosts: Vec::new(),
             },
             Control::SessionResumed {
                 request_id: 1,

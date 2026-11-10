@@ -17,7 +17,7 @@ use http_client::{FakeHttpClient, HttpClient, Response};
 use zode_account::ApiCredential;
 use zode_sync::artifact::Artifact;
 use zode_sync::sync::SyncContext;
-use zode_sync::{Dek, Kind};
+use zode_sync::{Dek, Kind, Resource};
 
 pub const USER: &str = "68b1f0c2a4d3e5f60718293a";
 pub const API: &str = "https://api.example.invalid/api";
@@ -82,6 +82,12 @@ pub struct FakeStore {
     pub requests: Arc<AtomicUsize>,
     pub writes: Arc<AtomicUsize>,
     pub reject: Arc<std::sync::atomic::AtomicBool>,
+    /// Successful writes allowed before every later write answers 503.
+    pub fail_after: Arc<Mutex<Option<usize>>>,
+    /// Slots whose writes answer 409, as if another machine got there first.
+    pub conflicts: Arc<Mutex<Vec<String>>>,
+    /// Slots whose writes answer 402, as a plan that does not cover them.
+    pub plan_refusals: Arc<Mutex<Vec<String>>>,
 }
 
 impl FakeStore {
@@ -92,7 +98,76 @@ impl FakeStore {
             requests: Arc::new(AtomicUsize::new(0)),
             writes: Arc::new(AtomicUsize::new(0)),
             reject: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fail_after: Arc::new(Mutex::new(None)),
+            conflicts: Arc::new(Mutex::new(Vec::new())),
+            plan_refusals: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+
+    /// Answers writes to this one slot with 402 `env_sync_not_in_plan`.
+    pub fn refuse_by_plan_on(&self, slot: &str) {
+        self.plan_refusals.lock().unwrap().push(slot.to_string());
+    }
+
+    /// Lets `count` writes land, then answers every later one with a 503:
+    /// the connection dropping halfway through.
+    pub fn fail_writes_after(&self, count: usize) {
+        *self.fail_after.lock().unwrap() = Some(count);
+    }
+
+    pub fn heal(&self) {
+        *self.fail_after.lock().unwrap() = None;
+        self.conflicts.lock().unwrap().clear();
+        self.plan_refusals.lock().unwrap().clear();
+        self.reject.store(false, Ordering::SeqCst);
+    }
+
+    /// Answers writes to this one slot with a conflict.
+    pub fn conflict_on(&self, slot: &str) {
+        self.conflicts.lock().unwrap().push(slot.to_string());
+    }
+
+    fn slot_name(resource: &Resource) -> String {
+        resource.path().rsplit('/').next().unwrap_or("").to_string()
+    }
+
+    /// Seeds any resource with raw bytes, sealed the way its owning crate seals it.
+    pub fn seed_at(&self, resource: &Resource, dek: &Dek, plaintext: &[u8]) -> String {
+        let envelope = zode_sync::encrypt_at(dek, USER, resource, plaintext).unwrap();
+        let blob = zode_sync::to_blob(&envelope).unwrap();
+        let revision = format!("rev-{}", self.revisions.fetch_add(1, Ordering::SeqCst));
+        self.documents.lock().unwrap().insert(
+            Self::slot_name(resource),
+            Stored {
+                blob,
+                revision: revision.clone(),
+            },
+        );
+        revision
+    }
+
+    /// Opens a stored resource as raw bytes.
+    pub fn open_at(
+        &self,
+        resource: &Resource,
+        dek: &Dek,
+    ) -> Option<Result<Vec<u8>, zode_sync::SyncCryptoError>> {
+        let stored = self
+            .documents
+            .lock()
+            .unwrap()
+            .get(&Self::slot_name(resource))
+            .cloned()?;
+        let envelope = zode_sync::from_blob(&stored.blob).ok()?;
+        Some(zode_sync::decrypt_at(dek, USER, resource, &envelope))
+    }
+
+    pub fn revision_of(&self, resource: &Resource) -> Option<String> {
+        self.documents
+            .lock()
+            .unwrap()
+            .get(&Self::slot_name(resource))
+            .map(|stored| stored.revision.clone())
     }
 
     /// Answers every subsequent write with a conflict, standing in for another
@@ -135,6 +210,9 @@ impl FakeStore {
         let requests = self.requests.clone();
         let writes = self.writes.clone();
         let reject = self.reject.clone();
+        let fail_after = self.fail_after.clone();
+        let conflicts = self.conflicts.clone();
+        let plan_refusals = self.plan_refusals.clone();
 
         FakeHttpClient::create(move |request| {
             let documents = documents.clone();
@@ -142,6 +220,9 @@ impl FakeStore {
             let requests = requests.clone();
             let writes = writes.clone();
             let reject = reject.clone();
+            let fail_after = fail_after.clone();
+            let conflicts = conflicts.clone();
+            let plan_refusals = plan_refusals.clone();
             async move {
                 requests.fetch_add(1, Ordering::SeqCst);
 
@@ -192,7 +273,23 @@ impl FakeStore {
                         let blob = incoming["blob"].as_str().unwrap_or("").to_string();
                         let current = documents.get(&kind).cloned();
 
-                        let allowed = if reject.load(Ordering::SeqCst) {
+                        if fail_after
+                            .lock()
+                            .unwrap()
+                            .is_some_and(|limit| writes.load(Ordering::SeqCst) >= limit)
+                        {
+                            return reply(503, serde_json::json!({ "error": "unavailable" }));
+                        }
+                        if plan_refusals.lock().unwrap().contains(&kind) {
+                            return reply(
+                                402,
+                                serde_json::json!({ "error": "env_sync_not_in_plan" }),
+                            );
+                        }
+
+                        let allowed = if reject.load(Ordering::SeqCst)
+                            || conflicts.lock().unwrap().contains(&kind)
+                        {
                             false
                         } else {
                             match (if_none_match.as_deref(), if_match.as_deref()) {
@@ -284,4 +381,67 @@ fn request_header(
         .get(name)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
+}
+
+/// A keychain holding entries by URL, as the real one does: the recovery key
+/// and anything else this crate stores beside it.
+#[derive(Default)]
+pub struct MemoryKeychain {
+    pub entries: Mutex<HashMap<String, (String, Vec<u8>)>>,
+}
+
+impl MemoryKeychain {
+    pub fn with_recovery_key(dek: [u8; 32]) -> Arc<Self> {
+        let keychain = Self::default();
+        keychain
+            .entries
+            .lock()
+            .unwrap()
+            .insert("zode://sync-key".into(), (USER.into(), dek.to_vec()));
+        Arc::new(keychain)
+    }
+
+    pub fn get(&self, url: &str) -> Option<Vec<u8>> {
+        self.entries
+            .lock()
+            .unwrap()
+            .get(url)
+            .map(|(_, bytes)| bytes.clone())
+    }
+}
+
+impl credentials_provider::CredentialsProvider for MemoryKeychain {
+    fn read_credentials<'a>(
+        &'a self,
+        url: &'a str,
+        _cx: &'a gpui::AsyncApp,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<Option<(String, Vec<u8>)>>> + 'a>,
+    > {
+        let found = self.entries.lock().unwrap().get(url).cloned();
+        Box::pin(async move { Ok(found) })
+    }
+
+    fn write_credentials<'a>(
+        &'a self,
+        url: &'a str,
+        username: &'a str,
+        password: &'a [u8],
+        _cx: &'a gpui::AsyncApp,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>> {
+        self.entries
+            .lock()
+            .unwrap()
+            .insert(url.into(), (username.into(), password.to_vec()));
+        Box::pin(async { Ok(()) })
+    }
+
+    fn delete_credentials<'a>(
+        &'a self,
+        url: &'a str,
+        _cx: &'a gpui::AsyncApp,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + 'a>> {
+        self.entries.lock().unwrap().remove(url);
+        Box::pin(async { Ok(()) })
+    }
 }

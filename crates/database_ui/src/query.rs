@@ -24,6 +24,10 @@ pub(crate) struct Page {
     pub(crate) sql: String,
     pub(crate) offset: u64,
     pub(crate) limit: u32,
+    /// The row the detail view shows, as an index into `result.rows`. Held by
+    /// the page so that paging or running another statement starts with no row
+    /// shown, rather than showing whatever now sits at the old index.
+    pub(crate) selected_row: Option<usize>,
 }
 
 impl Page {
@@ -47,6 +51,27 @@ impl Page {
 
     pub(crate) fn has_next(&self) -> bool {
         self.result.truncated
+    }
+
+    /// Shows row `index` in the detail view, or hides the view when that row is
+    /// already the one shown. An index past the end of the page is ignored: the
+    /// click may have landed on a page that has since been replaced.
+    pub(crate) fn toggle_row(&mut self, index: usize) {
+        if index >= self.result.rows.len() {
+            return;
+        }
+        self.selected_row = if self.selected_row == Some(index) {
+            None
+        } else {
+            Some(index)
+        };
+    }
+
+    /// The row the detail view shows, with its index in the page.
+    pub(crate) fn selected(&self) -> Option<(usize, &[Cell])> {
+        let index = self.selected_row?;
+        let row = self.result.rows.get(index)?;
+        Some((index, row.as_slice()))
     }
 }
 
@@ -200,6 +225,7 @@ mod tests {
             sql: String::new(),
             offset,
             limit: 200,
+            selected_row: None,
         };
 
         assert_eq!(page(0, 200, true).range_label(), "1–200 of more");
@@ -208,5 +234,49 @@ mod tests {
         assert!(!page(0, 200, true).has_previous());
         assert!(page(200, 50, false).has_previous());
         assert!(page(0, 200, true).has_next());
+    }
+
+    fn two_row_page() -> Page {
+        Page {
+            result: ResultSet {
+                rows: vec![
+                    vec![Cell::Text {
+                        value: "first".into(),
+                    }],
+                    vec![Cell::Null],
+                ],
+                ..result(Vec::new())
+            },
+            sql: String::new(),
+            offset: 0,
+            limit: 200,
+            selected_row: None,
+        }
+    }
+
+    #[test]
+    fn clicking_a_row_shows_it_and_clicking_it_again_hides_it() {
+        let mut page = two_row_page();
+        assert!(page.selected().is_none(), "a new page shows no row");
+
+        page.toggle_row(1);
+        let (index, row) = page.selected().expect("the clicked row is shown");
+        assert_eq!(index, 1);
+        assert_eq!(row, &[Cell::Null]);
+
+        page.toggle_row(0);
+        assert_eq!(page.selected().map(|(index, _)| index), Some(0));
+
+        page.toggle_row(0);
+        assert!(page.selected().is_none());
+    }
+
+    /// A click can land on a row of the page that was just replaced; it must not
+    /// select past the end of the new one.
+    #[test]
+    fn a_row_past_the_end_of_the_page_is_never_selected() {
+        let mut page = two_row_page();
+        page.toggle_row(2);
+        assert!(page.selected().is_none());
     }
 }

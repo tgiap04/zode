@@ -638,9 +638,7 @@ impl GitGraph {
                             self.select_entry(pending_sha_index, ScrollStrategy::Nearest, cx);
                         }
                     }
-                    GitGraphEvent::LoadingError => {
-                        // todo(git_graph): Wire this up with the UI
-                    }
+                    GitGraphEvent::LoadingError => cx.notify(),
                     GitGraphEvent::CountUpdated(commit_count) => {
                         let old_count = self.graph_data.commits.len();
 
@@ -699,9 +697,11 @@ impl GitGraph {
         }
     }
 
+    /// Opening the tab is a user asking for the graph, so a log that failed before is fetched again.
     fn fetch_initial_graph_data(&mut self, cx: &mut App) {
         if let Some(repository) = self.get_repository(cx) {
             repository.update(cx, |repository, cx| {
+                repository.retry_graph_data(self.log_source.clone(), self.log_order, cx);
                 let commits = repository
                     .graph_data(self.log_source.clone(), self.log_order, 0..usize::MAX, cx)
                     .commits;
@@ -799,13 +799,20 @@ impl GitGraph {
                 let subject: SharedString;
                 let author_name: SharedString;
 
-                if let CommitDataState::Loaded(data) = data {
-                    subject = data.subject.clone();
-                    author_name = data.author_name.clone();
-                    formatted_time = format_timestamp(data.commit_timestamp);
-                } else {
-                    subject = "Loading…".into();
-                    author_name = "".into();
+                match data {
+                    CommitDataState::Loaded(data) => {
+                        subject = data.subject.clone();
+                        author_name = data.author_name.clone();
+                        formatted_time = format_timestamp(data.commit_timestamp);
+                    }
+                    CommitDataState::Loading => {
+                        subject = "Loading…".into();
+                        author_name = "".into();
+                    }
+                    CommitDataState::Failed(_) => {
+                        subject = "Unavailable".into();
+                        author_name = "".into();
+                    }
                 }
 
                 let accent_colors = cx.theme().accents().clone();
@@ -1368,6 +1375,9 @@ impl GitGraph {
                 data.subject.clone(),
             ),
             CommitDataState::Loading => ("Loading…".into(), "".into(), None, "Loading…".into()),
+            CommitDataState::Failed(_) => {
+                ("Unavailable".into(), "".into(), None, "Unavailable".into())
+            }
         };
 
         let date_string = commit_timestamp
@@ -1950,16 +1960,19 @@ impl Render for GitGraph {
             } else {
                 "No commits found".to_string()
             };
-            let label = Label::new(message)
-                .color(Color::Muted)
-                .size(LabelSize::Large);
             div()
                 .size_full()
                 .h_flex()
                 .gap_1()
                 .items_center()
                 .justify_center()
-                .child(label)
+                // Lets a test read which message was drawn; it compiles away outside tests.
+                .debug_selector(|| format!("git-graph-status: {message}"))
+                .child(
+                    Label::new(message)
+                        .color(Color::Muted)
+                        .size(LabelSize::Large),
+                )
                 .when(is_loading && error.is_none(), |this| {
                     this.child(self.render_loading_spinner(cx))
                 })
@@ -3221,6 +3234,335 @@ mod tests {
             "error should contain the git error message, got: {}",
             error_message
         );
+    }
+
+    /// The graph tab asks for its log while it renders, and a failed log has no commits, so a fetch
+    /// that is restarted whenever an errored log is asked for again restarts on every frame: the
+    /// error is never on screen and `git log` runs without end.
+    #[gpui::test]
+    async fn test_failed_graph_is_shown_once_and_not_refetched_by_drawing(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            Path::new("/project"),
+            json!({
+                ".git": {},
+                "file.txt": "content",
+            }),
+        )
+        .await;
+        fs.set_graph_error(
+            Path::new("/project/.git"),
+            Some("fatal: bad default revision 'HEAD'".to_string()),
+        );
+
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        cx.run_until_parked();
+        let repository_id = project.read_with(cx, |project, cx| {
+            project
+                .active_repository(cx)
+                .expect("should have a repository")
+                .read(cx)
+                .id
+        });
+
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            workspace::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = multi_workspace.read_with(&*cx, |multi, _| multi.workspace().clone());
+        let git_graph = workspace.update_in(cx, |workspace, window, cx| {
+            let git_graph = cx.new(|cx| {
+                GitGraph::new(
+                    repository_id,
+                    project.read(cx).git_store().clone(),
+                    workspace.weak_handle(),
+                    window,
+                    cx,
+                )
+            });
+            workspace.add_item_to_active_pane(Box::new(git_graph.clone()), None, true, window, cx);
+            git_graph
+        });
+        cx.run_until_parked();
+        let error_status = "git-graph-status: Error loading: fatal: bad default revision 'HEAD'";
+        assert!(
+            cx.debug_bounds(error_status).is_some(),
+            "the tab must repaint to show why the graph failed"
+        );
+
+        for _ in 0..5 {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        }
+
+        assert_eq!(
+            fs.graph_fetch_count(Path::new("/project/.git")),
+            1,
+            "drawing an errored graph must not start its log again"
+        );
+        assert!(
+            cx.debug_bounds(error_status).is_some(),
+            "the error must stay on screen while the tab is redrawn"
+        );
+        git_graph.read_with(&*cx, |graph, _| {
+            assert!(graph.graph_data.commits.is_empty());
+        });
+    }
+
+    /// A remote client chooses the sources a server keeps a log for, so the cache of finished logs
+    /// has to stay bounded: the least recently used finished log makes way for a new one.
+    #[gpui::test]
+    async fn test_graph_cache_evicts_the_least_recently_used_finished_log(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            Path::new("/project"),
+            json!({
+                ".git": {},
+                "file.txt": "content",
+            }),
+        )
+        .await;
+        let mut rng = StdRng::seed_from_u64(11);
+        let commits = generate_random_commit_dag(&mut rng, 5, false);
+        fs.set_graph_commits(Path::new("/project/.git"), commits.clone());
+
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        cx.run_until_parked();
+        let repository = project.read_with(cx, |project, cx| {
+            project
+                .active_repository(cx)
+                .expect("should have a repository")
+        });
+        let sources = (0..5)
+            .map(|index| crate::LogSource::Branch(format!("branch-{index}").into()))
+            .collect::<Vec<_>>();
+        let load = |source: &crate::LogSource, cx: &mut TestAppContext| {
+            repository.update(cx, |repository, cx| {
+                repository.graph_data(source.clone(), crate::LogOrder::default(), 0..0, cx);
+            });
+            cx.run_until_parked();
+        };
+        let cached = |source: &crate::LogSource, cx: &mut TestAppContext| {
+            repository.read_with(cx, |repository, _| {
+                repository
+                    .get_graph_data(source.clone(), crate::LogOrder::default())
+                    .is_some()
+            })
+        };
+
+        for source in &sources {
+            load(source, cx);
+        }
+        assert_eq!(fs.graph_fetch_count(Path::new("/project/.git")), 5);
+        assert!(
+            !cached(&sources[0], cx),
+            "the least recently used finished log should have been evicted"
+        );
+        for source in &sources[1..] {
+            assert!(cached(source, cx), "{source:?} should still be cached");
+        }
+
+        load(&sources[0], cx);
+        assert_eq!(
+            fs.graph_fetch_count(Path::new("/project/.git")),
+            6,
+            "an evicted log is fetched again when asked for"
+        );
+        repository.read_with(cx, |repository, _| {
+            let data = repository
+                .get_graph_data(sources[0].clone(), crate::LogOrder::default())
+                .expect("the refetched log should be cached");
+            assert_eq!(data.error, None);
+            assert!(!data.is_loading());
+            assert_eq!(data.commit_data.len(), commits.len());
+        });
+        assert!(
+            !cached(&sources[1], cx),
+            "{:?} is now the oldest",
+            sources[1]
+        );
+    }
+
+    /// A log still being read has a reader waiting on it, so it is never what gets evicted.
+    #[gpui::test]
+    async fn test_graph_cache_keeps_logs_that_are_still_loading(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            Path::new("/project"),
+            json!({
+                ".git": {},
+                "file.txt": "content",
+            }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        cx.run_until_parked();
+        let repository = project.read_with(cx, |project, cx| {
+            project
+                .active_repository(cx)
+                .expect("should have a repository")
+        });
+        let sources = (0..5)
+            .map(|index| crate::LogSource::Branch(format!("branch-{index}").into()))
+            .collect::<Vec<_>>();
+
+        repository.update(cx, |repository, cx| {
+            for source in &sources {
+                repository.graph_data(source.clone(), crate::LogOrder::default(), 0..0, cx);
+            }
+            for source in &sources {
+                assert!(
+                    repository
+                        .get_graph_data(source.clone(), crate::LogOrder::default())
+                        .is_some_and(|data| data.is_loading()),
+                    "{source:?} is still loading and must not be evicted"
+                );
+            }
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn test_graph_data_retries_after_error_and_reports_completion(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            Path::new("/project"),
+            json!({
+                ".git": {},
+                "file.txt": "content",
+            }),
+        )
+        .await;
+        fs.set_graph_error(
+            Path::new("/project/.git"),
+            Some("fatal: bad default revision 'HEAD'".to_string()),
+        );
+
+        let project = Project::test(fs.clone(), [Path::new("/project")], cx).await;
+        project
+            .update(cx, |project, cx| project.git_scans_complete(cx))
+            .await;
+        cx.run_until_parked();
+
+        let graph_events = Arc::new(Mutex::new(Vec::new()));
+        project.update(cx, |project, cx| {
+            let graph_events = graph_events.clone();
+            cx.subscribe(project.git_store(), move |_, _, event, _| {
+                if let GitStoreEvent::RepositoryUpdated(
+                    _,
+                    RepositoryEvent::GraphEvent(_, graph_event),
+                    _,
+                ) = event
+                {
+                    graph_events
+                        .lock()
+                        .expect("graph event mutex should be available")
+                        .push(graph_event.clone());
+                }
+            })
+            .detach();
+        });
+        let take_graph_events = || {
+            std::mem::take(
+                &mut *graph_events
+                    .lock()
+                    .expect("graph event mutex should be available"),
+            )
+        };
+
+        let repository = project.read_with(cx, |project, cx| {
+            project
+                .active_repository(cx)
+                .expect("should have a repository")
+        });
+        let load_graph = |cx: &mut TestAppContext| {
+            repository.update(cx, |repo, cx| {
+                repo.graph_data(
+                    crate::LogSource::default(),
+                    crate::LogOrder::default(),
+                    0..usize::MAX,
+                    cx,
+                );
+            });
+            cx.run_until_parked();
+        };
+        let retry_graph = |cx: &mut TestAppContext| {
+            repository.update(cx, |repo, cx| {
+                repo.retry_graph_data(crate::LogSource::default(), crate::LogOrder::default(), cx);
+            });
+            cx.run_until_parked();
+        };
+
+        load_graph(cx);
+        assert_eq!(take_graph_events(), vec![GitGraphEvent::LoadingError]);
+        repository.read_with(cx, |repo, _| {
+            let data = repo
+                .get_graph_data(crate::LogSource::default(), crate::LogOrder::default())
+                .expect("the failed fetch should keep its entry");
+            assert!(data.error.is_some());
+            assert!(!data.is_loading());
+        });
+
+        let mut rng = StdRng::seed_from_u64(7);
+        let commits = generate_random_commit_dag(&mut rng, 5, false);
+        fs.set_graph_error(Path::new("/project/.git"), None);
+        fs.set_graph_commits(Path::new("/project/.git"), commits.clone());
+        cx.run_until_parked();
+        take_graph_events();
+
+        load_graph(cx);
+        assert_eq!(
+            take_graph_events(),
+            Vec::new(),
+            "asking for a failed graph again must not refetch it"
+        );
+        assert_eq!(fs.graph_fetch_count(Path::new("/project/.git")), 1);
+        repository.read_with(cx, |repo, _| {
+            assert!(
+                repo.get_graph_data(crate::LogSource::default(), crate::LogOrder::default())
+                    .is_some_and(|data| data.error.is_some()),
+                "the failed entry should still be cached with its error"
+            );
+        });
+
+        retry_graph(cx);
+        assert_eq!(
+            take_graph_events(),
+            vec![
+                GitGraphEvent::CountUpdated(commits.len()),
+                GitGraphEvent::FullyLoaded
+            ]
+        );
+        repository.read_with(cx, |repo, _| {
+            let data = repo
+                .get_graph_data(crate::LogSource::default(), crate::LogOrder::default())
+                .expect("the retried fetch should have an entry");
+            assert_eq!(data.error, None);
+            assert!(!data.is_loading());
+            assert_eq!(
+                data.commit_data
+                    .iter()
+                    .map(|commit| commit.sha)
+                    .collect::<Vec<_>>(),
+                commits.iter().map(|commit| commit.sha).collect::<Vec<_>>()
+            );
+        });
+
+        retry_graph(cx);
+        load_graph(cx);
+        assert_eq!(
+            take_graph_events(),
+            Vec::new(),
+            "a finished fetch should be served from the cache, not refetched"
+        );
+        assert_eq!(fs.graph_fetch_count(Path::new("/project/.git")), 2);
     }
 
     #[gpui::test]

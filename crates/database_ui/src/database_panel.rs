@@ -1,5 +1,5 @@
 use crate::connection_store::{
-    ConnectionConfig, DatabaseSettings, PINNED_CONNECTIONS_KEY, PinnedConnections,
+    ConnectionConfig, DatabaseSettings, PINNED_CONNECTIONS_KEY, PinnedConnections, delete_secret,
     visible_connections,
 };
 use crate::driver_registry;
@@ -8,7 +8,6 @@ use crate::query::QueryState;
 use crate::session::Session;
 use collections::HashMap;
 use database::protocol::{ColumnDef, SchemaRef, TableRef};
-use database::registry::DriverRegistry;
 use editor::Editor;
 use gpui::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Point, SharedString, Task,
@@ -45,6 +44,8 @@ pub(crate) struct ConnectionNode {
     /// Set when the driver says it has only one schema worth showing (SQLite),
     /// so the tree does not spend a level on a lone `main` node.
     pub(crate) collapse_schema_level: bool,
+    /// Set for a connection shared by the team. Never written to settings.
+    pub(crate) team: Option<crate::team_connections::TeamOrigin>,
 }
 
 /// The table whose columns are showing, if any.
@@ -71,10 +72,10 @@ pub struct DatabasePanel {
     pub(crate) measured_width: Option<Pixels>,
     pub(crate) focus_handle: FocusHandle,
     pub(crate) workspace: WeakEntity<Workspace>,
-    /// Shared with every other window: extensions add drivers to it after
-    /// startup, and a panel holding its own copy would keep answering from the
-    /// list it was built with.
-    pub(crate) registry: Entity<DriverRegistry>,
+    /// Whose drivers this panel's connections run on: this machine's, or the
+    /// remote host's the project lives on. Found on first use, because the
+    /// panel is built while its workspace is being updated and cannot read it.
+    pub(crate) drivers: Option<driver_registry::DriverHost>,
     pub(crate) connections: Vec<ConnectionNode>,
     pub(crate) open_table: Option<OpenTable>,
     pub(crate) pinned: PinnedConnections,
@@ -107,6 +108,8 @@ pub struct DatabasePanel {
     /// drag can move a region by the distance travelled rather than by where in
     /// the window the pointer happens to be.
     pub(crate) split_drag: Option<(Split, Pixels)>,
+    /// The "Team" group: its header, and what it says when it lists nothing.
+    pub(crate) team_group: crate::team_connections::TeamGroup,
     _settings_observer: gpui::Subscription,
 }
 
@@ -164,7 +167,7 @@ impl DatabasePanel {
             measured_width: None,
             focus_handle: cx.focus_handle(),
             workspace,
-            registry: driver_registry::global(cx),
+            drivers: None,
             connections: Vec::new(),
             open_table: None,
             pinned: PinnedConnections::default(),
@@ -179,9 +182,11 @@ impl DatabasePanel {
             sql_height: panel_layout::DEFAULT_SQL_HEIGHT,
             tree_width: panel_layout::DEFAULT_TREE_WIDTH,
             split_drag: None,
+            team_group: Default::default(),
             _settings_observer: settings_observer,
         };
         panel.reload_connections(cx);
+        panel.watch_team(cx);
         panel
     }
 
@@ -275,6 +280,15 @@ impl DatabasePanel {
     pub(crate) fn reload_connections(&mut self, cx: &mut Context<Self>) {
         let configured = DatabaseSettings::get_global(cx).connections.clone();
         let wanted = visible_connections(&configured, &self.pinned);
+        // `active` and the open table hold places in the list, and a removed
+        // node shifts every place after it. Remembered by name across the
+        // rebuild, or they would point at a different database than the one
+        // the user opened.
+        let active_key = self.active.and_then(|index| self.node_key(index));
+        let open_key = self
+            .open_table
+            .as_ref()
+            .and_then(|open| self.node_key(open.connection));
 
         let mut existing = std::mem::take(&mut self.connections);
         self.connections = wanted
@@ -282,7 +296,7 @@ impl DatabasePanel {
             .map(|config| {
                 match existing
                     .iter()
-                    .position(|node| node.config.name == config.name)
+                    .position(|node| node.team.is_none() && node.config.name == config.name)
                 {
                     // Same name, same url: leave the open session alone.
                     Some(index) if existing[index].config.url == config.url => {
@@ -298,11 +312,47 @@ impl DatabasePanel {
                         expanded: false,
                         schemas: Vec::new(),
                         collapse_schema_level: false,
+                        team: None,
                     },
                 }
             })
             .collect();
+        // Team connections come from the team, not from settings, and stay
+        // after the personal ones.
+        self.connections
+            .extend(existing.into_iter().filter(|node| node.team.is_some()));
+
+        if let Some(key) = active_key {
+            self.active = self.index_of_key(&key);
+            if self.active.is_none() {
+                self.query = QueryState::Idle;
+            }
+        }
+        if let Some(key) = open_key {
+            match self.index_of_key(&key) {
+                Some(index) => {
+                    if let Some(open) = self.open_table.as_mut() {
+                        open.connection = index;
+                    }
+                }
+                None => self.open_table = None,
+            }
+        }
         cx.notify();
+    }
+
+    /// What identifies a node across a rebuild: its name, and whether it came
+    /// from the team, since a team connection may share a personal one's name.
+    fn node_key(&self, index: usize) -> Option<(String, bool)> {
+        self.connections
+            .get(index)
+            .map(|node| (node.config.name.clone(), node.team.is_some()))
+    }
+
+    fn index_of_key(&self, (name, team): &(String, bool)) -> Option<usize> {
+        self.connections
+            .iter()
+            .position(|node| node.config.name == *name && node.team.is_some() == *team)
     }
 
     /// Pins or unpins a connection for this project, and writes it down.
@@ -318,6 +368,93 @@ impl DatabasePanel {
             })
             .ok();
         self.reload_connections(cx);
+    }
+
+    /// Asks before removing a connection, then removes it.
+    pub(crate) fn confirm_remove_connection(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(node) = self
+            .connections
+            .get(index)
+            .filter(|node| node.team.is_none())
+        else {
+            return;
+        };
+        let name = node.config.name.clone();
+        let answer = window.prompt(
+            gpui::PromptLevel::Warning,
+            &format!("Remove the connection \"{name}\"?"),
+            Some(
+                "Its saved password is removed from this machine as well. \
+                 The database itself is not touched.",
+            ),
+            &["Remove", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            if answer.await.ok() == Some(0) {
+                this.update(cx, |this, cx| this.remove_connection(&name, cx))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Removes a personal connection and everything this machine kept for it:
+    /// the open session, the half-written query, the pin, the keychain entry,
+    /// and the entry in settings -- which is what takes the node off the tree.
+    ///
+    /// Team connections are not in settings and are not removed from here.
+    pub(crate) fn remove_connection(&mut self, name: &str, cx: &mut Context<Self>) {
+        let Some(index) = self
+            .connections
+            .iter()
+            .position(|node| node.team.is_none() && node.config.name == name)
+        else {
+            return;
+        };
+        let url = self.connections[index].config.url.clone();
+
+        self.disconnect(index, cx);
+        self.scratch.remove(name);
+        if self.pinned.is_pinned(name) {
+            self.toggle_pin(name, cx);
+        }
+
+        // The keychain holds one password per URL, and a team connection finds
+        // its password the same way, so another connection to the same server
+        // is still using it.
+        let still_used = DatabaseSettings::get_global(cx)
+            .connections
+            .iter()
+            .any(|connection| connection.name != name && connection.url == url)
+            || self
+                .connections
+                .iter()
+                .any(|node| node.team.is_some() && node.config.url == url);
+        if !still_used {
+            delete_secret(zed_credentials_provider::global(cx), url, cx).detach_and_log_err(cx);
+        }
+
+        let Ok(fs) = self.workspace.read_with(cx, |workspace, cx| {
+            workspace.project().read(cx).fs().clone()
+        }) else {
+            return;
+        };
+        let name = name.to_string();
+        settings::update_settings_file(fs, cx, move |content, _cx| {
+            if let Some(connections) = content
+                .database
+                .as_mut()
+                .and_then(|database| database.connections.as_mut())
+            {
+                connections.retain(|connection| connection.name.as_deref() != Some(name.as_str()));
+            }
+        });
     }
 
     /// Whether `name` is pinned. Read by the tree to mark the row, and by the

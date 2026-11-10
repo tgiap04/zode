@@ -137,6 +137,15 @@ message ExpandAllForProjectEntryResponse {
   uint64 worktree_scan_id = 1;
 }
 
+message RescanWorktree {
+  uint64 project_id = 1;
+  uint64 worktree_id = 2;
+}
+
+message RescanWorktreeResponse {
+  uint64 worktree_scan_id = 1;
+}
+
 message ProjectEntryResponse {
   optional Entry entry = 1;
   uint64 worktree_scan_id = 2;
@@ -193,4 +202,31 @@ message AllocateWorktreeId {
 
 message AllocateWorktreeIdResponse {
   uint64 worktree_id = 1;
+}
+
+// A private file (an `.env`, a key), read or written for the machine that
+// opened the project. The server checks `private_files`, but its user layer is
+// that machine's synced settings, so what bounds a request is that only that
+// machine is served and the path stays inside the worktree. Never served to a
+// collaborator, and never anything but the file's bytes: the key that encrypts
+// its synced copy stays on that machine.
+message LoadPrivateFile {
+  uint64 project_id = 1;
+  uint64 worktree_id = 2;
+  string path = 3;
+}
+
+message LoadPrivateFileResponse {
+  // Absent when there is no file at that path.
+  optional bytes content = 1;
+}
+
+message WritePrivateFile {
+  uint64 project_id = 1;
+  uint64 worktree_id = 2;
+  string path = 3;
+  bytes content = 4;
+  // SHA-256 of the content the writer last read, and so backed up. Absent
+  // when it read no file. The server refuses when the file is no longer that.
+  optional bytes replaces_sha256 = 5;
 }

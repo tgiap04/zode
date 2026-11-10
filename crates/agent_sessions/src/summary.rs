@@ -218,6 +218,11 @@ pub struct TranscriptProgress {
     /// see. `None` while the first line is still being written, or for a store
     /// that has no such line.
     pub identity: Option<u64>,
+    /// The pass stopped at the cap it was given, with more of the transcript
+    /// after `scanned_to` than it read. Not the same as `scanned_to` falling
+    /// short of the file's length: a pass that reads to the end still stops
+    /// before a last line that is not whole yet.
+    pub more_to_read: bool,
 }
 
 /// The numbers that cost a full scan of the transcript.

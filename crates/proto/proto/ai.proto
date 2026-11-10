@@ -30,6 +30,53 @@ message AgentServerCommand {
   optional SpawnInTerminal login = 5;
 }
 
+// Asks the host the project lives on where an agent's own CLI is, using that
+// host's shell environment rather than the client's.
+message LocateAgentCli {
+  uint64 project_id = 1;
+  string agent_id = 2;
+}
+
+message LocateAgentCliResponse {
+  // Absent when the CLI is not installed on the host.
+  optional string path = 1;
+}
+
+message ProbeAgentBypassFlag {
+  uint64 project_id = 1;
+  string agent_id = 2;
+  string binary = 3;
+}
+
+message ProbeAgentBypassFlagResponse {
+  message Present {}
+
+  message Absent {}
+
+  message Unprobed {
+    string reason = 1;
+  }
+
+  oneof check {
+    Present present = 1;
+    Absent absent = 2;
+    Unprobed unprobed = 3;
+  }
+}
+
+// One question about the agent sessions stored on the host a project lives
+// on. `op_json` is an `agent_sessions::wire::SessionOp`; app and server ship
+// together, so one envelope carries every operation.
+message AgentSessionRequest {
+  uint64 project_id = 1;
+  string op_json = 2;
+}
+
+// An `agent_sessions::wire::SessionOpResult`.
+message AgentSessionResponse {
+  string result_json = 1;
+}
+
 message ExternalAgentsUpdated {
   uint64 project_id = 1;
   repeated string names = 2;

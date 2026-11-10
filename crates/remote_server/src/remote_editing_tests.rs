@@ -1972,6 +1972,158 @@ async fn test_remote_git_diffs_when_recv_update_repository_delay(
 }
 
 #[gpui::test]
+async fn test_remote_rescan_worktree_picks_up_new_repository(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(
+        path!("/code"),
+        json!({
+            "project1": {
+                "README.md": "# project 1",
+            },
+        }),
+    )
+    .await;
+
+    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
+    let (worktree, _) = project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/code/project1"), true, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
+    let repository_paths = |cx: &mut TestAppContext| {
+        project.read_with(cx, |project, cx| {
+            project
+                .repositories(cx)
+                .values()
+                .map(|repository| repository.read(cx).work_directory_abs_path.to_path_buf())
+                .collect::<Vec<_>>()
+        })
+    };
+
+    // A repository cloned inside the folder without the server's watcher reporting it.
+    fs.pause_events();
+    fs.insert_tree(
+        path!("/code/project1/new_repo"),
+        json!({
+            ".git": {},
+            "src": {
+                "main.rs": "fn main() {}",
+            },
+        }),
+    )
+    .await;
+    fs.clear_buffered_events();
+    fs.unpause_events_and_flush();
+    cx.run_until_parked();
+    worktree.read_with(cx, |worktree, _| {
+        assert!(worktree.entry_for_path(rel_path("new_repo")).is_none());
+    });
+    assert!(repository_paths(cx).is_empty());
+
+    project
+        .update(cx, |project, cx| project.rescan_worktree(worktree_id, cx))
+        .await
+        .unwrap();
+    worktree.read_with(cx, |worktree, _| {
+        assert!(
+            worktree
+                .entry_for_path(rel_path("new_repo/src/main.rs"))
+                .is_some(),
+            "the rescan must be in the client's snapshot when the request resolves"
+        );
+    });
+
+    cx.run_until_parked();
+    assert_eq!(
+        repository_paths(cx),
+        vec![PathBuf::from(path!("/code/project1/new_repo"))]
+    );
+}
+
+#[gpui::test]
+async fn test_remote_disconnect_drops_the_rescan_in_flight(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(path!("/code"), json!({ "project1": { "a.txt": "a" } }))
+        .await;
+    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
+    let (worktree, _) = project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/code/project1"), true, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
+
+    // Not driven: stands for a rescan whose snapshot will never arrive.
+    let _stuck_rescan = project.update(cx, |project, cx| project.rescan_worktree(worktree_id, cx));
+    assert!(project.read_with(cx, |project, _| {
+        project.has_worktree_rescan_in_flight(worktree_id)
+    }));
+
+    let client = project.read_with(cx, |project, _| project.remote_client().unwrap());
+    client.update(cx, |client, cx| client.force_server_not_running(cx));
+
+    // Checked before anything has run, so nothing but the disconnect can have removed the entry.
+    assert!(
+        !project.read_with(cx, |project, _| project
+            .has_worktree_rescan_in_flight(worktree_id)),
+        "a later reload must not join a rescan that can no longer finish"
+    );
+
+    // The disconnect tears the transport down, so a rescan started now cannot finish either:
+    // "the later reload settles" cannot be asserted, with or without the fix.
+    let _later_reload = project.update(cx, |project, cx| project.rescan_worktree(worktree_id, cx));
+    assert!(
+        project.read_with(cx, |project, _| project
+            .has_worktree_rescan_in_flight(worktree_id)),
+        "the later reload starts a rescan of its own"
+    );
+}
+
+#[gpui::test]
+async fn test_remote_rescan_unknown_worktree_errors(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(path!("/code"), json!({ "project1": { "a.txt": "a" } }))
+        .await;
+    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
+    project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/code/project1"), true, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+
+    let client = project.read_with(cx, |project, cx| {
+        project.remote_client().unwrap().read(cx).proto_client()
+    });
+    let response = client.request(proto::RescanWorktree {
+        project_id: proto::REMOTE_SERVER_PROJECT_ID,
+        worktree_id: 999_999,
+    });
+    let response = cx.spawn(async move |_| response.await);
+    cx.run_until_parked();
+    let error = response.await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("no worktree with id"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[gpui::test]
 async fn test_remote_git_branches(cx: &mut TestAppContext, server_cx: &mut TestAppContext) {
     let fs = FakeFs::new(server_cx.executor());
     fs.insert_tree(
@@ -2564,6 +2716,27 @@ async fn init_test_routing_terminals(
     cx: &mut TestAppContext,
     server_cx: &mut TestAppContext,
 ) -> (Entity<Project>, Entity<HeadlessProject>) {
+    init_test_with_connection(
+        server_fs,
+        |opts, cx| {
+            if terminals_over_rpc {
+                RemoteClient::route_mock_terminals_over_rpc(opts, cx);
+            }
+        },
+        cx,
+        server_cx,
+    )
+    .await
+}
+
+/// Like [`init_test`], with `configure` shaping the mock connection before the
+/// client connects over it.
+async fn init_test_with_connection(
+    server_fs: &Arc<FakeFs>,
+    configure: impl FnOnce(&remote::RemoteConnectionOptions, &mut TestAppContext),
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) -> (Entity<Project>, Entity<HeadlessProject>) {
     let server_fs = server_fs.clone();
     cx.update(|cx| {
         release_channel::init(semver::Version::new(0, 0, 0), cx);
@@ -2574,9 +2747,7 @@ async fn init_test_routing_terminals(
     init_logger();
 
     let (opts, ssh_server_client, _) = RemoteClient::fake_server(cx, server_cx);
-    if terminals_over_rpc {
-        RemoteClient::route_mock_terminals_over_rpc(&opts, cx);
-    }
+    configure(&opts, cx);
     let http_client = Arc::new(BlockedHttpClient);
     let node_runtime = NodeRuntime::unavailable();
     let languages = Arc::new(LanguageRegistry::new(cx.executor()));
@@ -3063,4 +3234,1405 @@ mod terminals {
         drop(terminal);
         std::fs::remove_file(&pid_file).ok();
     }
+}
+
+/// Agent CLIs are looked up and probed on the host the project lives on, with
+/// that host's environment, and the answers ride back over the connection.
+#[cfg(unix)]
+mod agent_cli {
+    use super::*;
+    use futures::FutureExt as _;
+    use project::agent_bypass::BypassCheck;
+    use project::agent_server_store::{
+        AgentBinary, AgentId, AgentServerStore, CLAUDE_CODE_AGENT_ID, builtin_agent,
+    };
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::time::Duration;
+    use util::paths::PathStyle;
+
+    /// A real directory on the server's `PATH`. `which` and the `--help`
+    /// probe both stat and run real files, which `FakeFs` cannot provide.
+    fn server_bin_dir(script: Option<&str>) -> util::test::TempTree {
+        let tree = match script {
+            Some(script) => util::test::TempTree::new(json!({ "claude": script })),
+            None => util::test::TempTree::new(json!({})),
+        };
+        if script.is_some() {
+            std::fs::set_permissions(
+                tree.path().join("claude"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .expect("the fake CLI is executable");
+        }
+        tree
+    }
+
+    const OFFERS_THE_FLAG: &str =
+        "#!/bin/sh\nprintf '  --dangerously-skip-permissions  Skip prompts\\n'\n";
+
+    fn server_store(
+        headless: &Entity<HeadlessProject>,
+        server_cx: &mut TestAppContext,
+    ) -> Entity<AgentServerStore> {
+        headless.read_with(server_cx, |headless, _| headless.agent_server_store.clone())
+    }
+
+    fn client_store(
+        project: &Entity<Project>,
+        cx: &mut TestAppContext,
+    ) -> Entity<AgentServerStore> {
+        project.read_with(cx, |project, _| project.agent_server_store().clone())
+    }
+
+    fn point_server_path_at(
+        headless: &Entity<HeadlessProject>,
+        directory: &Path,
+        server_cx: &mut TestAppContext,
+    ) {
+        server_store(headless, server_cx).update(server_cx, |store, _| {
+            store.set_search_path_for_test(Some(directory.to_string_lossy().into_owned()))
+        });
+    }
+
+    async fn resolve_claude(
+        project: &Entity<Project>,
+        cx: &mut TestAppContext,
+    ) -> anyhow::Result<AgentBinary> {
+        client_store(project, cx)
+            .update(cx, |store, cx| {
+                store.resolve_agent_binary(&AgentId::new(CLAUDE_CODE_AGENT_ID), cx)
+            })
+            .await
+    }
+
+    fn start_probe(
+        project: &Entity<Project>,
+        binary: PathBuf,
+        cx: &mut TestAppContext,
+    ) -> gpui::Task<BypassCheck> {
+        client_store(project, cx).update(cx, |store, cx| {
+            store.verify_bypass_flag(&AgentId::new(CLAUDE_CODE_AGENT_ID), binary, cx)
+        })
+    }
+
+    async fn probe_claude(
+        project: &Entity<Project>,
+        binary: PathBuf,
+        cx: &mut TestAppContext,
+    ) -> BypassCheck {
+        start_probe(project, binary, cx).await
+    }
+
+    #[gpui::test]
+    async fn test_remote_locate_agent_cli(cx: &mut TestAppContext, server_cx: &mut TestAppContext) {
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let (project, headless) = init_test(&fs, cx, server_cx).await;
+        let bin = server_bin_dir(Some("#!/bin/sh\n"));
+        point_server_path_at(&headless, bin.path(), server_cx);
+
+        let binary = resolve_claude(&project, cx)
+            .await
+            .expect("a remote project can locate its agent CLI");
+
+        assert_eq!(
+            binary,
+            AgentBinary::Found(bin.path().join("claude")),
+            "the CLI is the one on the server's PATH"
+        );
+    }
+
+    /// Run with the remote reporting the path style this machine does not
+    /// have, so an install line taken from the host would be the wrong one.
+    #[gpui::test]
+    async fn test_remote_missing_agent_cli_offers_the_remotes_installer(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let remote_style = match PathStyle::local() {
+            PathStyle::Posix => PathStyle::Windows,
+            PathStyle::Windows => PathStyle::Posix,
+        };
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let (project, headless) = init_test_with_connection(
+            &fs,
+            |opts, cx| {
+                if let remote::RemoteConnectionOptions::Mock(mock) = opts {
+                    cx.update(|cx| {
+                        cx.default_global::<remote::MockConnectionRegistry>()
+                            .set_path_style(mock, remote_style)
+                    });
+                }
+            },
+            cx,
+            server_cx,
+        )
+        .await;
+        let empty = server_bin_dir(None);
+        point_server_path_at(&headless, empty.path(), server_cx);
+
+        let binary = resolve_claude(&project, cx)
+            .await
+            .expect("a missing CLI is an answer, not an error");
+
+        let AgentBinary::Missing(missing) = binary else {
+            panic!("nothing on the server's PATH must read as missing, got {binary:?}");
+        };
+        let claude = builtin_agent(CLAUDE_CODE_AGENT_ID).expect("claude is a builtin");
+        assert_eq!(
+            missing.install_command,
+            claude.install_command_for(remote_style)
+        );
+    }
+
+    #[gpui::test]
+    async fn test_remote_probe_runs_on_the_server(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        // The probe's output arrives from a real process.
+        cx.executor().allow_parking();
+        server_cx.executor().allow_parking();
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let (project, headless) = init_test(&fs, cx, server_cx).await;
+
+        let offers = server_bin_dir(Some(OFFERS_THE_FLAG));
+        point_server_path_at(&headless, offers.path(), server_cx);
+        let binary = offers.path().join("claude");
+        let check = probe_claude(&project, binary.clone(), cx).await;
+        assert_eq!(check, BypassCheck::Present);
+        // Client and server share a disk here, so only the caches tell which
+        // side ran `--help`: a remote path names nothing on the client.
+        assert_eq!(
+            client_store(&project, cx)
+                .read_with(cx, |store, _| store.cached_bypass_flag_for_test(&binary)),
+            None,
+            "the client must not have probed the binary itself"
+        );
+        assert_eq!(
+            server_store(&headless, server_cx).read_with(server_cx, |store, _| store
+                .cached_bypass_flag_for_test(&binary)),
+            Some(true),
+            "the server ran the probe and keeps the answer"
+        );
+
+        let renamed = server_bin_dir(Some(
+            "#!/bin/sh\nprintf '  --some-other-flag  Something else\\n'\n",
+        ));
+        point_server_path_at(&headless, renamed.path(), server_cx);
+        let binary = renamed.path().join("claude");
+        let check = probe_claude(&project, binary.clone(), cx).await;
+        assert_eq!(
+            check,
+            BypassCheck::Absent {
+                flag: "--dangerously-skip-permissions",
+                binary,
+            }
+        );
+    }
+
+    /// The server probes the CLI it finds itself. A request naming another
+    /// program -- even another `claude` -- is refused, not run.
+    #[gpui::test]
+    async fn test_remote_probe_ignores_a_binary_the_server_did_not_find(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        cx.executor().allow_parking();
+        server_cx.executor().allow_parking();
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let (project, headless) = init_test(&fs, cx, server_cx).await;
+        let on_path = server_bin_dir(Some(OFFERS_THE_FLAG));
+        point_server_path_at(&headless, on_path.path(), server_cx);
+        let elsewhere = server_bin_dir(Some(OFFERS_THE_FLAG));
+
+        for requested in [elsewhere.path().join("claude"), PathBuf::from("/bin/sh")] {
+            let check = probe_claude(&project, requested.clone(), cx).await;
+            assert!(
+                matches!(check, BypassCheck::Unprobed { .. }),
+                "`{}` is not the CLI the server found, got {check:?}",
+                requested.display()
+            );
+            assert_eq!(
+                server_store(&headless, server_cx).read_with(server_cx, |store, _| store
+                    .cached_bypass_flag_for_test(&requested)),
+                None,
+                "`{}` must not have been run",
+                requested.display()
+            );
+        }
+    }
+
+    /// A server session that knows these requests but has no handler for them
+    /// answers "no handler registered". That answer is named as an out-of-date
+    /// server. A server built before the requests existed cannot even decode
+    /// them, and never answers: see the timeout test below.
+    #[gpui::test]
+    async fn test_server_without_agent_handlers_is_named_out_of_date(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        init_logger();
+        let (opts, server_session, connect_guard) = RemoteClient::fake_server(cx, server_cx);
+        // Only the heartbeat the connection itself needs.
+        let server_keepalive = server_cx.new(|_| ());
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::Ping>, _| async { Ok(rpc::proto::Ack {}) },
+        );
+        drop(connect_guard);
+        let remote = RemoteClient::connect_mock(opts, cx).await;
+        let project = build_project(remote, cx);
+
+        let error = resolve_claude(&project, cx)
+            .await
+            .expect_err("a server without the handler cannot locate the CLI");
+        assert_eq!(
+            error.to_string(),
+            "the remote server does not support agent terminals yet; reconnect to update it"
+        );
+
+        let check = probe_claude(&project, PathBuf::from("/usr/bin/claude"), cx).await;
+        assert_eq!(
+            check,
+            BypassCheck::Unprobed {
+                reason:
+                    "the remote server does not support agent terminals yet; reconnect to update it"
+                        .to_string()
+            },
+            "a server without the handler fails the probe closed"
+        );
+    }
+
+    /// What a server built before these requests existed does with them:
+    /// nothing at all. The client has to give up on its own.
+    #[gpui::test]
+    async fn test_client_gives_up_on_a_server_that_never_answers(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        init_logger();
+        let (opts, server_session, connect_guard) = RemoteClient::fake_server(cx, server_cx);
+        let server_keepalive = server_cx.new(|_| ());
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::Ping>, _| async { Ok(rpc::proto::Ack {}) },
+        );
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::LocateAgentCli>, _| {
+                futures::future::pending::<anyhow::Result<rpc::proto::LocateAgentCliResponse>>()
+            },
+        );
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::ProbeAgentBypassFlag>, _| {
+                futures::future::pending::<
+                    anyhow::Result<rpc::proto::ProbeAgentBypassFlagResponse>,
+                >()
+            },
+        );
+        drop(connect_guard);
+        let remote = RemoteClient::connect_mock(opts, cx).await;
+        let project = build_project(remote, cx);
+
+        let mut locate = client_store(&project, cx).update(cx, |store, cx| {
+            store.resolve_agent_binary(&AgentId::new(CLAUDE_CODE_AGENT_ID), cx)
+        });
+        let mut probe = start_probe(&project, PathBuf::from("/usr/bin/claude"), cx);
+        cx.run_until_parked();
+        assert!(
+            (&mut locate).now_or_never().is_none() && (&mut probe).now_or_never().is_none(),
+            "the server must not have answered, or this test proves nothing"
+        );
+
+        cx.executor().advance_clock(Duration::from_secs(31));
+        cx.run_until_parked();
+
+        let Some(located) = (&mut locate).now_or_never() else {
+            panic!("the client must stop waiting for a server that never answers");
+        };
+        let error = located.expect_err("no answer is not a CLI");
+        assert!(
+            error.to_string().contains("did not answer"),
+            "got {error:#}"
+        );
+        let Some(check) = (&mut probe).now_or_never() else {
+            panic!("the probe must stop waiting too");
+        };
+        assert!(
+            matches!(&check, BypassCheck::Unprobed { reason } if reason.contains("did not answer")),
+            "got {check:?}"
+        );
+    }
+}
+
+/// A remote project's agent sessions are the remote host's: listed, checked
+/// and deleted there, with nothing on this machine read or trashed for them.
+///
+/// Unix only: the server's stores are real files (the providers read with
+/// `std::fs`) mirrored into the server's `FakeFs` at the same absolute paths,
+/// and those are temp-dir paths of the machine running the test.
+#[cfg(unix)]
+mod agent_sessions_on_remote {
+    use super::*;
+    use agent_sessions::{AgentKind, ClaudeProvider, SessionProvider};
+    use project::agent_session_host::{
+        AgentSessionHost, REMOTE_LIST_TIMEOUT, REMOTE_SESSIONS_OUT_OF_DATE, RemoteSessionHost,
+    };
+
+    const SERVER_SESSION: &str = "00000000-0000-4000-8000-0000000000c1";
+
+    /// A Claude store with one transcript that ran in `/project`, laid out
+    /// the way the CLI writes it.
+    fn server_claude_store() -> util::test::TempTree {
+        util::test::TempTree::new(json!({
+            "-project": {
+                format!("{SERVER_SESSION}.jsonl"): concat!(
+                    r#"{"type":"user","message":{"role":"user","content":"hello from the server"},"cwd":"/project"}"#,
+                    "\n",
+                    r#"{"type":"ai-title","aiTitle":"Server session"}"#,
+                    "\n"
+                ),
+            }
+        }))
+    }
+
+    fn give_the_server(
+        headless: &Entity<HeadlessProject>,
+        store: &Path,
+        server_cx: &mut TestAppContext,
+    ) {
+        let service = headless.read_with(server_cx, |headless, _| headless.agent_sessions.clone());
+        service.update(server_cx, |service, _| {
+            service.set_providers_for_test(vec![
+                Arc::new(ClaudeProvider::new(store.to_path_buf())) as Arc<dyn SessionProvider>
+            ])
+        });
+    }
+
+    fn remote_host(project: &Entity<Project>, cx: &mut TestAppContext) -> RemoteSessionHost {
+        match project.read_with(cx, |project, cx| project.agent_session_host(cx)) {
+            Some(AgentSessionHost::Remote(remote)) => remote,
+            Some(AgentSessionHost::Local(_)) => {
+                panic!("a remote project's sessions must be remote")
+            }
+            None => panic!("a remote project has a session host"),
+        }
+    }
+
+    #[gpui::test]
+    async fn test_remote_history_lists_the_servers_sessions(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let (project, headless) = init_test(&fs, cx, server_cx).await;
+        let store = server_claude_store();
+        give_the_server(&headless, store.path(), server_cx);
+
+        let host = remote_host(&project, cx);
+        let listing = cx.update(|cx| host.list(cx)).await;
+        cx.run_until_parked();
+
+        let listed: Vec<(String, String)> = listing
+            .as_ref()
+            .map(|listing| {
+                listing
+                    .sessions
+                    .iter()
+                    .map(|session| {
+                        (
+                            session.id.to_string(),
+                            session.cwd.to_string_lossy().into_owned(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            listed,
+            vec![(SERVER_SESSION.to_string(), "/project".to_string())],
+            "the server's own store, and only it, is listed: {listing:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_remote_history_delete_trashes_on_the_server_only(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let store = server_claude_store();
+        let transcript = store
+            .path()
+            .join("-project")
+            .join(format!("{SERVER_SESSION}.jsonl"));
+        fs.insert_tree(
+            store.path().join("-project"),
+            json!({ format!("{SERVER_SESSION}.jsonl"): "" }),
+        )
+        .await;
+        let (project, headless) = init_test(&fs, cx, server_cx).await;
+        give_the_server(&headless, store.path(), server_cx);
+        let client_fs = project.read_with(cx, |project, _| project.fs().as_fake());
+        // The same path on this machine, so a delete that ran here would have
+        // something to take.
+        client_fs
+            .insert_tree(
+                store.path().join("-project"),
+                json!({ format!("{SERVER_SESSION}.jsonl"): "" }),
+            )
+            .await;
+
+        let host = remote_host(&project, cx);
+        let outcome = cx
+            .update(|cx| host.delete(AgentKind::Claude, SERVER_SESSION, cx))
+            .await;
+        cx.run_until_parked();
+
+        assert_eq!(
+            outcome.ok(),
+            Some(agent_sessions::wire::WireDeleteOutcome::Gone)
+        );
+        let server_trashed: Vec<String> = fs
+            .trash_entries()
+            .into_iter()
+            .map(|entry| entry.name.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            server_trashed.contains(&format!("{SERVER_SESSION}.jsonl")),
+            "the transcript went to the server's trash, got {server_trashed:?}"
+        );
+        assert!(!fs.is_file(&transcript).await);
+        assert_eq!(
+            client_fs.trash_entries().len(),
+            0,
+            "nothing on this machine may be trashed for a remote project"
+        );
+        assert!(client_fs.is_file(&transcript).await);
+    }
+
+    #[gpui::test]
+    async fn test_remote_history_checks_directories_on_the_server(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({ "src": {} }))
+            .await;
+        let (project, _headless) = init_test(&fs, cx, server_cx).await;
+
+        let host = remote_host(&project, cx);
+        let exists = cx
+            .update(|cx| {
+                host.directories_exist(
+                    vec![
+                        PathBuf::from("/project/src"),
+                        PathBuf::from("/nowhere"),
+                        PathBuf::from("relative"),
+                    ],
+                    cx,
+                )
+            })
+            .await;
+
+        assert_eq!(exists.ok(), Some(vec![true, false, false]));
+    }
+
+    /// A tab of a remote project asks the server for its session, so one the
+    /// server holds is resumed under its own id in the directory it ran in --
+    /// whatever this machine's own stores hold, which here is nothing.
+    #[gpui::test]
+    async fn test_remote_tab_resumes_the_session_the_server_holds(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let (project, headless) = init_test(&fs, cx, server_cx).await;
+        let store = server_claude_store();
+        give_the_server(&headless, store.path(), server_cx);
+        let client_home = util::test::TempTree::new(json!({}));
+        let client_store = ClaudeProvider::new(client_home.path().to_path_buf());
+        assert_eq!(
+            client_store.find(SERVER_SESSION).ok().flatten(),
+            None,
+            "this machine holds no copy of the session"
+        );
+
+        let host = AgentSessionHost::Remote(remote_host(&project, cx));
+        let found = cx
+            .update(|cx| host.find_pinned(AgentKind::Claude, SERVER_SESSION, None, cx))
+            .await;
+        cx.run_until_parked();
+
+        let session = match found {
+            Ok(Some(session)) => session,
+            other => panic!("the server's session must be found, got {other:?}"),
+        };
+        let command = client_store
+            .resume_command(&session, agent_sessions::Fork::Continue)
+            .expect("Claude resumes what its store holds");
+        assert_eq!(
+            command.args,
+            vec!["--resume".to_string(), SERVER_SESSION.to_string()]
+        );
+        assert_eq!(command.cwd.to_string_lossy(), "/project");
+    }
+
+    /// A fork reads its source from the server, which is the only place the
+    /// source is.
+    #[gpui::test]
+    async fn test_remote_fork_branches_off_a_session_only_the_server_holds(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let (project, headless) = init_test(&fs, cx, server_cx).await;
+        let store = server_claude_store();
+        give_the_server(&headless, store.path(), server_cx);
+        let host = AgentSessionHost::Remote(remote_host(&project, cx));
+        let listed = cx
+            .update(|cx| host.list(cx))
+            .await
+            .map(|listing| listing.sessions)
+            .unwrap_or_default();
+        let source = listed
+            .into_iter()
+            .next()
+            .expect("the server lists its session");
+
+        let found = cx
+            .update(|cx| {
+                host.find_pinned(AgentKind::Claude, SERVER_SESSION, Some(source.clone()), cx)
+            })
+            .await;
+        cx.run_until_parked();
+
+        let session = match found {
+            Ok(Some(session)) => session,
+            other => panic!("a fork's source on the server must be found, got {other:?}"),
+        };
+        let command = ClaudeProvider::new(PathBuf::from("/unused"))
+            .resume_command(&session, agent_sessions::Fork::New)
+            .expect("Claude forks");
+        assert_eq!(
+            command.args,
+            vec![
+                "--resume".to_string(),
+                SERVER_SESSION.to_string(),
+                "--fork-session".to_string()
+            ]
+        );
+    }
+
+    /// A tab pinned to one copy of a session that the server now finds
+    /// somewhere else keeps its copy only while that copy's transcript is on
+    /// the server. The same file on this machine says nothing about it.
+    #[gpui::test]
+    async fn test_remote_pinned_copy_is_checked_on_the_server_not_here(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({})).await;
+        let (project, headless) = init_test(&fs, cx, server_cx).await;
+        let store = server_claude_store();
+        give_the_server(&headless, store.path(), server_cx);
+        let pinned_log = PathBuf::from("/elsewhere/-project-copy/pinned.jsonl");
+        let pinned = agent_sessions::SessionSummary {
+            id: SERVER_SESSION.into(),
+            agent: AgentKind::Claude,
+            title: "Pinned copy".to_string(),
+            preview: String::new(),
+            preview_speaker: None,
+            cwd: PathBuf::from("/project/copy"),
+            branch: None,
+            model: None,
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
+            log_path: Some(pinned_log.clone()),
+            log_bytes: 0,
+        };
+        let client_fs = project.read_with(cx, |project, _| project.fs().as_fake());
+        client_fs
+            .insert_tree("/elsewhere/-project-copy", json!({ "pinned.jsonl": "" }))
+            .await;
+        let host = AgentSessionHost::Remote(remote_host(&project, cx));
+
+        let while_gone = cx
+            .update(|cx| {
+                host.find_pinned(AgentKind::Claude, SERVER_SESSION, Some(pinned.clone()), cx)
+            })
+            .await;
+        cx.run_until_parked();
+        assert_eq!(
+            while_gone.ok(),
+            Some(None),
+            "a pinned copy whose transcript is gone from the server is gone"
+        );
+
+        fs.insert_tree("/elsewhere/-project-copy", json!({ "pinned.jsonl": "" }))
+            .await;
+        let while_there = cx
+            .update(|cx| {
+                host.find_pinned(AgentKind::Claude, SERVER_SESSION, Some(pinned.clone()), cx)
+            })
+            .await;
+        cx.run_until_parked();
+        assert_eq!(while_there.ok(), Some(Some(pinned)));
+    }
+
+    #[gpui::test]
+    async fn test_remote_paths_are_checked_on_the_server(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let fs = FakeFs::new(server_cx.executor());
+        fs.insert_tree(path!("/project"), json!({ "s.jsonl": "", "src": {} }))
+            .await;
+        let (project, _headless) = init_test(&fs, cx, server_cx).await;
+        let host = remote_host(&project, cx);
+        let paths = vec![
+            PathBuf::from("/project/s.jsonl"),
+            PathBuf::from("/project/src"),
+            PathBuf::from("/nowhere.jsonl"),
+            PathBuf::from("relative.jsonl"),
+        ];
+
+        let files = cx
+            .update(|cx| {
+                host.paths_exist(paths.clone(), agent_sessions::wire::WirePathKind::File, cx)
+            })
+            .await;
+        let directories = cx
+            .update(|cx| host.paths_exist(paths, agent_sessions::wire::WirePathKind::Directory, cx))
+            .await;
+
+        assert_eq!(files.ok(), Some(vec![true, false, false, false]));
+        assert_eq!(directories.ok(), Some(vec![false, true, false, false]));
+    }
+
+    /// A server that predates a request knows its envelope but not its op, and
+    /// says so. That is the same out-of-date server as one with no handler.
+    #[gpui::test]
+    async fn test_remote_names_an_out_of_date_server_for_an_op_it_cannot_read(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        init_logger();
+        let (opts, server_session, connect_guard) = RemoteClient::fake_server(cx, server_cx);
+        let server_keepalive = server_cx.new(|_| ());
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::Ping>, _| async { Ok(rpc::proto::Ack {}) },
+        );
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::AgentSessionRequest>, _| async {
+                Err::<rpc::proto::AgentSessionResponse, _>(
+                    anyhow::anyhow!("unknown variant `paths_exist`")
+                        .context("a session request this server cannot read"),
+                )
+            },
+        );
+        drop(connect_guard);
+        let remote = RemoteClient::connect_mock(opts, cx).await;
+        let project = build_project(remote, cx);
+
+        let host = remote_host(&project, cx);
+        let exists = cx
+            .update(|cx| {
+                host.paths_exist(
+                    vec![PathBuf::from("/project/s.jsonl")],
+                    agent_sessions::wire::WirePathKind::File,
+                    cx,
+                )
+            })
+            .await;
+
+        assert_eq!(
+            exists.map_err(|error| error.to_string()).err().as_deref(),
+            Some(REMOTE_SESSIONS_OUT_OF_DATE)
+        );
+    }
+
+    /// A server that knows the request but has no handler for it answers at
+    /// once, and the history names the fix rather than showing an error.
+    #[gpui::test]
+    async fn test_remote_history_names_an_out_of_date_server(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        init_logger();
+        let (opts, server_session, connect_guard) = RemoteClient::fake_server(cx, server_cx);
+        let server_keepalive = server_cx.new(|_| ());
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::Ping>, _| async { Ok(rpc::proto::Ack {}) },
+        );
+        drop(connect_guard);
+        let remote = RemoteClient::connect_mock(opts, cx).await;
+        let project = build_project(remote, cx);
+
+        let host = remote_host(&project, cx);
+        let listing = cx.update(|cx| host.list(cx)).await;
+
+        assert_eq!(
+            listing.map_err(|error| error.to_string()).err().as_deref(),
+            Some(REMOTE_SESSIONS_OUT_OF_DATE)
+        );
+    }
+
+    /// A server too old to know the request drops it without a word. The
+    /// deadline ends the wait, and what the history then shows -- the store
+    /// keeps a failed listing's error as the empty list's text -- says what to
+    /// try without claiming the server is old.
+    #[gpui::test]
+    async fn test_remote_history_names_a_server_that_never_answers(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        init_logger();
+        let (opts, server_session, connect_guard) = RemoteClient::fake_server(cx, server_cx);
+        let server_keepalive = server_cx.new(|_| ());
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::Ping>, _| async { Ok(rpc::proto::Ack {}) },
+        );
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: rpc::TypedEnvelope<rpc::proto::AgentSessionRequest>, _| {
+                futures::future::pending::<anyhow::Result<rpc::proto::AgentSessionResponse>>()
+            },
+        );
+        drop(connect_guard);
+        let remote = RemoteClient::connect_mock(opts, cx).await;
+        let project = build_project(remote, cx);
+
+        let host = remote_host(&project, cx);
+        let listing = cx.update(|cx| host.list(cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(REMOTE_LIST_TIMEOUT);
+        cx.run_until_parked();
+
+        assert_eq!(
+            listing
+                .await
+                .map_err(|error| error.to_string())
+                .err()
+                .as_deref(),
+            Some(
+                "the remote server did not answer within 60s; if it is older than this app, \
+                 reconnect, then refresh"
+            )
+        );
+    }
+}
+
+/// A real directory standing in for a checkout on the remote host. The
+/// server's private-file handlers read and write with `std::fs`, so the
+/// worktree is opened over a fake filesystem at the same path while the files
+/// themselves are real.
+struct PrivateFileSandbox(PathBuf);
+
+impl PrivateFileSandbox {
+    fn new(name: &str) -> Self {
+        let directory =
+            std::env::temp_dir().join(format!("zode-remote-private-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&directory).ok();
+        std::fs::create_dir_all(directory.join("project")).expect("a sandbox");
+        std::fs::create_dir_all(directory.join("outside")).expect("a sandbox");
+        Self(directory)
+    }
+
+    fn project(&self) -> PathBuf {
+        self.0.join("project")
+    }
+}
+
+impl Drop for PrivateFileSandbox {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+async fn private_file_project(
+    sandbox: &PrivateFileSandbox,
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) -> (
+    Entity<Project>,
+    Entity<HeadlessProject>,
+    project::WorktreeId,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(sandbox.project(), json!({})).await;
+    let (project, headless) = init_test(&fs, cx, server_cx).await;
+    let (worktree, _) = project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(sandbox.project(), true, cx)
+        })
+        .await
+        .unwrap();
+    let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
+    cx.run_until_parked();
+    server_cx.run_until_parked();
+    (project, headless, worktree_id)
+}
+
+fn remote_private_file(
+    project: &Entity<Project>,
+    worktree_id: project::WorktreeId,
+    path: &str,
+    cx: &mut TestAppContext,
+) -> project::worktree_store::RemotePrivateFile {
+    project.read_with(cx, |project, cx| {
+        project
+            .worktree_store()
+            .read(cx)
+            .remote_private_file(
+                worktree_id,
+                util::rel_path::RelPath::from_proto(path).unwrap(),
+                cx,
+            )
+            .expect("a remote project reaches its host's private files")
+    })
+}
+
+fn assert_private_file_refused<T>(result: anyhow::Result<T>, expected: &str) {
+    let Err(error) = result else {
+        panic!("the request must be refused");
+    };
+    assert!(
+        format!("{error:#}").contains(expected),
+        "expected {expected:?}, got {error:#}"
+    );
+}
+
+#[gpui::test]
+async fn test_remote_private_file_round_trip(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let sandbox = PrivateFileSandbox::new("round-trip");
+    let target = sandbox.project().join(".env");
+    std::fs::write(&target, b"OLD=1\n").unwrap();
+    let (project, _headless, worktree_id) = private_file_project(&sandbox, cx, server_cx).await;
+    let file = remote_private_file(&project, worktree_id, ".env", cx);
+
+    let loaded = cx.spawn({
+        let file = file.clone();
+        async move |_| file.load().await
+    });
+    cx.run_until_parked();
+    assert_eq!(loaded.await.unwrap(), Some(b"OLD=1\n".to_vec()));
+
+    let written = cx.spawn({
+        let file = file.clone();
+        async move |_| file.write(b"NEW=1\n".to_vec()).await
+    });
+    cx.run_until_parked();
+    written.await.unwrap();
+
+    assert_eq!(std::fs::read(&target).unwrap(), b"NEW=1\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the remote .env must be owner-only");
+    }
+}
+
+#[gpui::test]
+async fn test_remote_private_file_refuses_a_file_the_server_does_not_call_private(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let sandbox = PrivateFileSandbox::new("not-private");
+    let source = sandbox.project().join("src/main.rs");
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, b"fn main() {}").unwrap();
+    let (project, _headless, worktree_id) = private_file_project(&sandbox, cx, server_cx).await;
+    let file = remote_private_file(&project, worktree_id, "src/main.rs", cx);
+
+    let loaded = cx.spawn({
+        let file = file.clone();
+        async move |_| file.load().await
+    });
+    cx.run_until_parked();
+    assert_private_file_refused(loaded.await, "not a private file");
+
+    // Sent raw, past the client's own read-before-write rule, so the server
+    // is the one that has to refuse.
+    let client = project.read_with(cx, |project, cx| {
+        project.remote_client().unwrap().read(cx).proto_client()
+    });
+    let written = client.request(proto::WritePrivateFile {
+        project_id: proto::REMOTE_SERVER_PROJECT_ID,
+        worktree_id: worktree_id.to_proto(),
+        path: "src/main.rs".into(),
+        content: b"overwritten".to_vec(),
+        replaces_sha256: None,
+    });
+    cx.run_until_parked();
+    assert_private_file_refused(written.await, "not a private file");
+    assert_eq!(std::fs::read(&source).unwrap(), b"fn main() {}");
+}
+
+#[gpui::test]
+async fn test_remote_private_file_follows_the_server_settings(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let sandbox = PrivateFileSandbox::new("server-settings");
+    std::fs::write(sandbox.project().join("secrets.txt"), b"TOKEN=1").unwrap();
+    let (project, _headless, worktree_id) = private_file_project(&sandbox, cx, server_cx).await;
+    server_cx.update_global::<SettingsStore, _>(|settings_store, cx| {
+        settings_store
+            .set_server_settings(
+                &json!({ "private_files": ["**/secrets.txt"] }).to_string(),
+                cx,
+            )
+            .unwrap();
+    });
+    server_cx.run_until_parked();
+    cx.run_until_parked();
+
+    let file = remote_private_file(&project, worktree_id, "secrets.txt", cx);
+    let loaded = cx.spawn(async move |_| file.load().await);
+    cx.run_until_parked();
+    assert_eq!(loaded.await.unwrap(), Some(b"TOKEN=1".to_vec()));
+}
+
+#[gpui::test]
+async fn test_remote_private_file_refuses_paths_that_leave_the_project(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let sandbox = PrivateFileSandbox::new("escape");
+    let outside = sandbox.0.join("outside/.env");
+    std::fs::write(&outside, b"OUTSIDE=1").unwrap();
+    let (project, _headless, worktree_id) = private_file_project(&sandbox, cx, server_cx).await;
+    let client = project.read_with(cx, |project, cx| {
+        project.remote_client().unwrap().read(cx).proto_client()
+    });
+
+    for path in ["../outside/.env", "/etc/passwd", "a/../../outside/.env", ""] {
+        let loaded = client.request(proto::LoadPrivateFile {
+            project_id: proto::REMOTE_SERVER_PROJECT_ID,
+            worktree_id: worktree_id.to_proto(),
+            path: path.into(),
+        });
+        cx.run_until_parked();
+        assert_private_file_refused(loaded.await, "does not name a file inside this project");
+
+        let written = client.request(proto::WritePrivateFile {
+            project_id: proto::REMOTE_SERVER_PROJECT_ID,
+            worktree_id: worktree_id.to_proto(),
+            path: path.into(),
+            content: b"ESCAPED=1".to_vec(),
+            replaces_sha256: None,
+        });
+        cx.run_until_parked();
+        assert_private_file_refused(written.await, "does not name a file inside this project");
+    }
+    assert_eq!(std::fs::read(&outside).unwrap(), b"OUTSIDE=1");
+
+    #[cfg(unix)]
+    {
+        let shadow = sandbox.0.join("outside/shadow");
+        std::fs::write(&shadow, b"root:x").unwrap();
+        std::os::unix::fs::symlink(&shadow, sandbox.project().join(".env")).unwrap();
+        let file = remote_private_file(&project, worktree_id, ".env", cx);
+        let loaded = cx.spawn(async move |_| file.load().await);
+        cx.run_until_parked();
+        assert_private_file_refused(loaded.await, "is a symbolic link");
+        assert_eq!(std::fs::read(&shadow).unwrap(), b"root:x");
+    }
+}
+
+#[gpui::test]
+async fn test_remote_private_file_on_a_server_that_predates_it(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(cx.executor());
+    let (project, _server) = Project::test_remote(fs, cx, server_cx).await;
+    let file = remote_private_file(&project, project::WorktreeId::from_usize(1), ".env", cx);
+
+    let loaded = cx.spawn({
+        let file = file.clone();
+        async move |_| file.load().await
+    });
+    cx.run_until_parked();
+    let Err(error) = loaded.await else {
+        panic!("an old server cannot answer");
+    };
+    assert_eq!(
+        format!("{error:#}"),
+        project::worktree_store::PRIVATE_FILE_SERVER_OUT_OF_DATE
+    );
+
+    // The read failed, so nothing was backed up; a write must not be sent.
+    let written = cx.spawn(async move |_| file.write(b"A=1".to_vec()).await);
+    cx.run_until_parked();
+    assert_private_file_refused(written.await, "must be read");
+}
+
+#[gpui::test]
+async fn test_remote_private_file_absent_when_read_is_not_overwritten_once_it_appears(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let sandbox = PrivateFileSandbox::new("stale-absent");
+    let target = sandbox.project().join(".env");
+    let (project, _headless, worktree_id) = private_file_project(&sandbox, cx, server_cx).await;
+    let file = remote_private_file(&project, worktree_id, ".env", cx);
+
+    let loaded = cx.spawn({
+        let file = file.clone();
+        async move |_| file.load().await
+    });
+    cx.run_until_parked();
+    assert_eq!(loaded.await.unwrap(), None);
+
+    // Created on the host after the read: nothing backed it up on this side.
+    std::fs::write(&target, b"CREATED=meanwhile").unwrap();
+    let written = cx.spawn(async move |_| file.write(b"PULLED=1".to_vec()).await);
+    cx.run_until_parked();
+    assert_private_file_refused(written.await, "changed on the remote since it was read");
+    assert_eq!(std::fs::read(&target).unwrap(), b"CREATED=meanwhile");
+}
+
+const DRIVER_RELEASE_VERSION: &str = "0.9.0";
+
+/// A release serving the `postgres` driver, signed with the test key.
+fn driver_release_serving(
+    manifest: Vec<u8>,
+    signed_manifest: Vec<u8>,
+    archive: Vec<u8>,
+) -> Arc<dyn http_client::HttpClient> {
+    use database::install::test_support::archive_asset_for;
+    use database::signature::SIGNED_MANIFEST_ASSET;
+    FakeHttpClient::create(move |request| {
+        let manifest = manifest.clone();
+        let signed_manifest = signed_manifest.clone();
+        let archive = archive.clone();
+        async move {
+            let path = request.uri().path().to_string();
+            let body = if path.ends_with("zode-db-drivers-manifest.json") {
+                manifest
+            } else if path.ends_with(SIGNED_MANIFEST_ASSET) {
+                signed_manifest
+            } else if path.ends_with(&archive_asset_for("postgres")) {
+                archive
+            } else {
+                return Ok(http_client::Response::builder()
+                    .status(404)
+                    .body(Default::default())?);
+            };
+            Ok(http_client::Response::builder()
+                .status(200)
+                .body(body.into())?)
+        }
+    })
+}
+
+/// Gives the server a driver store of its own and an installer reading
+/// `http`, trusting the test signing key when `trusting_test_key` is set.
+fn give_server_driver_store(
+    headless: &Entity<HeadlessProject>,
+    root: &Path,
+    http: Arc<dyn http_client::HttpClient>,
+    trusting_test_key: bool,
+    server_cx: &mut TestAppContext,
+) {
+    use database::install::{DriverEndpoint, DriverInstaller};
+    let mut installer = DriverInstaller::with_root(
+        http,
+        DriverEndpoint::new("https://api.test.invalid/api"),
+        root.to_path_buf(),
+    )
+    .accepting_versions_from("0.0.0");
+    if trusting_test_key {
+        installer = installer.trusting(database::signature::testing::public_key());
+    }
+    headless.update(server_cx, |headless, _| {
+        headless.database_drivers = Arc::new(
+            crate::headless_project::HostDatabaseDrivers::with_installer(
+                root.to_path_buf(),
+                Arc::new(installer),
+            ),
+        );
+    });
+}
+
+async fn ensure_driver_on_server(
+    project: &Entity<Project>,
+    driver_id: &str,
+    install: bool,
+    cx: &mut TestAppContext,
+) -> proto::ensure_database_driver_response::State {
+    let client = project.read_with(cx, |project, cx| {
+        project.remote_client().unwrap().read(cx).proto_client()
+    });
+    let response = client.request(proto::EnsureDatabaseDriver {
+        project_id: proto::REMOTE_SERVER_PROJECT_ID,
+        driver_id: driver_id.to_string(),
+        install,
+        api_url: "https://api.test.invalid/api".to_string(),
+    });
+    let response = cx.spawn(async move |_| response.await);
+    cx.run_until_parked();
+    response
+        .await
+        .expect("the server answers")
+        .state
+        .expect("the server says what it found")
+}
+
+#[gpui::test]
+async fn test_remote_database_driver_resolves_in_the_server_store(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    use proto::ensure_database_driver_response::State;
+    // The server reads its store on a blocking thread.
+    cx.executor().allow_parking();
+    let fs = FakeFs::new(server_cx.executor());
+    let (project, headless) = init_test(&fs, cx, server_cx).await;
+    let server_store = tempfile::tempdir().unwrap();
+    let planted = database::install::test_support::plant_driver(
+        server_store.path(),
+        "postgres",
+        DRIVER_RELEASE_VERSION,
+        true,
+    );
+    give_server_driver_store(
+        &headless,
+        server_store.path(),
+        FakeHttpClient::with_404_response(),
+        true,
+        server_cx,
+    );
+
+    match ensure_driver_on_server(&project, "postgres", false, cx).await {
+        State::Installed(installed) => {
+            assert_eq!(PathBuf::from(&installed.executable), planted);
+            assert_eq!(installed.origin, proto::DatabaseDriverOrigin::Store as i32);
+        }
+        other => panic!("expected the driver in the server's store, got {other:?}"),
+    }
+    assert!(matches!(
+        ensure_driver_on_server(&project, "mysql", false, cx).await,
+        State::NotInstalled(_)
+    ));
+    match ensure_driver_on_server(&project, "../postgres", false, cx).await {
+        State::Failed(failed) => assert!(failed.reason.contains("not a database driver")),
+        other => panic!("an id outside the published set must be refused, got {other:?}"),
+    }
+}
+
+#[gpui::test]
+async fn test_remote_database_driver_install_verifies_on_the_server(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    use database::install::test_support::{
+        directory_entries, driver_archive, manifest_for, sha256_of, signed_manifest_for,
+    };
+    use proto::ensure_database_driver_response::State;
+    cx.executor().allow_parking();
+    let fs = FakeFs::new(server_cx.executor());
+    let (project, headless) = init_test(&fs, cx, server_cx).await;
+    let archive = driver_archive("postgres").await;
+
+    let release = |published: String| {
+        driver_release_serving(
+            manifest_for(
+                "postgres",
+                &archive,
+                published.clone(),
+                DRIVER_RELEASE_VERSION,
+            ),
+            signed_manifest_for("postgres", &archive, published, DRIVER_RELEASE_VERSION),
+            archive.clone(),
+        )
+    };
+
+    let tampered_store = tempfile::tempdir().unwrap();
+    give_server_driver_store(
+        &headless,
+        tampered_store.path(),
+        release("a".repeat(64)),
+        true,
+        server_cx,
+    );
+    match ensure_driver_on_server(&project, "postgres", true, cx).await {
+        State::Failed(failed) => assert!(
+            failed.reason.contains("does not match the checksum"),
+            "{}",
+            failed.reason
+        ),
+        other => panic!("a tampered archive must be refused, got {other:?}"),
+    }
+    assert!(
+        directory_entries(tampered_store.path(), "postgres")
+            .iter()
+            .all(|entry| entry.starts_with('.')),
+        "nothing from a tampered archive may be installed: {:?}",
+        directory_entries(tampered_store.path(), "postgres")
+    );
+
+    let unsigned_store = tempfile::tempdir().unwrap();
+    give_server_driver_store(
+        &headless,
+        unsigned_store.path(),
+        release(sha256_of(&archive)),
+        false,
+        server_cx,
+    );
+    match ensure_driver_on_server(&project, "postgres", true, cx).await {
+        State::Failed(failed) => assert!(
+            failed
+                .reason
+                .contains("does not match Zode's driver signing key"),
+            "{}",
+            failed.reason
+        ),
+        other => panic!(
+            "a manifest not signed with the key built into the server must be refused, got {other:?}"
+        ),
+    }
+    assert!(directory_entries(unsigned_store.path(), "postgres").is_empty());
+
+    let store = tempfile::tempdir().unwrap();
+    give_server_driver_store(
+        &headless,
+        store.path(),
+        release(sha256_of(&archive)),
+        true,
+        server_cx,
+    );
+    match ensure_driver_on_server(&project, "postgres", true, cx).await {
+        State::Installed(installed) => {
+            assert!(
+                PathBuf::from(&installed.executable).starts_with(store.path()),
+                "installed into the server's store: {}",
+                installed.executable
+            );
+            assert_eq!(installed.origin, proto::DatabaseDriverOrigin::Store as i32);
+        }
+        other => panic!("a verified driver must be installed, got {other:?}"),
+    }
+}
+
+/// What the server answers when asked to install `postgres` from `api_url`.
+async fn install_from(
+    drivers: &crate::headless_project::HostDatabaseDrivers,
+    api_url: &str,
+) -> proto::ensure_database_driver_response::State {
+    drivers.ensure("postgres".to_string(), true, api_url).await
+}
+
+fn failure_reason(state: proto::ensure_database_driver_response::State) -> String {
+    match state {
+        proto::ensure_database_driver_response::State::Failed(failed) => failed.reason,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}
+
+/// One installer for the life of the server: a second, for another API,
+/// would run a second download of the same driver beside the first.
+#[test]
+fn test_remote_database_driver_installs_from_the_first_api_only() {
+    let store = tempfile::tempdir().unwrap();
+    let drivers = crate::headless_project::HostDatabaseDrivers::new(
+        store.path().to_path_buf(),
+        FakeHttpClient::with_404_response(),
+    );
+    smol::block_on(async {
+        install_from(&drivers, "https://api.one.invalid/api").await;
+        let reason = failure_reason(install_from(&drivers, "https://api.two.invalid/api").await);
+        assert!(
+            reason.contains("already downloads drivers from https://api.one.invalid/api"),
+            "{reason}"
+        );
+    });
+}
+
+/// `localhost` on the server is the server's own machine, never the client's,
+/// so a plain-http API the client names is refused there.
+#[test]
+fn test_remote_database_driver_refuses_plain_http_by_default() {
+    let store = tempfile::tempdir().unwrap();
+    let drivers = crate::headless_project::HostDatabaseDrivers::new(
+        store.path().to_path_buf(),
+        FakeHttpClient::with_404_response(),
+    );
+    let reason = failure_reason(smol::block_on(install_from(
+        &drivers,
+        "http://localhost:8000/api",
+    )));
+    assert!(reason.contains("is not https"), "{reason}");
+    assert!(
+        database::install::test_support::directory_entries(store.path(), "postgres").is_empty(),
+        "nothing was fetched into the store"
+    );
+}
+
+#[test]
+fn test_remote_database_driver_takes_plain_http_the_server_was_started_with() {
+    let store = tempfile::tempdir().unwrap();
+    let drivers = crate::headless_project::HostDatabaseDrivers::new(
+        store.path().to_path_buf(),
+        FakeHttpClient::with_404_response(),
+    )
+    .with_own_api_url("http://localhost:8000/api");
+    let reason = failure_reason(smol::block_on(install_from(
+        &drivers,
+        "http://localhost:8000/api",
+    )));
+    assert!(
+        reason.contains("http://localhost:8000/api/drivers/latest"),
+        "the server's own API is asked, and answers 404 here: {reason}"
+    );
+    let reason = failure_reason(smol::block_on(install_from(
+        &drivers,
+        "http://localhost:9000/api",
+    )));
+    assert!(reason.contains("is not https"), "{reason}");
+}
+
+/// A driver path that is not UTF-8 is said to be one, not mangled into the
+/// name of a file that does not exist.
+#[cfg(unix)]
+#[test]
+fn test_remote_database_driver_at_a_path_that_is_not_utf8_is_refused() {
+    use std::os::unix::ffi::OsStrExt as _;
+    let executable = PathBuf::from(std::ffi::OsStr::from_bytes(
+        b"/opt/drivers/zode-db-\xffpostgres",
+    ));
+    let reason = failure_reason(crate::headless_project::installed_answer(
+        executable,
+        database::install::store::DriverLocation::Override,
+    ));
+    assert!(reason.contains("not UTF-8"), "{reason}");
 }

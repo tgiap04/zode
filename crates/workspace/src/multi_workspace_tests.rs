@@ -3654,3 +3654,46 @@ async fn test_prompt_and_open_paths_prompts_in_the_active_workspace_window(
         "the prompt belongs in the window the user is in, not the first one created"
     );
 }
+
+fn set_window_settings(cx: &mut VisualTestContext, opacity: f32, image: Option<&str>) {
+    let image = image.map(|path| settings::WindowBackgroundImagePath(path.to_string()));
+    cx.update(|_, cx| {
+        SettingsStore::update_global(cx, |store, cx| {
+            store.update_user_settings(cx, |settings| {
+                settings.theme.window_opacity = Some(settings::WindowOpacity(opacity));
+                settings.theme.window_background_image = image.clone();
+            });
+        });
+    });
+    cx.run_until_parked();
+}
+
+/// The reported defect: fading every surface left the editor, which sits on
+/// more stacked layers, solid long after the rail and bars had gone. The
+/// window now fades as a whole, so what the platform window is given is the
+/// whole of it.
+#[gpui::test]
+async fn test_window_opacity_fades_the_whole_window(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    let project = Project::test(fs, [], cx).await;
+    let (_multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|window, _| window.content_opacity()), 1.0);
+
+    set_window_settings(cx, 0.6, None);
+    assert_eq!(
+        cx.update(|window, _| window.content_opacity()),
+        0.6,
+        "the window takes the setting as soon as it changes"
+    );
+
+    // With an image the image is laid over the window instead, so the window
+    // itself is solid again.
+    set_window_settings(cx, 0.6, Some("/pictures/wall.png"));
+    assert_eq!(cx.update(|window, _| window.content_opacity()), 1.0);
+
+    set_window_settings(cx, 1.0, None);
+    assert_eq!(cx.update(|window, _| window.content_opacity()), 1.0);
+}

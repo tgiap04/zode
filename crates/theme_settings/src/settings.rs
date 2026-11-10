@@ -33,6 +33,13 @@ pub fn appearance_to_mode(appearance: Appearance) -> ThemeAppearanceMode {
     }
 }
 
+/// How much of `window_opacity` the backgrounds keep while vibrancy or a
+/// background image is on: what Tabby shows. Tabby fades each of its
+/// backgrounds to 40%, but they are stacked several deep, so the window ends up
+/// about 88% opaque (measured against Zode side by side, same wallpaper). Zode
+/// fades its backgrounds once, as one layer, so it takes the result directly.
+pub const GLASS_OPACITY: f32 = 0.88;
+
 /// Customizable settings for the UI and theme system.
 #[derive(Clone, PartialEq, RegisterSetting)]
 pub struct ThemeSettings {
@@ -74,6 +81,14 @@ pub struct ThemeSettings {
     pub ui_density: UiDensity,
     /// The amount of fading applied to unnecessary code.
     pub unnecessary_code_fade: f32,
+    /// How opaque the window's surfaces are, 0 to 1.
+    pub window_opacity: f32,
+    /// Whether the window shows what is behind it, blurred, through its
+    /// backgrounds.
+    pub window_vibrancy: bool,
+    /// The image behind the window's surfaces, by path. Read from there and
+    /// never copied.
+    pub window_background_image: Option<std::path::PathBuf>,
 }
 
 /// Returns the name of the default theme for the given [`Appearance`].
@@ -413,7 +428,38 @@ impl ThemeSettings {
             ThemeSettings::modify_theme(&mut theme, theme_overrides);
         }
 
+        crate::apply_window_effects(&mut theme, self.window_effects());
+
         Arc::new(theme)
+    }
+
+    /// How opaque the window's backgrounds are. With vibrancy or a background
+    /// image it is [`GLASS_OPACITY`] of `window_opacity`, so the glass shows as
+    /// soon as either is turned on, as it does in Tabby; without either it is
+    /// `window_opacity` as set.
+    pub fn background_opacity(&self) -> f32 {
+        if self.window_vibrancy || self.window_background_image.is_some() {
+            self.window_opacity * GLASS_OPACITY
+        } else {
+            self.window_opacity
+        }
+    }
+
+    /// Where the platform cannot make only the backgrounds see-through, the
+    /// background image is laid over the window instead, at this opacity: the
+    /// window at `background_opacity` over the image looks like the image at
+    /// `1 - background_opacity` over the window.
+    pub fn background_image_opacity(&self) -> f32 {
+        1.0 - self.background_opacity()
+    }
+
+    /// The window's see-through settings, as the theme needs them.
+    pub fn window_effects(&self) -> crate::WindowEffects {
+        crate::WindowEffects {
+            opacity: self.background_opacity(),
+            vibrancy: self.window_vibrancy,
+            has_background_image: self.window_background_image.is_some(),
+        }
     }
 
     fn modify_theme(base_theme: &mut Theme, theme_overrides: &settings::ThemeStyleContent) {
@@ -564,6 +610,20 @@ impl settings::Settings for ThemeSettings {
             icon_theme: icon_theme_selection,
             ui_density: ui_density_from_settings(content.ui_density.unwrap_or_default()),
             unnecessary_code_fade: content.unnecessary_code_fade.unwrap().0.clamp(0.0, 0.9),
+            window_opacity: content
+                .window_opacity
+                .map_or(1.0, |opacity| opacity.0)
+                .clamp(0.0, 1.0),
+            window_vibrancy: content.window_vibrancy.unwrap_or(false),
+            window_background_image: content
+                .window_background_image
+                .as_ref()
+                .map(|path| path.0.trim())
+                .filter(|path| !path.is_empty())
+                .map(|path| match path.strip_prefix("~/") {
+                    Some(rest) => util::paths::home_dir().join(rest),
+                    None => std::path::PathBuf::from(path),
+                }),
         }
     }
 }

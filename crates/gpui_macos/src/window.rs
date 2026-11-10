@@ -76,6 +76,10 @@ static mut PANEL_CLASS: *const Class = ptr::null();
 static mut VIEW_CLASS: *const Class = ptr::null();
 static mut BLURRED_VIEW_CLASS: *const Class = ptr::null();
 
+/// `NSVisualEffectMaterialFullScreenUI`, the material Electron's `fullscreen-ui`
+/// vibrancy names. Not in the `cocoa` crate's enum.
+const NS_VISUAL_EFFECT_MATERIAL_FULL_SCREEN_UI: NSInteger = 15;
+
 #[allow(non_upper_case_globals)]
 const NSWindowStyleMaskNonactivatingPanel: NSWindowStyleMask =
     NSWindowStyleMask::from_bits_retain(1 << 7);
@@ -429,6 +433,7 @@ struct MacWindowState {
     native_view: NonNull<Object>,
     blurred_view: Option<id>,
     background_appearance: WindowBackgroundAppearance,
+    content_opacity: f32,
     display_link: Option<DisplayLink>,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
@@ -754,6 +759,7 @@ impl MacWindow {
                 native_view: NonNull::new_unchecked(native_view),
                 blurred_view: None,
                 background_appearance: WindowBackgroundAppearance::Opaque,
+                content_opacity: 1.0,
                 display_link: None,
                 renderer: renderer::new_renderer(
                     renderer_context,
@@ -1388,9 +1394,32 @@ impl PlatformWindow for MacWindow {
 
     fn set_app_id(&mut self, _app_id: &str) {}
 
+    fn set_content_opacity(&self, opacity: f32) {
+        let mut this = self.0.as_ref().lock();
+        this.content_opacity = opacity;
+        this.renderer.set_vibrancy_opacity(opacity);
+    }
+
+    fn content_opacity(&self) -> f32 {
+        self.0.as_ref().lock().content_opacity
+    }
+
+    fn supports_vibrancy(&self) -> bool {
+        true
+    }
+
+    fn set_backdrop_image(&self, image: Option<Arc<gpui::RenderImage>>) {
+        self.0.as_ref().lock().renderer.set_backdrop_image(image);
+    }
+
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         let mut this = self.0.as_ref().lock();
+        let previous_appearance = this.background_appearance;
         this.background_appearance = background_appearance;
+        let shows_a_material = matches!(
+            background_appearance,
+            WindowBackgroundAppearance::Blurred | WindowBackgroundAppearance::Vibrancy
+        );
 
         let opaque = background_appearance == WindowBackgroundAppearance::Opaque;
         this.renderer.update_transparency(!opaque);
@@ -1409,11 +1438,7 @@ impl PlatformWindow for MacWindow {
                 // Whether `-[NSVisualEffectView respondsToSelector:@selector(_updateProxyLayer)]`.
                 // On macOS Catalina/Big Sur `NSVisualEffectView` doesn’t own concrete sublayers
                 // but uses a `CAProxyLayer`. Use the legacy WindowServer API.
-                let blur_radius = if background_appearance == WindowBackgroundAppearance::Blurred {
-                    80
-                } else {
-                    0
-                };
+                let blur_radius = if shows_a_material { 80 } else { 0 };
 
                 let window_number = this.native_window.windowNumber();
                 CGSSetWindowBackgroundBlurRadius(CGSMainConnectionID(), window_number, blur_radius);
@@ -1421,16 +1446,29 @@ impl PlatformWindow for MacWindow {
                 // On newer macOS `NSVisualEffectView` manages the effect layer directly. Using it
                 // could have a better performance (it downsamples the backdrop) and more control
                 // over the effect layer.
-                if background_appearance != WindowBackgroundAppearance::Blurred {
-                    if let Some(blur_view) = this.blurred_view {
+                // Blurred and Vibrancy use different views, so switching between
+                // them replaces the view rather than keeping the old one.
+                if !shows_a_material || previous_appearance != background_appearance {
+                    if let Some(blur_view) = this.blurred_view.take() {
                         NSView::removeFromSuperview(blur_view);
-                        this.blurred_view = None;
                     }
-                } else if this.blurred_view.is_none() {
+                }
+                if shows_a_material && this.blurred_view.is_none() {
                     let content_view = this.native_window.contentView();
                     let frame = NSView::bounds(content_view);
-                    let mut blur_view: id = msg_send![BLURRED_VIEW_CLASS, alloc];
+                    let mut blur_view: id =
+                        if background_appearance == WindowBackgroundAppearance::Vibrancy {
+                            msg_send![class!(NSVisualEffectView), alloc]
+                        } else {
+                            msg_send![BLURRED_VIEW_CLASS, alloc]
+                        };
                     blur_view = NSView::initWithFrame_(blur_view, frame);
+                    if background_appearance == WindowBackgroundAppearance::Vibrancy {
+                        // The system material, tint and saturation kept, as Tabby
+                        // and other Electron apps get from `setVibrancy`.
+                        let _: () = msg_send![blur_view, setMaterial: NS_VISUAL_EFFECT_MATERIAL_FULL_SCREEN_UI];
+                        NSVisualEffectView::setState_(blur_view, NSVisualEffectState::Active);
+                    }
                     blur_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable);
 
                     let _: () = msg_send![

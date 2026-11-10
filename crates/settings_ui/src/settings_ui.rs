@@ -516,6 +516,8 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::FontWeightContent>(render_editable_number_field)
         .add_basic_renderer::<settings::CenteredPaddingSettings>(render_editable_number_field)
         .add_basic_renderer::<settings::InactiveOpacity>(render_editable_number_field)
+        .add_basic_renderer::<settings::WindowOpacity>(render_editable_number_field)
+        .add_basic_renderer::<settings::WindowBackgroundImagePath>(render_image_path_field)
         .add_basic_renderer::<settings::MinimumContrast>(render_editable_number_field)
         .add_basic_renderer::<settings::ShowScrollbar>(render_dropdown)
         .add_basic_renderer::<settings::ScrollbarDiagnostics>(render_dropdown)
@@ -4072,6 +4074,85 @@ fn render_text_field<T: From<String> + Into<String> + AsRef<str> + Clone>(
                 )
                 .log_err(); // todo(settings_ui) don't log err
             }
+        })
+        .into_any_element()
+}
+
+/// A path typed or pasted like any text setting, or picked with the system's
+/// file dialog. Only the path is written: the file stays where it is.
+fn render_image_path_field(
+    field: SettingField<settings::WindowBackgroundImagePath>,
+    file: SettingsUiFile,
+    metadata: Option<&SettingsFieldMetadata>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let (_, current) =
+        SettingsStore::global(cx).get_value_from_file(file.to_settings(), field.pick);
+    let has_path = current.is_some_and(|path| !path.0.trim().is_empty());
+
+    h_flex()
+        .gap_1()
+        .child(render_text_field(field, file.clone(), metadata, window, cx))
+        .child(
+            Button::new("choose-background-image", "Choose…")
+                .tab_index(0_isize)
+                .on_click({
+                    let file = file.clone();
+                    move |_, window, cx| {
+                        let paths = cx.prompt_for_paths(gpui::PathPromptOptions {
+                            files: true,
+                            directories: false,
+                            multiple: false,
+                            prompt: Some("Choose Image".into()),
+                            show_hidden: false,
+                        });
+                        let file = file.clone();
+                        window
+                            .spawn(cx, async move |cx| {
+                                let Ok(Ok(Some(paths))) = paths.await else {
+                                    return;
+                                };
+                                let Some(path) = paths.into_iter().next() else {
+                                    return;
+                                };
+                                let path = path.to_string_lossy().into_owned();
+                                cx.update(|window, cx| {
+                                    update_settings_file(
+                                        file,
+                                        field.json_path,
+                                        window,
+                                        cx,
+                                        move |settings, _cx| {
+                                            (field.write)(settings, Some(path.into()));
+                                        },
+                                    )
+                                    .log_err();
+                                })
+                                .log_err();
+                            })
+                            .detach();
+                    }
+                }),
+        )
+        .when(has_path, |this| {
+            this.child(
+                IconButton::new("clear-background-image", IconName::Close)
+                    .icon_size(IconSize::Small)
+                    .tooltip(Tooltip::text("Remove Background Image"))
+                    .on_click(move |_, window, cx| {
+                        update_settings_file(
+                            file.clone(),
+                            field.json_path,
+                            window,
+                            cx,
+                            move |settings, _cx| {
+                                (field.write)(settings, None);
+                            },
+                        )
+                        .log_err();
+                    }),
+            )
         })
         .into_any_element()
 }

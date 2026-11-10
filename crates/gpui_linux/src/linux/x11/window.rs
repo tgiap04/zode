@@ -1534,6 +1534,18 @@ impl PlatformWindow for X11Window {
         Ok(())
     }
 
+    fn set_content_opacity(&self, opacity: f32) {
+        self.0
+            .state
+            .borrow_mut()
+            .renderer
+            .set_content_opacity(opacity);
+    }
+
+    fn content_opacity(&self) -> f32 {
+        self.0.state.borrow().renderer.content_opacity()
+    }
+
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         let mut state = self.0.state.borrow_mut();
         state.background_appearance = background_appearance;

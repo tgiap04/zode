@@ -83,7 +83,8 @@ pub(crate) fn problem_message(state: &HostState) -> Option<String> {
             "Your Zode sign-in ended, so remote control stopped. Sign in again to use it."
         }
         HostState::Halted(StopReason::QuotaExceeded) => {
-            "Remote control stopped: your account has used up its relay allowance."
+            "Remote control paused: today's relay allowance is used up (resets 00:00 UTC). \
+             Pro raises it."
         }
         HostState::Halted(StopReason::Replaced) => {
             "Remote control stopped: another Zode is connected to the relay as this device."

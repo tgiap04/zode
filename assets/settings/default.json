@@ -83,6 +83,18 @@
   "ui_font_size": 15,
   // How much to fade out unused code.
   "unnecessary_code_fade": 0.3,
+  // How opaque the window's backgrounds are: 1 is solid, 0 is see-through.
+  // They fade evenly; on macOS text and icons stay solid. With vibrancy or a
+  // background image the backgrounds keep 88% of this, as in Tabby.
+  "window_opacity": 1.0,
+  // Vibrancy: what is behind the window shows through its backgrounds,
+  // blurred -- the desktop through the system's material, or the background
+  // image, blurred, when one is set.
+  "window_vibrancy": false,
+  // An image to show behind the window's surfaces, by its path. It is read
+  // from that path and never copied: deleting the file removes it from the
+  // window. Empty means none.
+  "window_background_image": "",
   // Active pane styling settings.
   "active_pane_modifiers": {
     // Inset border size of the active pane, in pixels.

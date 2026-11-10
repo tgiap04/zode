@@ -45,6 +45,15 @@ impl From<settings::WslConnection> for WslConnectionOptions {
     }
 }
 
+impl WslConnectionOptions {
+    fn status_label(&self) -> String {
+        match &self.user {
+            Some(user) => format!("{user}@{}", self.distro_name),
+            None => self.distro_name.clone(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct WslRemoteConnection {
     remote_binary_path: Option<Arc<RelPath>>,
@@ -82,7 +91,15 @@ impl WslRemoteConnection {
             default_system_shell: String::from("/bin/sh"),
             has_wsl_interop: false,
         };
-        delegate.set_status(Some("Detecting WSL environment"), cx);
+        // The first `wsl.exe` call is what boots a stopped distro, which can
+        // take several seconds, so name that wait instead of "detecting".
+        delegate.set_status(
+            Some(&format!(
+                "Starting WSL ({})",
+                this.connection_options.status_label()
+            )),
+            cx,
+        );
         this.shell = this
             .detect_shell()
             .await
@@ -187,6 +204,14 @@ impl WslRemoteConnection {
         let dst_path =
             paths::remote_server_dir_relative().join(RelPath::unix(&binary_name).unwrap());
 
+        delegate.set_status(
+            Some(&format!(
+                "Checking Zode server in {}",
+                self.connection_options.status_label()
+            )),
+            cx,
+        );
+
         if let Some(parent) = dst_path.parent() {
             let parent = parent.display(PathStyle::Posix);
             let mkdir = self.shell_kind.prepend_command_prefix("mkdir");
@@ -258,7 +283,13 @@ impl WslRemoteConnection {
         delegate: &Arc<dyn RemoteClientDelegate>,
         cx: &mut AsyncApp,
     ) -> Result<()> {
-        delegate.set_status(Some("Uploading remote server"), cx);
+        delegate.set_status(
+            Some(&format!(
+                "Copying Zode server into {}",
+                self.connection_options.status_label()
+            )),
+            cx,
+        );
 
         if let Some(parent) = dst_path.parent() {
             let parent = parent.display(PathStyle::Posix);
@@ -307,7 +338,13 @@ impl WslRemoteConnection {
         delegate: &Arc<dyn RemoteClientDelegate>,
         cx: &mut AsyncApp,
     ) -> Result<()> {
-        delegate.set_status(Some("Extracting remote server"), cx);
+        delegate.set_status(
+            Some(&format!(
+                "Installing Zode server in {}",
+                self.connection_options.status_label()
+            )),
+            cx,
+        );
 
         let tmp_path_str = tmp_path.display(PathStyle::Posix);
         let dst_path_str = dst_path.display(PathStyle::Posix);
@@ -345,7 +382,13 @@ impl RemoteConnection for WslRemoteConnection {
         delegate: Arc<dyn RemoteClientDelegate>,
         cx: &mut AsyncApp,
     ) -> Task<Result<i32>> {
-        delegate.set_status(Some("Starting proxy"), cx);
+        delegate.set_status(
+            Some(&format!(
+                "Starting Zode server in {}",
+                self.connection_options.status_label()
+            )),
+            cx,
+        );
 
         let Some(remote_binary_path) = &self.remote_binary_path else {
             return Task::ready(Err(anyhow!("Remote binary path not set")));
@@ -439,7 +482,7 @@ impl RemoteConnection for WslRemoteConnection {
         env: &HashMap<String, String>,
         working_dir: Option<String>,
         port_forward: Option<(u16, String, u16)>,
-        _interactive: Interactive,
+        interactive: Interactive,
     ) -> Result<CommandTemplate> {
         if port_forward.is_some() {
             bail!("WSL shares the network interface with the host system");
@@ -449,6 +492,37 @@ impl RemoteConnection for WslRemoteConnection {
         let working_dir = working_dir
             .map(|working_dir| RemotePathBuf::new(working_dir, PathStyle::Posix).to_string())
             .unwrap_or("~".to_string());
+
+        // A piped program is handed to the distro as argv, never as shell text:
+        // its arguments include branch names, kubeconfig contexts and paths
+        // that come from outside, and `wsl.exe -- shell -c` has the distro's
+        // default shell re-parse the line before any quoting here applies.
+        // Without a shell there are no rc files either, so callers pass the
+        // `PATH` the program needs.
+        if let Some(program) = program.as_ref().filter(|_| interactive == Interactive::No) {
+            let mut wsl_args = vec![
+                "--distribution".to_string(),
+                self.connection_options.distro_name.clone(),
+            ];
+            if let Some(user) = &self.connection_options.user {
+                wsl_args.extend(["--user".to_string(), user.clone()]);
+            }
+            wsl_args.extend(["--cd".to_string(), working_dir]);
+            wsl_args.extend(["--exec".to_string(), "env".to_string()]);
+            let mut assignments: Vec<String> = env
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect();
+            assignments.sort();
+            wsl_args.extend(assignments);
+            wsl_args.push(program.clone());
+            wsl_args.extend(args.iter().cloned());
+            return Ok(CommandTemplate {
+                program: "wsl.exe".to_string(),
+                args: wsl_args,
+                env: HashMap::default(),
+            });
+        }
 
         let mut exec = String::from("exec env ");
 
@@ -654,4 +728,204 @@ fn wsl_command_impl(
 
     log::debug!("wsl {:?}", command);
     command
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connection(user: Option<&str>) -> WslRemoteConnection {
+        WslRemoteConnection {
+            remote_binary_path: None,
+            platform: RemotePlatform {
+                os: RemoteOs::Linux,
+                arch: RemoteArch::X86_64,
+            },
+            shell: "/bin/bash".to_string(),
+            shell_kind: ShellKind::Posix,
+            default_system_shell: "/bin/sh".to_string(),
+            has_wsl_interop: true,
+            connection_options: WslConnectionOptions {
+                distro_name: "Ubuntu-22.04".to_string(),
+                user: user.map(str::to_string),
+            },
+        }
+    }
+
+    fn words(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| word.to_string()).collect()
+    }
+
+    fn variables(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
+    /// A branch name from a cloned origin, a kubeconfig context name or a path
+    /// reaches the tool as one argument, never as shell text.
+    #[test]
+    fn a_piped_command_passes_every_argument_through_without_a_shell() {
+        let hostile = ["x$(echo pwned)", "`id`", "a;b", "a|b", "two words", "it's"];
+        let mut args = words(&["switch", "--detach"]);
+        args.extend(words(&hostile));
+
+        let template = connection(None)
+            .build_command(
+                Some("git".to_string()),
+                &args,
+                &HashMap::default(),
+                Some("/home/me/app".to_string()),
+                None,
+                Interactive::No,
+            )
+            .expect("a WSL command is built");
+
+        assert_eq!(template.program, "wsl.exe");
+        let mut expected = words(&[
+            "--distribution",
+            "Ubuntu-22.04",
+            "--cd",
+            "/home/me/app",
+            "--exec",
+            "env",
+            "git",
+            "switch",
+            "--detach",
+        ]);
+        expected.extend(words(&hostile));
+        assert_eq!(template.args, expected);
+        assert!(template.env.is_empty());
+    }
+
+    #[test]
+    fn a_piped_command_s_variables_are_env_arguments_as_given() {
+        let template = connection(Some("me"))
+            .build_command(
+                Some("docker".to_string()),
+                &words(&["ps"]),
+                &variables(&[
+                    ("PATH", "/home/me/.local/bin:/usr/bin"),
+                    ("GIT_SSH_COMMAND", "ssh -i '/home/me/my key' $HOME"),
+                ]),
+                None,
+                None,
+                Interactive::No,
+            )
+            .expect("a WSL command is built");
+
+        assert_eq!(
+            template.args,
+            words(&[
+                "--distribution",
+                "Ubuntu-22.04",
+                "--user",
+                "me",
+                "--cd",
+                "~",
+                "--exec",
+                "env",
+                "GIT_SSH_COMMAND=ssh -i '/home/me/my key' $HOME",
+                "PATH=/home/me/.local/bin:/usr/bin",
+                "docker",
+                "ps",
+            ])
+        );
+    }
+
+    #[test]
+    fn a_piped_command_starts_in_the_remote_directory() {
+        let template = connection(None)
+            .build_command(
+                Some("test".to_string()),
+                &words(&["-e", "/home/me/my project/a.rs"]),
+                &HashMap::default(),
+                Some("/home/me/my project".to_string()),
+                None,
+                Interactive::No,
+            )
+            .expect("a WSL command is built");
+
+        let cd = template
+            .args
+            .iter()
+            .position(|arg| arg == "--cd")
+            .expect("the directory is given to wsl.exe");
+        assert_eq!(
+            template.args.get(cd + 1).map(String::as_str),
+            Some("/home/me/my project")
+        );
+        assert_eq!(
+            template.args.last().map(String::as_str),
+            Some("/home/me/my project/a.rs")
+        );
+    }
+
+    /// A terminal, and a login shell with no program, still go through the
+    /// user's own shell, which is what gives them the user's rc files.
+    #[test]
+    fn a_terminal_and_a_login_shell_keep_the_shell() {
+        let wsl = connection(None);
+        let terminal = wsl
+            .build_command(
+                Some("htop".to_string()),
+                &[],
+                &HashMap::default(),
+                Some("/home/me".to_string()),
+                None,
+                Interactive::Yes,
+            )
+            .expect("a WSL command is built");
+        let login = wsl
+            .build_command(None, &[], &HashMap::default(), None, None, Interactive::No)
+            .expect("a WSL command is built");
+
+        assert_eq!(
+            terminal.args,
+            words(&[
+                "--distribution",
+                "Ubuntu-22.04",
+                "--cd",
+                "/home/me",
+                "--",
+                "/bin/bash",
+                "-i",
+                "-c",
+                "exec env htop",
+            ])
+        );
+        assert_eq!(
+            login.args,
+            words(&[
+                "--distribution",
+                "Ubuntu-22.04",
+                "--cd",
+                "~",
+                "--",
+                "/bin/bash",
+                "-i",
+                "-c",
+                "exec env /bin/bash -l",
+            ])
+        );
+    }
+
+    #[test]
+    fn status_label_names_the_distro() {
+        let options = WslConnectionOptions {
+            distro_name: "Ubuntu".to_string(),
+            user: None,
+        };
+        assert_eq!(options.status_label(), "Ubuntu");
+    }
+
+    #[test]
+    fn status_label_names_the_user_when_one_is_set() {
+        let options = WslConnectionOptions {
+            distro_name: "Ubuntu".to_string(),
+            user: Some("dev".to_string()),
+        };
+        assert_eq!(options.status_label(), "dev@Ubuntu");
+    }
 }

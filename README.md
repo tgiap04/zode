@@ -80,6 +80,8 @@ A fresh install talks to nothing. This is the complete list:
 | You connect to a database for the first time | Zode's API | Downloads that engine's driver binary |
 | You run *Check for Updates* | `api.github.com` | Reads this repository's published releases |
 | You sign in and enable sync | `api.zodekit.site` | Your settings, keymap and extension list, encrypted |
+| You sign in, start Zode while signed in (once, for the plan tag in the status bar), open the account menu or a sync window (including the vault's Team tab), a sync is refused by your plan, or team sharing finds you are no longer in the team | `api.zodekit.site` | Reads your plan: tier, limits, team name. Nothing about your usage is sent |
+| You use team sharing: open the vault's Team tab or the members window, reload the database panel's Team group or open a team connection, pull, share, grant or rotate | `api.zodekit.site` | Your sharing public key, sealed team-key envelopes, and team `.env` / connection entries, all encrypted. Your sharing private key is stored sealed under your recovery key at `sync/sharing-key`. See [`docs/src/team-sharing-security.md`](./docs/src/team-sharing-security.md) |
 | **Automatic**, if Claude Code is already signed in on this machine | `api.anthropic.com` | Reads your own plan quota for the status bar |
 
 Every row but the last happens only when you ask for it. The last one is the exception and

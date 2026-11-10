@@ -49,6 +49,14 @@ pub struct MarkdownPreviewView {
     base_directory: Option<PathBuf>,
     pending_update_task: Option<Task<Result<()>>>,
     mode: MarkdownPreviewMode,
+    /// Set while this preview stands in the tab of the editor it renders, which is then in no pane
+    /// at all. The preview answers for the editor's unsaved edits in the meantime — dirty state,
+    /// save, reload — so closing the window still offers to save edits made before the swap.
+    ///
+    /// It deliberately does not claim the editor's file (`for_each_project_item`): `Pane::add_item`
+    /// matches tabs by file, so opening the same file again would slot the new editor over this
+    /// preview without ever removing it. Unclaimed, opening the file simply opens an editor tab.
+    replaces_editor: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -67,7 +75,21 @@ struct EditorState {
 impl MarkdownPreviewView {
     pub fn register(workspace: &mut Workspace, _window: &mut Window, _cx: &mut Context<Workspace>) {
         workspace.register_action(move |workspace, _: &OpenPreview, window, cx| {
-            if let Some(editor) = Self::resolve_active_item_as_markdown_editor(workspace, cx) {
+            if let Some(preview) = Self::active_replacing_preview(workspace, cx) {
+                Self::give_tab_back_to_editor(workspace, preview, window, cx);
+                return;
+            }
+            let Some(editor) = Self::resolve_active_item_as_markdown_editor(workspace, cx) else {
+                return;
+            };
+            let editor_is_the_active_tab = workspace
+                .active_item(cx)
+                .is_some_and(|item| item.item_id() == editor.entity_id());
+            if editor_is_the_active_tab {
+                Self::replace_editor_tab_with_preview(workspace, editor, window, cx);
+            } else {
+                // The active tab only acts as a markdown editor (a following preview): there is no
+                // editor tab of its own to take over, so the preview opens beside it as before.
                 let view = Self::create_markdown_view(workspace, editor.clone(), window, cx);
                 workspace.active_pane().update(cx, |pane, cx| {
                     if let Some(existing_view_idx) =
@@ -78,8 +100,8 @@ impl MarkdownPreviewView {
                         pane.add_item(Box::new(view.clone()), true, true, None, window, cx)
                     }
                 });
-                cx.notify();
             }
+            cx.notify();
         });
 
         workspace.register_action(move |workspace, _: &OpenPreviewToTheSide, window, cx| {
@@ -135,21 +157,95 @@ impl MarkdownPreviewView {
         });
     }
 
+    /// The active tab, when it is a preview that took over an editor's tab.
+    pub fn active_replacing_preview(
+        workspace: &Workspace,
+        cx: &App,
+    ) -> Option<Entity<MarkdownPreviewView>> {
+        workspace
+            .active_item(cx)?
+            .downcast::<MarkdownPreviewView>()
+            .filter(|preview| preview.read(cx).replaces_editor)
+    }
+
+    fn replace_editor_tab_with_preview(
+        workspace: &mut Workspace,
+        editor: Entity<Editor>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let pane = workspace.active_pane().clone();
+        // A preview of this editor left over from a split or an older build is reused rather than
+        // kept as a second tab for the same file.
+        let existing = Self::find_existing_independent_preview(pane.read(cx), &editor, cx);
+        let preview = existing
+            .clone()
+            .unwrap_or_else(|| Self::create_markdown_view(workspace, editor.clone(), window, cx));
+        let swapped = pane.update(cx, |pane, cx| {
+            if let Some(existing) = &existing {
+                pane.remove_item(existing.entity_id(), false, false, window, cx);
+            }
+            swap_tab(
+                pane,
+                editor.entity_id(),
+                Box::new(preview.clone()),
+                window,
+                cx,
+            )
+        });
+        if swapped {
+            preview.update(cx, |preview, cx| {
+                preview.replaces_editor = true;
+                cx.emit(());
+            });
+        }
+    }
+
+    fn give_tab_back_to_editor(
+        workspace: &mut Workspace,
+        preview: Entity<MarkdownPreviewView>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let Some(editor) = preview
+            .read(cx)
+            .active_editor
+            .as_ref()
+            .map(|state| state.editor.clone())
+        else {
+            return;
+        };
+        let swapped = workspace.active_pane().update(cx, |pane, cx| {
+            swap_tab(pane, preview.entity_id(), Box::new(editor), window, cx)
+        });
+        // Only once the editor is back in a pane may the preview stop answering for its edits.
+        if swapped {
+            preview.update(cx, |preview, _| preview.replaces_editor = false);
+        }
+    }
+
+    fn find_existing_independent_preview(
+        pane: &Pane,
+        editor: &Entity<Editor>,
+        cx: &App,
+    ) -> Option<Entity<MarkdownPreviewView>> {
+        pane.items_of_type::<MarkdownPreviewView>().find(|view| {
+            let view_read = view.read(cx);
+            // Only look for independent (Default mode) previews, not Follow previews
+            view_read.mode == MarkdownPreviewMode::Default
+                && view_read
+                    .active_editor
+                    .as_ref()
+                    .is_some_and(|active_editor| active_editor.editor == *editor)
+        })
+    }
+
     fn find_existing_independent_preview_item_idx(
         pane: &Pane,
         editor: &Entity<Editor>,
         cx: &App,
     ) -> Option<usize> {
-        pane.items_of_type::<MarkdownPreviewView>()
-            .find(|view| {
-                let view_read = view.read(cx);
-                // Only look for independent (Default mode) previews, not Follow previews
-                view_read.mode == MarkdownPreviewMode::Default
-                    && view_read
-                        .active_editor
-                        .as_ref()
-                        .is_some_and(|active_editor| active_editor.editor == *editor)
-            })
+        Self::find_existing_independent_preview(pane, editor, cx)
             .and_then(|view| pane.index_for_item(&view))
     }
 
@@ -242,6 +338,7 @@ impl MarkdownPreviewView {
                 image_cache: RetainAllImageCache::new(cx),
                 base_directory: None,
                 pending_update_task: None,
+                replaces_editor: false,
                 mode,
             };
 
@@ -304,7 +401,13 @@ impl MarkdownPreviewView {
                     | EditorEvent::BufferEdited { .. }
                     | EditorEvent::DirtyChanged
                     | EditorEvent::BuffersEdited { .. } => {
+                        if this.replaces_editor && matches!(event, EditorEvent::DirtyChanged) {
+                            cx.emit(());
+                        }
                         this.update_markdown_from_active_editor(true, false, window, cx);
+                    }
+                    EditorEvent::Saved | EditorEvent::TitleChanged if this.replaces_editor => {
+                        cx.emit(());
                     }
                     EditorEvent::SelectionsChanged { .. } => {
                         let (selection_start, editor_is_focused) =
@@ -861,7 +964,11 @@ impl Item for MarkdownPreviewView {
         Some("Markdown Preview Opened")
     }
 
-    fn to_item_events(_event: &Self::Event, _f: &mut dyn FnMut(workspace::item::ItemEvent)) {}
+    /// Emitted while replacing an editor, whenever that editor's tab would have changed: saved,
+    /// dirtied, renamed.
+    fn to_item_events(_event: &Self::Event, f: &mut dyn FnMut(workspace::item::ItemEvent)) {
+        f(workspace::item::ItemEvent::UpdateTab);
+    }
 
     fn buffer_kind(&self, _cx: &App) -> ItemBufferKind {
         ItemBufferKind::Singleton
@@ -874,6 +981,121 @@ impl Item for MarkdownPreviewView {
     ) -> Option<Box<dyn SearchableItemHandle>> {
         Some(Box::new(handle.clone()))
     }
+
+    fn capability(&self, cx: &App) -> language::Capability {
+        self.replaced_editor()
+            .map_or(language::Capability::ReadWrite, |editor| {
+                editor.read(cx).capability(cx)
+            })
+    }
+
+    fn is_dirty(&self, cx: &App) -> bool {
+        self.replaced_editor()
+            .is_some_and(|editor| editor.read(cx).is_dirty(cx))
+    }
+
+    fn has_conflict(&self, cx: &App) -> bool {
+        self.replaced_editor()
+            .is_some_and(|editor| editor.read(cx).has_conflict(cx))
+    }
+
+    fn has_deleted_file(&self, cx: &App) -> bool {
+        self.replaced_editor()
+            .is_some_and(|editor| editor.read(cx).has_deleted_file(cx))
+    }
+
+    fn can_save(&self, cx: &App) -> bool {
+        self.replaced_editor()
+            .is_some_and(|editor| editor.read(cx).can_save(cx))
+    }
+
+    fn can_save_as(&self, cx: &App) -> bool {
+        self.replaced_editor()
+            .is_some_and(|editor| editor.read(cx).can_save_as(cx))
+    }
+
+    fn save(
+        &mut self,
+        options: workspace::item::SaveOptions,
+        project: Entity<project::Project>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        match self.replaced_editor().cloned() {
+            Some(editor) => {
+                editor.update(cx, |editor, cx| editor.save(options, project, window, cx))
+            }
+            None => Task::ready(Ok(())),
+        }
+    }
+
+    fn save_as(
+        &mut self,
+        project: Entity<project::Project>,
+        path: project::ProjectPath,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        match self.replaced_editor().cloned() {
+            Some(editor) => {
+                editor.update(cx, |editor, cx| editor.save_as(project, path, window, cx))
+            }
+            None => Task::ready(Ok(())),
+        }
+    }
+
+    fn reload(
+        &mut self,
+        project: Entity<project::Project>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        match self.replaced_editor().cloned() {
+            Some(editor) => editor.update(cx, |editor, cx| editor.reload(project, window, cx)),
+            None => Task::ready(Ok(())),
+        }
+    }
+}
+
+impl MarkdownPreviewView {
+    /// Whether this preview currently holds the tab of the editor it renders.
+    pub fn replaces_editor(&self) -> bool {
+        self.replaces_editor
+    }
+
+    /// The editor this preview stands in for, while it holds that editor's tab.
+    fn replaced_editor(&self) -> Option<&Entity<Editor>> {
+        self.active_editor
+            .as_ref()
+            .filter(|_| self.replaces_editor)
+            .map(|state| &state.editor)
+    }
+}
+
+/// Puts `replacement` in the tab of `item_id`: same index, same pinned state, and active.
+/// Returns whether `item_id` was found in the pane.
+///
+/// The replacement goes in before the old item comes out, so removing the old item never has to
+/// pick a neighbour to activate in between.
+fn swap_tab(
+    pane: &mut Pane,
+    item_id: gpui::EntityId,
+    replacement: Box<dyn ItemHandle>,
+    window: &mut Window,
+    cx: &mut Context<Pane>,
+) -> bool {
+    let Some(index) = pane.items().position(|item| item.item_id() == item_id) else {
+        return false;
+    };
+    let was_pinned = index < pane.pinned_count();
+    pane.add_item(replacement, true, true, Some(index), window, cx);
+    if was_pinned {
+        // The old tab, now one place to the right, gives up its pin as it is removed; widening
+        // the pinned range first lets the replacement keep it.
+        pane.set_pinned_count(pane.pinned_count() + 1);
+    }
+    pane.remove_item(item_id, false, false, window, cx);
+    true
 }
 
 impl Render for MarkdownPreviewView {
@@ -1163,5 +1385,248 @@ mod tests {
     fn does_not_treat_web_links_as_preview_paths() {
         assert_eq!(resolve_preview_path("https://zed.dev", None), None);
         assert_eq!(resolve_preview_path("http://example.com", None), None);
+    }
+}
+
+#[cfg(test)]
+mod tab_replacement_tests {
+    use std::sync::Arc;
+
+    use editor::Editor;
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use language::{Language, LanguageConfig, LanguageMatcher};
+    use project::{FakeFs, Project};
+    use serde_json::json;
+    use util::path;
+    use util::rel_path::rel_path;
+    use workspace::item::ItemHandle;
+    use workspace::{AppState, MultiWorkspace, Pane, Workspace};
+
+    use super::MarkdownPreviewView;
+    use crate::OpenPreview;
+
+    fn init_test(cx: &mut TestAppContext) -> Arc<AppState> {
+        cx.update(|cx| {
+            let state = AppState::test(cx);
+            editor::init(cx);
+            crate::init(cx);
+            state
+        })
+    }
+
+    /// A pane holding `notes.txt`, `README.md` and `todo.txt`, in that order, with the markdown
+    /// editor in the middle active.
+    async fn open_markdown_between_two_tabs(
+        cx: &mut TestAppContext,
+    ) -> (Entity<Workspace>, Entity<Editor>, VisualTestContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            path!("/dir"),
+            json!({ "notes.txt": "notes", "README.md": "# Title", "todo.txt": "todo" }),
+        )
+        .await;
+        let project = Project::test(fs, [path!("/dir").as_ref()], cx).await;
+        project.read_with(cx, |project, _| {
+            project.languages().add(Arc::new(Language::new(
+                LanguageConfig {
+                    name: "Markdown".into(),
+                    matcher: LanguageMatcher {
+                        path_suffixes: vec!["md".into()],
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+                None,
+            )))
+        });
+        let (multi_workspace, cx) =
+            cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let mut cx = cx.clone();
+        let workspace = multi_workspace.read_with(&cx, |mw, _| mw.workspace().clone());
+        let worktree_id = project.read_with(&cx, |project, cx| {
+            project
+                .worktrees(cx)
+                .next()
+                .expect("one worktree")
+                .read(cx)
+                .id()
+        });
+        let open = |name: &'static str, cx: &mut VisualTestContext| {
+            workspace.update_in(cx, |workspace, window, cx| {
+                workspace.open_path((worktree_id, rel_path(name)), None, true, window, cx)
+            })
+        };
+        open("notes.txt", &mut cx).await.expect("opens");
+        let markdown = open("README.md", &mut cx).await.expect("opens");
+        open("todo.txt", &mut cx).await.expect("opens");
+        let editor = markdown.downcast::<Editor>().expect("an editor");
+        workspace.update_in(&mut cx, |workspace, window, cx| {
+            workspace.activate_item(&editor, true, true, window, cx);
+        });
+        cx.run_until_parked();
+        (workspace, editor, cx)
+    }
+
+    fn active_pane(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) -> Entity<Pane> {
+        workspace.read_with(cx, |workspace, _| workspace.active_pane().clone())
+    }
+
+    fn tab_ids(pane: &Entity<Pane>, cx: &mut VisualTestContext) -> Vec<gpui::EntityId> {
+        pane.read_with(cx, |pane, _| {
+            pane.items().map(|item| item.item_id()).collect()
+        })
+    }
+
+    fn open_preview(cx: &mut VisualTestContext) {
+        cx.dispatch_action(OpenPreview);
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn test_preview_takes_the_editor_tab_and_gives_it_back(cx: &mut TestAppContext) {
+        let (workspace, editor, mut cx) = open_markdown_between_two_tabs(cx).await;
+        let cx = &mut cx;
+        let pane = active_pane(&workspace, cx);
+        let tabs_before = tab_ids(&pane, cx);
+        assert_eq!(tabs_before[1], editor.item_id());
+
+        open_preview(cx);
+        let tabs = tab_ids(&pane, cx);
+        assert_eq!(
+            tabs.len(),
+            3,
+            "the preview replaces the editor's tab instead of opening a fourth one"
+        );
+        let preview = pane
+            .read_with(cx, |pane, _| {
+                pane.active_item()
+                    .and_then(|item| item.downcast::<MarkdownPreviewView>())
+            })
+            .expect("the preview is the active tab");
+        assert_eq!(tabs[1], preview.item_id(), "and sits where the editor was");
+        assert_eq!(
+            (tabs[0], tabs[2]),
+            (tabs_before[0], tabs_before[2]),
+            "the neighbouring tabs stay put"
+        );
+
+        open_preview(cx);
+        assert_eq!(
+            tab_ids(&pane, cx),
+            tabs_before,
+            "toggling again puts the very same editor back in its place"
+        );
+        assert_eq!(
+            pane.read_with(cx, |pane, _| pane.active_item().map(|item| item.item_id())),
+            Some(editor.item_id())
+        );
+    }
+
+    #[gpui::test]
+    async fn test_preview_keeps_the_unsaved_edits_of_the_editor_it_replaced(
+        cx: &mut TestAppContext,
+    ) {
+        let (workspace, editor, mut cx) = open_markdown_between_two_tabs(cx).await;
+        let cx = &mut cx;
+        editor.update_in(cx, |editor, window, cx| {
+            editor.insert("unsaved ", window, cx);
+        });
+        let pane = active_pane(&workspace, cx);
+
+        open_preview(cx);
+        let preview = pane
+            .read_with(cx, |pane, _| pane.active_item())
+            .expect("the preview is the active tab");
+        assert!(
+            preview.downcast::<MarkdownPreviewView>().is_some(),
+            "the editor's tab now holds the preview"
+        );
+        let (is_dirty, can_save) = cx.update(|_, cx| (preview.is_dirty(cx), preview.can_save(cx)));
+        assert!(
+            is_dirty,
+            "with the editor out of the pane, closing the window must still see the unsaved edits"
+        );
+        assert!(can_save, "and saving the preview tab saves the file");
+
+        let saved = preview
+            .downcast::<MarkdownPreviewView>()
+            .expect("a preview");
+        let project = workspace.read_with(cx, |workspace, _| workspace.project().clone());
+        cx.update(|window, cx| {
+            saved.update(cx, |preview, cx| {
+                workspace::item::Item::save(
+                    preview,
+                    workspace::item::SaveOptions::default(),
+                    project,
+                    window,
+                    cx,
+                )
+            })
+        })
+        .await
+        .expect("saves");
+        cx.run_until_parked();
+        assert!(
+            !editor.read_with(cx, |editor, cx| workspace::item::Item::is_dirty(editor, cx)),
+            "saving from the preview tab saves the editor's buffer"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_opening_the_file_again_opens_an_editor_beside_the_preview(
+        cx: &mut TestAppContext,
+    ) {
+        let (workspace, editor, mut cx) = open_markdown_between_two_tabs(cx).await;
+        let cx = &mut cx;
+        let pane = active_pane(&workspace, cx);
+        open_preview(cx);
+        let tabs_with_preview = tab_ids(&pane, cx);
+
+        let worktree_id = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .project()
+                .read(cx)
+                .worktrees(cx)
+                .next()
+                .expect("one worktree")
+                .read(cx)
+                .id()
+        });
+        let reopened = workspace
+            .update_in(cx, |workspace, window, cx| {
+                workspace.open_path((worktree_id, rel_path("README.md")), None, true, window, cx)
+            })
+            .await
+            .expect("opens");
+        cx.run_until_parked();
+
+        let tabs = tab_ids(&pane, cx);
+        assert_eq!(
+            tabs.len(),
+            tabs_with_preview.len() + 1,
+            "the file opens in a tab of its own instead of being slotted over the preview"
+        );
+        for tab in &tabs_with_preview {
+            assert!(
+                tabs.contains(tab),
+                "no tab disappeared without being closed"
+            );
+        }
+        assert_ne!(reopened.item_id(), editor.item_id());
+    }
+
+    #[gpui::test]
+    async fn test_preview_of_a_pinned_editor_stays_pinned(cx: &mut TestAppContext) {
+        let (workspace, editor, mut cx) = open_markdown_between_two_tabs(cx).await;
+        let cx = &mut cx;
+        let pane = active_pane(&workspace, cx);
+        pane.update(cx, |pane, _| pane.set_pinned_count(2));
+
+        open_preview(cx);
+        assert_eq!(pane.read_with(cx, |pane, _| pane.pinned_count()), 2);
+        open_preview(cx);
+        assert_eq!(pane.read_with(cx, |pane, _| pane.pinned_count()), 2);
+        assert_eq!(tab_ids(&pane, cx)[1], editor.item_id());
     }
 }

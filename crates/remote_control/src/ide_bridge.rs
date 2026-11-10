@@ -54,6 +54,14 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 /// How often the teardown thread looks for a pid file that is not there yet.
 const PID_FILE_POLL: Duration = Duration::from_millis(25);
 
+/// How much earlier than the launch a pid file's timestamp may read and still
+/// be this launch's. Filesystems stamp files with a clock coarser than
+/// `SystemTime::now()` -- a tick behind on Linux, two seconds on FAT -- so a
+/// server that names itself at once can look older than its own launch. A file
+/// left by an earlier run is older by far more, and the process it names is
+/// checked again (command line, start time) before anything is done to it.
+const PID_FILE_CLOCK_SLACK: Duration = Duration::from_secs(2);
+
 /// The file whose appearance beside the pid file asks a server to stop where
 /// there is no signal to do it with. The server reads the same name.
 const STOP_REQUEST_FILE: &str = "server.stop";
@@ -426,7 +434,7 @@ fn ask_to_stop(pid: u32, pid_file: &Path, spawned_at: SystemTime, state_dir: &Pa
 fn pid_written_by_this_launch(pid_file: &Path, spawned_at: SystemTime) -> Option<u32> {
     let written_by_this_launch = std::fs::metadata(pid_file)
         .and_then(|metadata| metadata.modified())
-        .is_ok_and(|modified| modified >= spawned_at);
+        .is_ok_and(|modified| modified + PID_FILE_CLOCK_SLACK >= spawned_at);
     if !written_by_this_launch {
         return None;
     }
@@ -555,6 +563,27 @@ mod tests {
         let after = SystemTime::now() + Duration::from_secs(60);
         assert_eq!(pid_written_by_this_launch(&pid_file, before), Some(4242));
         assert_eq!(pid_written_by_this_launch(&pid_file, after), None);
+    }
+
+    /// The reported CI failure: Linux stamps a file with a coarse clock that can
+    /// trail `SystemTime::now()` by a tick, so a server naming itself a few
+    /// milliseconds after its launch had a pid file "older" than the launch, was
+    /// never trusted, and was never stopped.
+    #[test]
+    fn a_pid_file_stamped_by_a_clock_a_tick_behind_still_belongs_to_the_launch() {
+        let directory = tempfile::tempdir().expect("a directory");
+        let pid_file = directory.path().join("server.pid");
+        std::fs::write(&pid_file, "4242").expect("writes");
+        let spawned_at = SystemTime::now();
+        std::fs::File::options()
+            .write(true)
+            .open(&pid_file)
+            .and_then(|file| file.set_modified(spawned_at - Duration::from_millis(10)))
+            .expect("stamps the file a tick early");
+        assert_eq!(
+            pid_written_by_this_launch(&pid_file, spawned_at),
+            Some(4242)
+        );
     }
 
     #[test]

@@ -29,12 +29,13 @@ mod opencode;
 mod provider;
 mod session_index;
 mod summary;
+pub mod wire;
 
 pub use claude::ClaudeProvider;
 pub use codex::CodexProvider;
 pub use copilot::CopilotProvider;
 pub use opencode::OpenCodeProvider;
-pub use provider::SessionProvider;
+pub use provider::{SessionProvider, is_safe_component};
 pub use session_index::SessionIndex;
 pub use summary::{
     AgentCommand, AgentKind, Availability, Deletion, Fork, SessionCounts, SessionSummary, Speaker,

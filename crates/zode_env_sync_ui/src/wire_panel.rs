@@ -280,7 +280,7 @@ impl Render for WirePanel {
                                             .style(ButtonStyle::Filled)
                                             .on_click(cx.listener(|this, _, window, cx| {
                                                 this.session.update(cx, |session, cx| {
-                                                    session.send_prepared(cx)
+                                                    session.send_prepared(this.entry, &this.wire, cx)
                                                 });
                                                 this.close(window, cx);
                                             })),

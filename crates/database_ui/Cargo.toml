@@ -26,14 +26,21 @@ language.workspace = true
 log.workspace = true
 menu.workspace = true
 project.workspace = true
+remote.workspace = true
+rpc.workspace = true
 settings.workspace = true
 ui.workspace = true
 ui_input.workspace = true
+util.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true
 zode_account.workspace = true
+zode_env_sync.workspace = true
+zode_team_vault.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
+paths.workspace = true
 # Deliberately minimal, and matching what `sidebar` takes: pulling `sidebar`
 # itself in here to draw the rail would drag `agent_ui` and a feature
 # combination of `remote` that does not build.
@@ -47,3 +54,4 @@ fs = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
 workspace = { workspace = true, features = ["test-support"] }
+zode_account = { workspace = true, features = ["test-support"] }

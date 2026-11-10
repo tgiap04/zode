@@ -10,6 +10,7 @@
 mod connection_modal;
 mod connection_modal_download;
 mod connection_modal_render;
+mod connection_modal_url_import;
 mod connection_store;
 mod connection_tree;
 mod database_panel;
@@ -22,8 +23,10 @@ mod password_prompt;
 mod query;
 mod render;
 mod result_grid;
+mod row_detail;
 mod session;
 mod standalone;
+mod team_connections;
 
 pub use connection_store::{ConnectionConfig, DatabaseSettings};
 pub use database_panel::DatabasePanel;
@@ -77,8 +80,9 @@ pub fn init(cx: &mut App) {
         workspace.register_action(
             |workspace, _: &zed_actions::database::AddConnection, window, cx| {
                 let handle = cx.weak_entity();
+                let drivers = driver_registry::for_project(workspace.project(), cx);
                 workspace.toggle_modal(window, cx, move |window, cx| {
-                    ConnectionModal::new(handle, window, cx)
+                    ConnectionModal::new(handle, drivers, window, cx)
                 });
             },
         );

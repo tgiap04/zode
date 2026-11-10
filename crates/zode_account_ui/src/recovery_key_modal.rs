@@ -171,10 +171,9 @@ impl RecoveryKeyModal {
                 cx.spawn(async move |this, cx| {
                     let result = rotating.await;
                     _ = this.update(cx, |this, cx| {
-                        match result {
-                            Ok(phrase) => this.phrase = Some(phrase.into()),
-                            Err(error) => this.error = Some(format!("{error}").into()),
-                        }
+                        let (phrase, error) = rotation_message(result);
+                        this.phrase = phrase;
+                        this.error = error;
                         cx.notify();
                     });
                 })
@@ -479,6 +478,49 @@ impl Render for RecoveryKeyModal {
         );
 
         shell.child(modal).child(footer)
+    }
+}
+
+/// What the window shows after a replacement: the key to write down, and
+/// what is left to do.
+///
+/// An interrupted replacement whose new key is already this machine's key
+/// shows it, since it is now the only key to the moved data. One that stopped
+/// before that shows no key: the current one still opens everything, and the
+/// next attempt continues with the same new key.
+fn rotation_message(
+    result: Result<zode_sync::KeyRotation, impl std::fmt::Display>,
+) -> (Option<SharedString>, Option<SharedString>) {
+    use zode_sync::KeyRotation;
+    match result {
+        Ok(KeyRotation::Complete { phrase }) => (Some(phrase.into()), None),
+        Ok(KeyRotation::Interrupted {
+            phrase,
+            adopted: true,
+            reason,
+        }) => (
+            Some(phrase.into()),
+            Some(
+                format!(
+                    "This is now your recovery key: write it down. The replacement is not finished ({reason}). Replace it again to finish; it continues with this same key."
+                )
+                .into(),
+            ),
+        ),
+        Ok(KeyRotation::Interrupted {
+            adopted: false,
+            reason,
+            ..
+        }) => (
+            None,
+            Some(
+                format!(
+                    "Nothing was replaced yet: {reason} Your current recovery key still opens everything. Replace it again to finish."
+                )
+                .into(),
+            ),
+        ),
+        Err(error) => (None, Some(format!("{error}").into())),
     }
 }
 
@@ -943,6 +985,34 @@ mod tests {
                 .and_then(|item| item.text())
                 .as_deref(),
             Some("a shopping list")
+        );
+    }
+
+    #[test]
+    fn an_interrupted_replacement_shows_the_key_only_once_it_is_in_use() {
+        use zode_sync::KeyRotation;
+        let (phrase, error) = rotation_message(Ok::<_, String>(KeyRotation::Interrupted {
+            phrase: "ZODE-NEW".into(),
+            adopted: true,
+            reason: "the service is unreachable".into(),
+        }));
+        assert_eq!(phrase, Some(SharedString::from("ZODE-NEW")));
+        assert!(error.is_some_and(|error| error.contains("write it down")));
+
+        let (phrase, error) = rotation_message(Ok::<_, String>(KeyRotation::Interrupted {
+            phrase: "ZODE-NEW".into(),
+            adopted: false,
+            reason: ".env sync is part of Pro.".into(),
+        }));
+        assert_eq!(phrase, None, "a key not in use is not shown to write down");
+        assert!(error.is_some_and(|error| error.contains("still opens everything")));
+
+        let (phrase, error) = rotation_message(Ok::<_, String>(KeyRotation::Complete {
+            phrase: "ZODE-NEW".into(),
+        }));
+        assert_eq!(
+            (phrase, error),
+            (Some(SharedString::from("ZODE-NEW")), None)
         );
     }
 }

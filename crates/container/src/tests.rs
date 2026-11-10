@@ -54,6 +54,11 @@ use crate::docker_backend::DockerBackend;
 use crate::fake_backend::{FakeBackend, Misbehaviour};
 use crate::resource::{ResourceAction, ResourceKind, RunState};
 
+/// This machine, which is what every engine test here means by "the engine".
+pub(crate) fn local() -> std::sync::Arc<dyn util::command::CommandHost> {
+    std::sync::Arc::new(util::command::LocalCommandHost)
+}
+
 fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
     smol::block_on(future)
 }
@@ -78,7 +83,7 @@ fn the_fake_satisfies_the_shared_suite() {
 #[test]
 #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
 fn real_docker_satisfies_the_shared_suite() {
-    let backend = DockerBackend::docker();
+    let backend = DockerBackend::docker(crate::tests::local());
     let reached = block_on(shared_suite(&backend)).expect("real docker must satisfy the suite");
     if reached == 0 {
         eprintln!("docker is not usable here; the suite reached no kind");
@@ -196,7 +201,10 @@ fn an_image_offers_no_lifecycle_action() {
 /// through the same trait Kubernetes answers.
 #[test]
 fn docker_and_podman_have_no_config_to_aim() {
-    for backend in [DockerBackend::docker(), DockerBackend::podman()] {
+    for backend in [
+        DockerBackend::docker(crate::tests::local()),
+        DockerBackend::podman(crate::tests::local()),
+    ] {
         assert!(
             backend.config_source().is_none(),
             "{:?} reads no config file a picker could offer",
@@ -449,7 +457,7 @@ mod real_engine_classification {
             .filter(|line| !line.trim().is_empty())
             .count();
 
-        let backend = DockerBackend::docker();
+        let backend = DockerBackend::docker(crate::tests::local());
         let listed = block_on(backend.list(ResourceKind::Container))
             .expect("docker answered the CLI, so it must answer the backend");
         assert_eq!(
@@ -518,7 +526,7 @@ mod kubernetes {
     /// `supported_actions` rather than through a branch in the view.
     #[test]
     fn a_pod_offers_no_lifecycle_action_at_all() {
-        let backend = KubernetesBackend::new();
+        let backend = KubernetesBackend::new(crate::tests::local());
         assert!(
             backend.supported_actions(ResourceKind::Pod).is_empty(),
             "kubectl has no restart verb for a pod, and `rollout restart` acts on \
@@ -533,7 +541,7 @@ mod kubernetes {
     /// what is wrong rather than succeed quietly.
     #[test]
     fn acting_on_a_pod_refuses_and_explains() {
-        let backend = KubernetesBackend::new();
+        let backend = KubernetesBackend::new(crate::tests::local());
         let error = block_on(backend.act(ResourceKind::Pod, ResourceAction::Restart, "ns/pod"))
             .expect_err("a pod cannot be restarted");
         let message = error.to_string();
@@ -604,7 +612,7 @@ mod kubernetes {
     #[test]
     #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
     fn kubernetes_satisfies_the_shared_suite() {
-        let backend = KubernetesBackend::new();
+        let backend = KubernetesBackend::new(crate::tests::local());
         let reached = block_on(shared_suite(&backend))
             .expect("the trait must mean the same thing to kubernetes");
         if reached == 0 {
@@ -622,7 +630,7 @@ mod kubernetes {
     #[test]
     #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
     fn no_context_is_not_reported_as_an_unreachable_cluster() {
-        let backend = KubernetesBackend::new();
+        let backend = KubernetesBackend::new(crate::tests::local());
         match block_on(backend.list(ResourceKind::Pod)) {
             Err(ContainerError::NotConfigured { .. }) => {}
             Err(ContainerError::EngineMissing { .. }) => {
@@ -644,7 +652,8 @@ mod kubernetes {
     #[test]
     fn kubeconfig_command_puts_the_chosen_file_ahead_of_the_subcommand() {
         let path = std::path::Path::new("/tmp/zode-test-kubeconfig");
-        let command = kubeconfig::command("kubectl", Some(path));
+        let command = kubeconfig::command(&util::command::LocalCommandHost, "kubectl", Some(path))
+            .expect("a local command is always built");
         let args: Vec<String> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -661,7 +670,8 @@ mod kubernetes {
             ]
         );
 
-        let bare = kubeconfig::command("kubectl", None);
+        let bare = kubeconfig::command(&util::command::LocalCommandHost, "kubectl", None)
+            .expect("a local command is always built");
         let bare_args: Vec<String> = bare
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -678,10 +688,13 @@ mod kubernetes {
     #[test]
     fn kubernetes_backend_command_puts_the_chosen_file_ahead_of_the_subcommand() {
         let backend = KubernetesBackend::with_kubeconfig(
+            crate::tests::local(),
             Some(std::path::PathBuf::from("/tmp/zode-test-kubeconfig")),
             None,
         );
-        let command = backend.command(&["get", "pods", "-o", "json"]);
+        let command = backend
+            .command(&["get", "pods", "-o", "json"])
+            .expect("a local command is always built");
         let args: Vec<String> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
@@ -709,7 +722,9 @@ mod kubernetes {
     #[test]
     fn watch_needs_a_target_to_run_at_all() {
         assert!(
-            KubernetesBackend::new().watch().is_none(),
+            KubernetesBackend::new(crate::tests::local())
+                .watch()
+                .is_none(),
             "no scope means nothing chosen to watch"
         );
     }
@@ -725,10 +740,13 @@ mod kubernetes {
     #[test]
     #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
     fn a_scope_is_enough_to_start_the_watch() {
-        let scoped = KubernetesBackend::with_scope(Scope {
-            context: "prod".into(),
-            namespace: None,
-        });
+        let scoped = KubernetesBackend::with_scope(
+            crate::tests::local(),
+            Scope {
+                context: "prod".into(),
+                namespace: None,
+            },
+        );
         assert!(
             scoped.watch().is_some(),
             "a scope is enough to start the watch, whatever the cluster answers"
@@ -740,7 +758,7 @@ mod kubernetes {
     /// depends on.
     #[test]
     fn aimed_at_round_trips_a_target_into_a_scope() {
-        let backend = KubernetesBackend::new();
+        let backend = KubernetesBackend::new(crate::tests::local());
         let target = crate::kubeconfig::ConfigTarget {
             name: "prod".into(),
             detail: Some("apps".into()),
@@ -781,10 +799,13 @@ mod kubernetes {
     #[test]
     #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
     fn a_scope_is_passed_to_kubectl_rather_than_rediscovered() {
-        let backend = KubernetesBackend::with_scope(Scope {
-            context: "prod".into(),
-            namespace: Some("apps".into()),
-        });
+        let backend = KubernetesBackend::with_scope(
+            crate::tests::local(),
+            Scope {
+                context: "prod".into(),
+                namespace: Some("apps".into()),
+            },
+        );
         // No cluster here, so the call fails -- but it must fail having *tried*,
         // not having stopped at "no context", which is the branch a scope skips.
         match block_on(backend.list(ResourceKind::Pod)) {
@@ -811,8 +832,8 @@ mod kubernetes {
 #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
 fn the_suite_means_the_same_thing_to_both_backends() {
     use crate::kubernetes_backend::KubernetesBackend;
-    let docker = DockerBackend::docker();
-    let kubernetes = KubernetesBackend::new();
+    let docker = DockerBackend::docker(crate::tests::local());
+    let kubernetes = KubernetesBackend::new(crate::tests::local());
     let docker_reached = block_on(shared_suite(&docker)).expect("docker");
     let kubernetes_reached = block_on(shared_suite(&kubernetes)).expect("kubernetes");
     // Reported rather than asserted: whether either engine is usable is a
@@ -963,7 +984,7 @@ mod docker_resources {
     #[test]
     #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
     fn real_docker_answers_for_every_kind_it_declares() {
-        let backend = DockerBackend::docker();
+        let backend = DockerBackend::docker(crate::tests::local());
         let mut answered = 0;
         for kind in backend.supported_kinds() {
             match block_on(backend.list(*kind)) {
@@ -1113,8 +1134,8 @@ mod podman {
     /// per-engine `supported_kinds` exists for.
     #[test]
     fn only_podman_lists_pods() {
-        let docker = DockerBackend::docker();
-        let podman = DockerBackend::podman();
+        let docker = DockerBackend::docker(crate::tests::local());
+        let podman = DockerBackend::podman(crate::tests::local());
         assert!(!docker.supported_kinds().contains(&ResourceKind::Pod));
         assert!(podman.supported_kinds().contains(&ResourceKind::Pod));
         assert_eq!(podman.kind(), BackendKind::Podman);
@@ -1125,7 +1146,7 @@ mod podman {
     /// decided by kind.
     #[test]
     fn a_podman_pod_starts_and_stops_but_does_not_restart() {
-        let podman = DockerBackend::podman();
+        let podman = DockerBackend::podman(crate::tests::local());
         let actions = podman.supported_actions(ResourceKind::Pod);
         assert!(actions.contains(&ResourceAction::Start));
         assert!(actions.contains(&ResourceAction::Stop));
@@ -1136,7 +1157,7 @@ mod podman {
              worse than no button"
         );
         assert!(
-            DockerBackend::docker()
+            DockerBackend::docker(crate::tests::local())
                 .supported_actions(ResourceKind::Pod)
                 .is_empty(),
             "and docker offers nothing for a kind it does not have"
@@ -1146,7 +1167,7 @@ mod podman {
     /// An action outside `supported_actions` must be refused, not attempted.
     #[test]
     fn acting_outside_the_declared_actions_is_refused() {
-        let docker = DockerBackend::docker();
+        let docker = DockerBackend::docker(crate::tests::local());
         let error = block_on(docker.act(ResourceKind::Image, ResourceAction::Start, "abc"))
             .expect_err("an image cannot be started");
         assert!(
@@ -1199,7 +1220,7 @@ mod podman {
     #[test]
     #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
     fn an_absent_podman_says_so_plainly() {
-        let podman = DockerBackend::podman();
+        let podman = DockerBackend::podman(crate::tests::local());
         match block_on(podman.list(ResourceKind::Container)) {
             Err(ContainerError::EngineMissing { program }) => assert_eq!(program, "podman"),
             // A machine that has podman gets a list, which is also fine.
@@ -1223,7 +1244,10 @@ mod terminal_commands {
     #[test]
     fn a_hostile_name_stays_one_argument() {
         let hostile = "evil; rm -rf /tmp/nothing";
-        for backend in [DockerBackend::docker(), DockerBackend::podman()] {
+        for backend in [
+            DockerBackend::docker(crate::tests::local()),
+            DockerBackend::podman(crate::tests::local()),
+        ] {
             let (program, args) = backend
                 .logs_command(ResourceKind::Container, hostile)
                 .expect("a container has a log");
@@ -1247,7 +1271,7 @@ mod terminal_commands {
     /// Only things that have a log get a log command. An image has never run.
     #[test]
     fn only_things_with_a_log_offer_one() {
-        let docker = DockerBackend::docker();
+        let docker = DockerBackend::docker(crate::tests::local());
         assert!(docker.logs_command(ResourceKind::Container, "a").is_some());
         assert!(docker.logs_command(ResourceKind::Image, "a").is_none());
         assert!(docker.logs_command(ResourceKind::Volume, "a").is_none());
@@ -1258,7 +1282,7 @@ mod terminal_commands {
     /// Docker has no pods anyway.
     #[test]
     fn only_a_container_offers_a_shell_on_docker() {
-        let docker = DockerBackend::docker();
+        let docker = DockerBackend::docker(crate::tests::local());
         assert!(docker.exec_command(ResourceKind::Container, "a").is_some());
         assert!(docker.exec_command(ResourceKind::Image, "a").is_none());
         assert!(docker.exec_command(ResourceKind::Pod, "a").is_none());
@@ -1268,12 +1292,12 @@ mod terminal_commands {
     #[test]
     fn a_podman_pod_has_a_log_and_a_docker_one_does_not() {
         assert!(
-            DockerBackend::podman()
+            DockerBackend::podman(crate::tests::local())
                 .logs_command(ResourceKind::Pod, "web")
                 .is_some()
         );
         assert!(
-            DockerBackend::docker()
+            DockerBackend::docker(crate::tests::local())
                 .logs_command(ResourceKind::Pod, "web")
                 .is_none()
         );
@@ -1283,7 +1307,7 @@ mod terminal_commands {
     /// literally called `production/web`.
     #[test]
     fn a_namespaced_pod_id_is_split_into_flag_and_name() {
-        let backend = KubernetesBackend::new();
+        let backend = KubernetesBackend::new(crate::tests::local());
         let (program, args) = backend
             .logs_command(ResourceKind::Pod, "production/web-1")
             .expect("a pod has a log");
@@ -1305,7 +1329,7 @@ mod terminal_commands {
     /// An id with no namespace is a name, not a broken id.
     #[test]
     fn an_unnamespaced_pod_id_passes_through_without_a_namespace_flag() {
-        let (_, args) = KubernetesBackend::new()
+        let (_, args) = KubernetesBackend::new(crate::tests::local())
             .logs_command(ResourceKind::Pod, "solo")
             .expect("a pod has a log");
         assert!(
@@ -1319,7 +1343,7 @@ mod terminal_commands {
     /// arguments.
     #[test]
     fn a_pod_shell_is_separated_from_kubectls_own_arguments() {
-        let (_, args) = KubernetesBackend::new()
+        let (_, args) = KubernetesBackend::new(crate::tests::local())
             .exec_command(ResourceKind::Pod, "ns/pod")
             .expect("a pod can be entered");
         let separator = args
@@ -1492,7 +1516,7 @@ mod destructive {
     #[test]
     #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
     fn removing_a_running_container_is_not_forced() {
-        let backend = DockerBackend::docker();
+        let backend = DockerBackend::docker(crate::tests::local());
         let plan = DestructivePlan::remove(
             ResourceKind::Container,
             vec![thing("definitely-not-here", ResourceKind::Container)],
@@ -1515,7 +1539,7 @@ mod destructive {
     /// pretending to have nothing to prune.
     #[test]
     fn kubernetes_offers_no_prune_at_all() {
-        let backend = crate::kubernetes_backend::KubernetesBackend::new();
+        let backend = crate::kubernetes_backend::KubernetesBackend::new(crate::tests::local());
         assert!(
             block_on(backend.prune_targets(PruneScope::Reclaimable)).is_none(),
             "`None` means the notion does not exist here -- an empty list would \
@@ -1528,7 +1552,7 @@ mod destructive {
     #[test]
     #[ignore = "drives whatever engine the machine has; see `engine tests` in the module docs"]
     fn dockers_prune_list_only_includes_volumes_when_asked() {
-        let backend = DockerBackend::docker();
+        let backend = DockerBackend::docker(crate::tests::local());
         let reclaimable =
             block_on(backend.prune_targets(PruneScope::Reclaimable)).expect("docker has a prune");
         let Ok(reclaimable) = reclaimable else {
@@ -1541,5 +1565,255 @@ mod destructive {
                 .any(|target| target.kind == ResourceKind::Volume),
             "the default scope must not list a single volume"
         );
+    }
+}
+
+/// Every engine command is asked of the host the backend was given, so a
+/// remote project's panel never runs this machine's `docker` or reads its
+/// `~/.kube`.
+mod through_the_host {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use super::block_on;
+    use crate::backend::{ContainerBackend, ContainerError};
+    use crate::backend_test_suite::{RecordedCommand, RecordingHost};
+    use crate::docker_backend::DockerBackend;
+    use crate::kubernetes_backend::{KubernetesBackend, Scope};
+    use crate::resource::{ResourceAction, ResourceKind};
+
+    fn asked(program: &str, args: &[&str]) -> RecordedCommand {
+        RecordedCommand {
+            program: program.to_string(),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+            env: Vec::new(),
+            cwd: None,
+        }
+    }
+
+    #[test]
+    fn docker_lists_acts_and_watches_only_through_its_host() {
+        let host = Arc::new(RecordingHost::new("Ubuntu-22.04"));
+        let backend = DockerBackend::docker(host.clone());
+
+        let listed = block_on(backend.list(ResourceKind::Container));
+        let acted = block_on(backend.act(ResourceKind::Container, ResourceAction::Stop, "web"));
+        let watched = backend.watch();
+
+        assert!(matches!(
+            listed,
+            Err(ContainerError::HostUnavailable { .. })
+        ));
+        assert!(matches!(acted, Err(ContainerError::HostUnavailable { .. })));
+        assert!(watched.is_none(), "the recorded command cannot start");
+        assert_eq!(
+            host.recorded(),
+            vec![
+                asked("docker", &["ps", "-a", "--format", "{{json .}}"]),
+                asked("docker", &["stop", "--", "web"]),
+                asked("docker", &["events", "--format", "{{json .}}"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn podman_is_asked_by_its_own_name_through_its_host() {
+        let host = Arc::new(RecordingHost::new("Ubuntu-22.04"));
+        let backend = DockerBackend::podman(host.clone());
+
+        block_on(backend.list(ResourceKind::Pod)).ok();
+
+        assert_eq!(
+            host.recorded(),
+            vec![asked("podman", &["pod", "ps", "--format", "json"])]
+        );
+    }
+
+    #[test]
+    fn kubectl_reads_the_kubeconfig_of_its_host() {
+        let host = Arc::new(RecordingHost::new("Ubuntu-22.04"));
+        let backend = KubernetesBackend::new(host.clone());
+
+        block_on(backend.list(ResourceKind::Pod)).ok();
+        block_on(backend.config_targets(Some(std::path::Path::new("/home/me/.kube/work")))).ok();
+
+        assert_eq!(
+            host.recorded(),
+            vec![
+                asked("kubectl", &["config", "view", "-o", "json"]),
+                asked(
+                    "kubectl",
+                    &[
+                        "--kubeconfig",
+                        "/home/me/.kube/work",
+                        "config",
+                        "view",
+                        "-o",
+                        "json"
+                    ]
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_aimed_kubectl_keeps_its_host_for_lists_and_watches() {
+        let host = Arc::new(RecordingHost::new("Ubuntu-22.04"));
+        let aimed = KubernetesBackend::new(host.clone())
+            .aimed_at(
+                Some(PathBuf::from("/home/me/.kube/work")),
+                Some(crate::kubeconfig::ConfigTarget {
+                    name: "prod".into(),
+                    detail: None,
+                }),
+            )
+            .expect("kubernetes can be aimed");
+
+        block_on(aimed.list(ResourceKind::Pod)).ok();
+        let watched = aimed.watch();
+
+        assert!(watched.is_none(), "the recorded command cannot start");
+        let scoped = |args: &[&str]| {
+            let mut words = vec!["--kubeconfig", "/home/me/.kube/work"];
+            words.extend_from_slice(args);
+            words.extend_from_slice(&["--context", "prod"]);
+            asked("kubectl", &words)
+        };
+        assert_eq!(
+            host.recorded(),
+            vec![
+                scoped(&["get", "pods", "-o", "json"]),
+                scoped(&[
+                    "get",
+                    "pods",
+                    "--watch",
+                    "--output-watch-events",
+                    "-o",
+                    "json"
+                ]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_host_that_cannot_run_commands_is_a_typed_error_naming_it() {
+        let host = Arc::new(RecordingHost::refusing(
+            "relay-box",
+            "it is reached through a remote-control connection",
+        ));
+        let docker = DockerBackend::docker(host.clone());
+        let kubernetes = KubernetesBackend::with_scope(
+            host,
+            Scope {
+                context: "prod".into(),
+                namespace: None,
+            },
+        );
+
+        for backend in [&docker as &dyn ContainerBackend, &kubernetes] {
+            match block_on(backend.list(backend.supported_kinds()[0])) {
+                Err(ContainerError::HostUnavailable { detail }) => assert!(
+                    detail.contains("relay-box"),
+                    "{:?} must name the host: {detail}",
+                    backend.kind()
+                ),
+                other => panic!("{:?} answered {other:?}", backend.kind()),
+            }
+            assert!(backend.watch().is_none());
+        }
+    }
+
+    /// Only the wrapper (`wsl.exe`, `ssh`) is started here, so a spawn that
+    /// finds nothing to run, or ssh's own exit 255, says the host cannot be
+    /// reached -- not that the engine on it is missing or down.
+    #[test]
+    fn a_wrapper_that_cannot_reach_the_host_is_host_unavailable() {
+        let backends = |host: Arc<RecordingHost>| -> [Arc<dyn ContainerBackend>; 2] {
+            [
+                Arc::new(DockerBackend::docker(host.clone())),
+                Arc::new(KubernetesBackend::with_scope(
+                    host,
+                    Scope {
+                        context: "prod".into(),
+                        namespace: None,
+                    },
+                )),
+            ]
+        };
+        let hosts = vec![(
+            "missing wrapper",
+            Arc::new(RecordingHost::new("Ubuntu-22.04")),
+        )];
+        // The ssh case scripts its failure with `sh`, which Windows lacks.
+        #[cfg(unix)]
+        let hosts = {
+            let mut hosts = hosts;
+            hosts.push((
+                "ssh exit 255",
+                Arc::new(RecordingHost::answering_with(
+                    "build-box",
+                    "sh",
+                    &[
+                        "-c",
+                        "echo 'ssh: connect to host build-box: Connection refused' >&2; exit 255",
+                    ],
+                )),
+            ));
+            hosts
+        };
+
+        for (case, host) in hosts {
+            for backend in backends(host.clone()) {
+                let listed = block_on(backend.list(backend.supported_kinds()[0]));
+                assert!(
+                    matches!(listed, Err(ContainerError::HostUnavailable { .. })),
+                    "{case}: {:?} answered {listed:?}",
+                    backend.kind()
+                );
+            }
+        }
+
+        let here = Arc::new(RecordingHost::this_machine());
+        for backend in backends(here) {
+            let listed = block_on(backend.list(backend.supported_kinds()[0]));
+            assert!(
+                matches!(listed, Err(ContainerError::EngineMissing { .. })),
+                "on this machine a spawn that finds nothing is the engine missing: {listed:?}"
+            );
+        }
+    }
+
+    /// Through `wsl.exe` or `ssh` the wrapper always starts, so a missing tool
+    /// is the shell's exit 127 rather than the spawn's own `NotFound`.
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_missing_on_the_host_is_engine_missing_not_engine_down() {
+        let missing = "echo 'env: tool: No such file or directory' >&2; exit 127";
+        let docker_host = Arc::new(RecordingHost::answering_with(
+            "Ubuntu-22.04",
+            "sh",
+            &["-c", missing],
+        ));
+        let docker = DockerBackend::docker(docker_host);
+        let kubernetes = KubernetesBackend::with_scope(
+            Arc::new(RecordingHost::answering_with(
+                "Ubuntu-22.04",
+                "sh",
+                &["-c", missing],
+            )),
+            Scope {
+                context: "prod".into(),
+                namespace: None,
+            },
+        );
+
+        for backend in [&docker as &dyn ContainerBackend, &kubernetes] {
+            let listed = block_on(backend.list(backend.supported_kinds()[0]));
+            assert!(
+                matches!(listed, Err(ContainerError::EngineMissing { .. })),
+                "{:?} answered {listed:?}",
+                backend.kind()
+            );
+        }
     }
 }

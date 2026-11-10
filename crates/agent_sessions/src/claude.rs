@@ -317,6 +317,21 @@ impl SessionProvider for ClaudeProvider {
         read_transcript_progress(log_path, from)
     }
 
+    fn transcript_progress_within(
+        &self,
+        session: &SessionSummary,
+        from: u64,
+        max_bytes: u64,
+    ) -> Result<TranscriptProgress> {
+        let Some(log_path) = session.log_path.as_ref() else {
+            return Ok(TranscriptProgress {
+                scanned_to: from,
+                ..TranscriptProgress::default()
+            });
+        };
+        read_transcript_progress_in(log_path, from, TRANSCRIPT_WINDOW, max_bytes)
+    }
+
     fn successor(
         &self,
         session: &SessionSummary,
@@ -1195,13 +1210,88 @@ mod tests {
         text.push_str(&result_line("toolu_partial"));
         std::fs::write(&log, &text).unwrap();
 
-        let whole = read_transcript_progress_in(&log, 0, usize::MAX / 2).unwrap();
-        let windowed = read_transcript_progress_in(&log, 0, 37).unwrap();
+        let whole = read_transcript_progress_in(&log, 0, usize::MAX / 2, u64::MAX).unwrap();
+        let windowed = read_transcript_progress_in(&log, 0, 37, u64::MAX).unwrap();
         assert_eq!(windowed, whole);
         assert_eq!(whole.tool_use_ids.len(), 30);
         assert!(
             whole.scanned_to < text.len() as u64,
             "the partial line waits"
+        );
+    }
+
+    /// A pass with a cap reads no further than it, and the passes after it pick
+    /// up exactly what one uncapped pass finds: the cap bounds a reply, it
+    /// must not lose a result.
+    #[test]
+    fn a_capped_pass_stops_at_its_cap_and_the_next_one_continues() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("s1.jsonl");
+        let mut text = String::new();
+        for n in 0..100 {
+            text.push_str(&result_line(&format!("toolu_{n}")));
+            text.push('\n');
+        }
+        std::fs::write(&log, &text).unwrap();
+        let whole = read_transcript_progress(&log, 0).unwrap();
+
+        let cap = 500;
+        let mut from = 0;
+        let mut found = Vec::new();
+        while from < text.len() as u64 {
+            let pass = read_transcript_progress_in(&log, from, TRANSCRIPT_WINDOW, cap).unwrap();
+            assert!(
+                pass.scanned_to > from && pass.scanned_to - from <= cap,
+                "a pass from {from} read to {}, past its cap of {cap}",
+                pass.scanned_to
+            );
+            assert_eq!(
+                pass.more_to_read,
+                pass.scanned_to < text.len() as u64,
+                "a pass from {from} to {} must say whether it left any of the file unread",
+                pass.scanned_to
+            );
+            found.extend(pass.tool_use_ids);
+            from = pass.scanned_to;
+        }
+        assert_eq!(found, whole.tool_use_ids);
+        assert!(!whole.more_to_read, "an uncapped pass reads to the end");
+    }
+
+    /// A line still being written is not more to read: the pass that reached
+    /// it stopped at the end of what is whole, not at its cap.
+    #[test]
+    fn a_capped_pass_up_to_a_line_still_being_written_has_nothing_more_to_read() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("s1.jsonl");
+        let whole_line = result_line("toolu_done");
+        let text = format!("{whole_line}\n{{\"type\":\"user\",\"mess");
+        std::fs::write(&log, &text).unwrap();
+
+        let pass = read_transcript_progress_in(&log, 0, TRANSCRIPT_WINDOW, 4096).unwrap();
+        assert_eq!(pass.scanned_to, whole_line.len() as u64 + 1);
+        assert!(!pass.more_to_read);
+    }
+
+    /// A line longer than the cap has to be read whole, or no pass would ever
+    /// get past it.
+    #[test]
+    fn a_line_longer_than_the_cap_is_still_read() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("s1.jsonl");
+        let long = result_line(&"x".repeat(5000));
+        let text = format!("{long}\n{}\n", result_line("toolu_after"));
+        std::fs::write(&log, &text).unwrap();
+
+        let pass = read_transcript_progress_in(&log, 0, TRANSCRIPT_WINDOW, 100).unwrap();
+        assert!(
+            pass.scanned_to > long.len() as u64,
+            "the long line was read"
+        );
+        assert_eq!(
+            pass.tool_use_ids.first().map(|id| id.len()),
+            Some(5000),
+            "and what it reported is in the pass"
         );
     }
 
@@ -1714,15 +1804,17 @@ fn read_subagents(dir: &Path) -> Vec<SubagentSummary> {
 /// partial line as read would lose whatever result it turns out to carry once
 /// the rest of it lands.
 fn read_transcript_progress(path: &Path, from: u64) -> Result<TranscriptProgress> {
-    read_transcript_progress_in(path, from, TRANSCRIPT_WINDOW)
+    read_transcript_progress_in(path, from, TRANSCRIPT_WINDOW, u64::MAX)
 }
 
 /// [`read_transcript_progress`] with the window it reads in chosen by the
-/// caller, so a test can cut a small file into many.
+/// caller, so a test can cut a small file into many, and with at most about
+/// `max_bytes` read past `from`.
 fn read_transcript_progress_in(
     path: &Path,
     from: u64,
     window: usize,
+    max_bytes: u64,
 ) -> Result<TranscriptProgress> {
     let mut file = match File::open(path) {
         Ok(file) => file,
@@ -1744,14 +1836,25 @@ fn read_transcript_progress_in(
     let restarted = from > length;
     let from = if restarted { 0 } else { from };
     let identity = head_identity(&mut file, length)?;
-    file.seek(SeekFrom::Start(from))?;
 
     // Bounded by the length measured above, so a transcript that is being
     // written faster than it is read still ends this pass.
-    let mut scan = claude_log::ChunkScan::default();
-    let read = read_complete_lines(file.take(length - from), window, |lines| {
-        scan.extend(claude_log::scan_chunk(lines));
-    })?;
+    let available = length - from;
+    let mut budget = available.min(max_bytes.max(1));
+    let (scan, read, budget) = loop {
+        file.seek(SeekFrom::Start(from))?;
+        let mut scan = claude_log::ChunkScan::default();
+        let read = read_complete_lines(file.by_ref().take(budget), window, |lines| {
+            scan.extend(claude_log::scan_chunk(lines));
+        })?;
+        // A cap that cut the first line short read nothing whole. Grow it
+        // until that line fits, or this pass and every one after it would stay
+        // where it started.
+        if read > 0 || budget >= available {
+            break (scan, read, budget);
+        }
+        budget = budget.saturating_mul(2).min(available);
+    };
     Ok(TranscriptProgress {
         tool_use_ids: scan.tool_use_ids.into_iter().map(Arc::from).collect(),
         turn_marks: scan.turn_marks,
@@ -1759,6 +1862,10 @@ fn read_transcript_progress_in(
         scanned_to: from + read,
         restarted,
         identity,
+        // Cut short by the cap, not by the end: what lies past the budget can
+        // be a line still being written, which the next pass then reports as
+        // nothing more.
+        more_to_read: budget < available,
     })
 }
 

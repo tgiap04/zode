@@ -15,6 +15,10 @@ Each `·`-separated group is one quota window — a percentage, and either a cou
 
 **Left-click** it to open the usage panel. **Right-click** it for a menu of which status-bar items are shown. Both are described below. Three settings control the indicator itself — see [Status Bar settings](./visual-customization.md#status-bar).
 
+## Remote windows
+
+In a WSL, SSH or dev container window the indicator shows the usage of the account signed in **on the host**, because that is the account its agents spend. It never falls back to the account on this machine. When the host's account cannot be read, the indicator shows a muted mark, and its panel says why: for example that no one is signed in on that host, that its `codex` CLI is missing, or that the connection is unavailable. A window opened on a collaborator's shared project keeps this machine's account.
+
 ## Usage panel
 
 Left-clicking the indicator opens a panel. It closes as soon as you click anywhere outside it.

@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Deletes the object files an incremental build leaves behind in <profile dir>/deps.
+#
+# With `split-debuginfo = "unpacked"` (the dev profile), rustc keeps every codegen unit's `.o`
+# in deps, hard-linked to its copy in the incremental session. A rebuild writes fresh objects
+# under new names and drops the old session, but never deletes the old objects from deps: each
+# rebuild of a large crate leaves its previous objects behind, and target/ grows by gigabytes per
+# `make build`.
+#
+# An object of an incremental crate whose session is gone has one link left, so that is what this
+# deletes. Crates built without incremental (registry dependencies) always have one link and are
+# still in use, so only crates that have an incremental directory are considered. Objects touched
+# in the last few minutes are skipped, in case a concurrent build has written one and not yet
+# linked it into its session.
+#
+# Deleting an object a binary still referenced would only cost line numbers in its backtraces;
+# the binaries themselves never load these files.
+
+set -euo pipefail
+
+profile_dir=${1:-target/debug}
+
+if [[ ! -d "${profile_dir}/deps" || ! -d "${profile_dir}/incremental" ]]; then
+    exit 0
+fi
+
+# Incremental directories are `<crate>-<id>`; crate names never contain `-`.
+incremental_crates=$(ls "${profile_dir}/incremental" | sed -E 's/-[^-]+$//' | sort -u)
+
+stale_objects=$(
+    find "${profile_dir}/deps" -maxdepth 1 -type f -name '*.rcgu.o' -links 1 -mmin +5 \
+        | awk '
+            NR == FNR { known[$0] = 1; next }
+            {
+                name = $0
+                sub(/.*\//, "", name)
+                sub(/-.*/, "", name)
+                if (name in known) print
+            }' <(printf '%s\n' "${incremental_crates}") -
+)
+
+if [[ -z "${stale_objects}" ]]; then
+    exit 0
+fi
+
+freed_kb=$(printf '%s\n' "${stale_objects}" | tr '\n' '\0' | xargs -0 du -k | awk '{ total += $1 } END { print total }')
+printf '%s\n' "${stale_objects}" | tr '\n' '\0' | xargs -0 rm -f
+echo "prune-stale-objects: removed $(printf '%s\n' "${stale_objects}" | wc -l | tr -d ' ') stale objects ($(( freed_kb / 1024 )) MB) from ${profile_dir}/deps"

@@ -142,13 +142,16 @@ dependencies = [
  "db",
  "editor",
  "fs",
- "futures 0.3.32",
  "gpui",
  "log",
  "menu",
  "notifications",
  "paths",
  "project",
+ "release_channel",
+ "remote",
+ "rpc",
+ "semver",
  "serde",
  "serde_json",
  "settings",
@@ -171,6 +174,7 @@ dependencies = [
 name = "agent_usage"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "chrono",
  "fs",
  "futures 0.3.32",
@@ -186,6 +190,7 @@ dependencies = [
  "util",
  "which 6.0.3",
  "workspace",
+ "zeroize",
 ]
 
 [[package]]
@@ -2363,6 +2368,7 @@ dependencies = [
 name = "container"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "container",
  "futures 0.3.32",
@@ -3365,17 +3371,24 @@ dependencies = [
  "log",
  "menu",
  "multi_buffer",
+ "paths",
  "project",
+ "remote",
+ "rpc",
  "settings",
  "tempfile",
  "theme",
  "theme_settings",
  "ui",
  "ui_input",
+ "util",
  "workspace",
  "zed_actions",
  "zed_credentials_provider",
+ "zeroize",
  "zode_account",
+ "zode_env_sync",
+ "zode_team_vault",
 ]
 
 [[package]]
@@ -6268,6 +6281,7 @@ dependencies = [
  "itertools 0.14.0",
  "js-sys",
  "log",
+ "naga 29.0.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "parking_lot",
  "pollster 0.4.0",
  "profiling",
@@ -8645,6 +8659,7 @@ dependencies = [
  "log",
  "markdown",
  "project",
+ "serde_json",
  "settings",
  "tempfile",
  "theme_settings",
@@ -11652,6 +11667,7 @@ dependencies = [
 name = "project"
 version = "0.1.0"
 dependencies = [
+ "agent_sessions",
  "aho-corasick",
  "anyhow",
  "askpass",
@@ -12743,6 +12759,7 @@ dependencies = [
  "rpc",
  "serde_json",
  "settings",
+ "sha2 0.10.9",
  "smol",
  "sysinfo 0.37.2",
  "task",
@@ -12806,6 +12823,7 @@ dependencies = [
 name = "remote_server"
 version = "0.1.0"
 dependencies = [
+ "agent_sessions",
  "alacritty_terminal",
  "anyhow",
  "askpass",
@@ -12816,6 +12834,7 @@ dependencies = [
  "collections",
  "crash-handler",
  "dap_adapters",
+ "database",
  "debug_adapter_extension",
  "editor",
  "env_logger 0.11.8",
@@ -12861,6 +12880,7 @@ dependencies = [
  "smol",
  "sysinfo 0.37.2",
  "task",
+ "tempfile",
  "terminal",
  "theme",
  "theme_settings",
@@ -15519,6 +15539,7 @@ dependencies = [
  "serde_json_lenient",
  "settings",
  "theme",
+ "util",
  "uuid",
 ]
 
@@ -19376,6 +19397,7 @@ dependencies = [
  "git",
  "gpui",
  "http_client",
+ "image",
  "itertools 0.14.0",
  "language",
  "log",
@@ -20050,6 +20072,7 @@ version = "1.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
 dependencies = [
+ "serde",
  "zeroize_derive",
 ]
 
@@ -20159,7 +20182,7 @@ dependencies = [
 
 [[package]]
 name = "zode"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "activity_indicator",
  "agent_notify",
@@ -20409,6 +20432,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "util",
  "zeroize",
  "zode_account",
  "zode_sync",
@@ -20424,6 +20448,7 @@ dependencies = [
  "menu",
  "notifications",
  "os_auth",
+ "paths",
  "project",
  "settings",
  "theme",
@@ -20433,9 +20458,11 @@ dependencies = [
  "util",
  "workspace",
  "zed_actions",
+ "zeroize",
  "zode_account",
  "zode_env_sync",
  "zode_sync",
+ "zode_team_vault",
 ]
 
 [[package]]
@@ -20458,6 +20485,31 @@ dependencies = [
  "zeroize",
  "zode_account",
  "zode_sync",
+]
+
+[[package]]
+name = "zode_team_vault"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "credentials_provider",
+ "db",
+ "futures 0.3.32",
+ "gpui",
+ "http_client",
+ "log",
+ "remote_relay_protocol",
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "snow",
+ "zeroize",
+ "zode_account",
+ "zode_env_sync",
+ "zode_sync",
+ "zode_team_vault",
 ]
 
 [[package]]

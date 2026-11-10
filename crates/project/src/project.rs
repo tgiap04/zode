@@ -1,8 +1,10 @@
 pub mod agent_bypass;
 pub mod agent_server_store;
+pub mod agent_session_host;
 pub mod bookmark_store;
 pub mod buffer_store;
 pub mod color_extractor;
+pub mod command_host;
 pub mod connection_manager;
 pub mod context_server_store;
 pub mod debounced_delay;
@@ -78,7 +80,7 @@ pub use environment::ProjectEnvironment;
 use futures::{
     StreamExt,
     channel::mpsc::{self, UnboundedReceiver},
-    future::try_join_all,
+    future::{FutureExt as _, Shared, try_join_all},
 };
 pub use image_store::{ImageItem, ImageStore};
 use image_store::{ImageItemEvent, ImageStoreEvent};
@@ -262,6 +264,15 @@ pub struct Project {
     agent_location: Option<AgentLocation>,
     downloading_files: Arc<Mutex<HashMap<(WorktreeId, String), DownloadingFile>>>,
     last_worktree_paths: WorktreePaths,
+    /// Built on first use and kept, so every tool spawned for this project
+    /// follows the remote client across reconnects (see `command_host`).
+    remote_command_host: Option<Arc<command_host::RemoteCommandHost>>,
+    /// Every host built for this project that is still in use, kept or not.
+    command_host_followers: Vec<std::sync::Weak<command_host::RemoteCommandHost>>,
+    command_host_observer: Option<gpui::Subscription>,
+    /// The rescan in flight for each worktree, so that a second reload joins the first instead
+    /// of queueing another full scan. An entry is removed when its rescan finishes.
+    worktree_rescans: HashMap<WorktreeId, Shared<Task<Result<(), Arc<anyhow::Error>>>>>,
 }
 
 struct DownloadingFile {
@@ -1410,6 +1421,10 @@ impl Project {
                 agent_location: None,
                 downloading_files: Default::default(),
                 last_worktree_paths: WorktreePaths::default(),
+                remote_command_host: None,
+                command_host_followers: Vec::new(),
+                command_host_observer: None,
+                worktree_rescans: HashMap::default(),
             }
         })
     }
@@ -1652,6 +1667,10 @@ impl Project {
                 agent_location: None,
                 downloading_files: Default::default(),
                 last_worktree_paths: WorktreePaths::default(),
+                remote_command_host: None,
+                command_host_followers: Vec::new(),
+                command_host_observer: None,
+                worktree_rescans: HashMap::default(),
             };
 
             // remote server -> local machine handlers
@@ -1839,6 +1858,56 @@ impl Project {
                 .await;
         }
         project
+    }
+
+    /// A project opened over a mock remote server that answers only its
+    /// heartbeat, with the server-side entity that keeps that handler alive.
+    #[cfg(feature = "test-support")]
+    pub async fn test_remote(
+        fs: Arc<dyn Fs>,
+        cx: &mut gpui::TestAppContext,
+        server_cx: &mut gpui::TestAppContext,
+    ) -> (Entity<Project>, Entity<()>) {
+        use clock::FakeSystemClock;
+
+        cx.update(|cx| {
+            release_channel::init(semver::Version::new(0, 0, 0), cx);
+            if !cx.has_global::<SettingsStore>() {
+                let settings_store = SettingsStore::test(cx);
+                cx.set_global(settings_store);
+            }
+        });
+        server_cx.update(|cx| release_channel::init(semver::Version::new(0, 0, 0), cx));
+        let (options, server_session, connect_guard) = RemoteClient::fake_server(cx, server_cx);
+        let server_keepalive = server_cx.new(|_| ());
+        server_session.add_request_handler(
+            server_keepalive.downgrade(),
+            |_, _: TypedEnvelope<proto::Ping>, _| async { Ok(proto::Ack {}) },
+        );
+        drop(connect_guard);
+        let remote_client = RemoteClient::connect_mock(options, cx).await;
+        let client = cx.update(|cx| {
+            client::Client::new(
+                Arc::new(FakeSystemClock::new()),
+                http_client::FakeHttpClient::with_404_response(),
+                cx,
+            )
+        });
+        let user_store = cx.new(|cx| UserStore::new(client.clone(), cx));
+        let languages = Arc::new(LanguageRegistry::test(cx.executor()));
+        let project = cx.update(|cx| {
+            Project::remote(
+                remote_client,
+                client,
+                node_runtime::NodeRuntime::unavailable(),
+                user_store,
+                languages,
+                fs,
+                false,
+                cx,
+            )
+        });
+        (project, server_keepalive)
     }
 
     /// Transitions a local test project into the `Collab` client state so that
@@ -2452,6 +2521,60 @@ impl Project {
             })?;
             Ok(())
         }))
+    }
+
+    /// Rescans the whole worktree on the machine that owns it and re-reads every repository in
+    /// it, picking up files and repositories the file watcher missed. A call made while a rescan
+    /// of the same worktree is running waits for that rescan instead of starting another.
+    pub fn rescan_worktree(
+        &mut self,
+        worktree_id: WorktreeId,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<()>> {
+        // Collab hosts do not forward this request, so a guest would wait for nothing.
+        if self.is_via_collab() {
+            return Task::ready(Err(anyhow!(
+                "Reload is not available to guests of a shared project"
+            )));
+        }
+        let rescan = match self.worktree_rescans.get(&worktree_id) {
+            Some(rescan) => rescan.clone(),
+            None => {
+                let Some(worktree) = self.worktree_for_id(worktree_id, cx) else {
+                    return Task::ready(Err(anyhow!("no worktree with id {worktree_id}")));
+                };
+                let worktree_rescan = worktree.update(cx, |worktree, cx| worktree.rescan(cx));
+                let git_store = self.git_store.clone();
+                let rescan = cx
+                    .spawn(async move |this, cx| {
+                        let result = match worktree_rescan.await {
+                            Ok(()) => {
+                                git_store
+                                    .update(cx, |git_store, cx| {
+                                        git_store.rescan_repositories_in_worktree(worktree_id, cx)
+                                    })
+                                    .await;
+                                Ok(())
+                            }
+                            Err(error) => Err(Arc::new(anyhow!(rescan_error_message(&error)))),
+                        };
+                        this.update(cx, |this, _| {
+                            this.worktree_rescans.remove(&worktree_id);
+                        })
+                        .log_err();
+                        result
+                    })
+                    .shared();
+                self.worktree_rescans.insert(worktree_id, rescan.clone());
+                rescan
+            }
+        };
+        cx.background_spawn(async move { rescan.await.map_err(|error| anyhow!("{error:#}")) })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn has_worktree_rescan_in_flight(&self, worktree_id: WorktreeId) -> bool {
+        self.worktree_rescans.contains_key(&worktree_id)
     }
 
     pub fn shared(&mut self, project_id: u64, cx: &mut Context<Self>) -> Result<()> {
@@ -3421,6 +3544,9 @@ impl Project {
     ) {
         match event {
             &remote::RemoteClientEvent::Disconnected { server_not_running } => {
+                // A remote rescan waits for a snapshot that will no longer arrive; drop it so a
+                // later reload starts over instead of joining it.
+                self.worktree_rescans.clear();
                 self.worktree_store.update(cx, |store, cx| {
                     store.disconnected_from_host(cx);
                 });
@@ -3504,6 +3630,7 @@ impl Project {
                 self.emit_group_key_changed_if_needed(cx);
             }
             WorktreeStoreEvent::WorktreeRemoved(_, id) => {
+                self.worktree_rescans.remove(id);
                 cx.emit(Event::WorktreeRemoved(*id));
                 self.emit_group_key_changed_if_needed(cx);
             }
@@ -6257,6 +6384,147 @@ impl Project {
         &self.agent_server_store
     }
 
+    /// Where this project's host tools (`docker`, `kubectl`, `gh`, `git` outside
+    /// the git store) run: this machine for a local project, the remote host
+    /// for one opened over a remote server.
+    ///
+    /// Never falls back to this machine for a project that lives elsewhere: a
+    /// collaboration guest, or a remote project whose connection is down, gets
+    /// an error rather than this machine's tools acting on paths that are not
+    /// here.
+    pub fn command_host(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Arc<dyn util::command::CommandHost>>> {
+        if self.is_local() {
+            return Task::ready(Ok(Arc::new(util::command::LocalCommandHost)));
+        }
+        let Some(remote_client) = self
+            .remote_client
+            .clone()
+            .filter(|_| self.is_via_remote_server())
+        else {
+            return Task::ready(Err(anyhow!(
+                "this project is shared from another machine, and its tools run there"
+            )));
+        };
+        if let Some(host) = &self.remote_command_host {
+            return Task::ready(Ok(host.clone() as Arc<dyn util::command::CommandHost>));
+        }
+        let (host_name, connection) = {
+            let remote = remote_client.read(cx);
+            (
+                remote.connection_options().display_name(),
+                remote.connection(),
+            )
+        };
+        let Some(connection) = connection else {
+            return Task::ready(Err(anyhow!("{host_name} is not connected")));
+        };
+        let root = Self::default_visible_worktree_paths(&self.worktree_store.read(cx), cx)
+            .into_iter()
+            .next();
+        let environment = root.map(|root| {
+            self.environment.update(cx, |environment, cx| {
+                environment.directory_environment(root.into(), cx)
+            })
+        });
+        cx.spawn(async move |this, cx| {
+            let environment = match environment {
+                Some(environment) => environment.await,
+                None => None,
+            };
+            let loaded = environment.is_some();
+            if !loaded {
+                log::warn!(
+                    "the environment on {host_name} could not be loaded (no folder open, or the \
+                     host did not answer); its tools start without the user's PATH"
+                );
+            }
+            let built = Arc::new(command_host::RemoteCommandHost::new(
+                connection,
+                environment.unwrap_or_default(),
+            ));
+            let host = this.update(cx, |this, cx| {
+                if let Some(host) = &this.remote_command_host {
+                    return host.clone();
+                }
+                // The client may have reconnected while the environment loaded,
+                // before this host was following it.
+                built.set_connection(remote_client.read(cx).connection());
+                this.follow_remote_connection(&remote_client, &built, cx);
+                // Not kept without its environment: a later call, once a folder
+                // is open or the host answers, builds one with the user's PATH.
+                if loaded {
+                    this.remote_command_host = Some(built.clone());
+                }
+                built
+            })?;
+            Ok(host as Arc<dyn util::command::CommandHost>)
+        })
+    }
+
+    /// Keeps `host` building through whichever connection `remote_client`
+    /// holds: a reconnect replaces it, and an SSH one carries its own control
+    /// socket, so commands must not keep going through the one that is gone.
+    ///
+    /// One observer for every host, holding them weakly, so building hosts
+    /// that are not kept adds no subscription per call.
+    fn follow_remote_connection(
+        &mut self,
+        remote_client: &Entity<RemoteClient>,
+        host: &Arc<command_host::RemoteCommandHost>,
+        cx: &mut Context<Self>,
+    ) {
+        self.command_host_followers
+            .retain(|follower| follower.strong_count() > 0);
+        self.command_host_followers.push(Arc::downgrade(host));
+        if self.command_host_observer.is_some() {
+            return;
+        }
+        self.command_host_observer = Some(cx.observe(remote_client, |this, remote_client, cx| {
+            let connection = remote_client.read(cx).connection();
+            this.command_host_followers
+                .retain(|follower| match follower.upgrade() {
+                    Some(host) => {
+                        host.set_connection(connection.clone());
+                        true
+                    }
+                    None => false,
+                });
+        }));
+    }
+
+    /// Where this project's agent sessions are kept: this machine for a local
+    /// project, the remote server's host for a remote one. `None` for a
+    /// collaboration guest, whose sessions are on a collaborator's machine
+    /// that nothing here can ask.
+    pub fn agent_session_host(&self, cx: &App) -> Option<agent_session_host::AgentSessionHost> {
+        if self.is_local() {
+            return Some(agent_session_host::AgentSessionHost::Local(
+                agent_sessions::default_providers(),
+            ));
+        }
+        self.remote_session_host(cx)
+            .map(agent_session_host::AgentSessionHost::Remote)
+    }
+
+    /// The remote server this project's sessions are kept on, through this
+    /// project's own connection to it. `None` for any project not opened over
+    /// a remote server. Cheap, unlike [`Self::agent_session_host`] for a local
+    /// project, which builds the providers.
+    pub fn remote_session_host(&self, cx: &App) -> Option<agent_session_host::RemoteSessionHost> {
+        if !self.is_via_remote_server() {
+            return None;
+        }
+        let remote = self.remote_client.as_ref()?.read(cx);
+        Some(agent_session_host::RemoteSessionHost::new(
+            remote.proto_client(),
+            REMOTE_SERVER_PROJECT_ID,
+            remote.path_style(),
+        ))
+    }
+
     #[cfg(feature = "test-support")]
     pub fn git_scans_complete(&self, cx: &Context<Self>) -> Task<()> {
         use futures::future::join_all;
@@ -6423,6 +6691,23 @@ impl ProjectGroupKey {
 
     pub fn host(&self) -> Option<RemoteConnectionOptions> {
         self.host.clone()
+    }
+}
+
+/// Turns a failed worktree rescan into text a user can act on.
+pub fn rescan_error_message(error: &anyhow::Error) -> String {
+    remote_request_error_message(error, "Reconnect to update it, then reload again.")
+}
+
+/// Turns a failed request to a remote server into text a user can act on. A server that predates
+/// the request answers it as an unknown message, which means nothing to the user, so that case
+/// says the server is outdated followed by `remedy`.
+pub(crate) fn remote_request_error_message(error: &anyhow::Error, remedy: &str) -> String {
+    let message = format!("{error:#}");
+    if message.contains("no handler registered") {
+        format!("The remote server is older than this version of Zode. {remedy}")
+    } else {
+        message
     }
 }
 

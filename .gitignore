@@ -66,3 +66,4 @@ web/**/.vite/
 # far more often than the code they describe. Kept out of the repo so the history
 # tracks the work, not the notes about the work.
 /plans/
+.takumi

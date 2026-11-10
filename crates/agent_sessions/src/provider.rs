@@ -16,7 +16,10 @@ use std::{
 /// carrying a separator or `..` would therefore read outside the store, so the
 /// join sites check first. Callers validate shape (a UUID) at their own layer;
 /// this is the narrower guarantee that a lookup cannot escape its root.
-pub(crate) fn is_safe_component(id: &str) -> bool {
+///
+/// Public because a remote host receives ids over the wire from a client, and
+/// checks them with this before it looks anything up.
+pub fn is_safe_component(id: &str) -> bool {
     !id.is_empty()
         && id != "."
         && id != ".."
@@ -129,7 +132,25 @@ pub trait SessionProvider: Send + Sync {
             scanned_to: from,
             restarted: false,
             identity: None,
+            more_to_read: false,
         })
+    }
+
+    /// [`Self::transcript_progress`], reading at most about `max_bytes` of the
+    /// transcript in one pass.
+    ///
+    /// For a caller that ships the result somewhere: a first pass over a
+    /// transcript of tens of megabytes would otherwise answer with every mark
+    /// in it at once. `scanned_to` says where the next pass picks up, so a
+    /// capped pass loses nothing. A single line longer than the cap is still
+    /// read whole -- a pass that read nothing would never move.
+    fn transcript_progress_within(
+        &self,
+        session: &SessionSummary,
+        from: u64,
+        _max_bytes: u64,
+    ) -> Result<TranscriptProgress> {
+        self.transcript_progress(session, from)
     }
 
     /// The session this one handed over to, if the agent's CLI has moved on to

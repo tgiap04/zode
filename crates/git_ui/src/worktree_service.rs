@@ -191,6 +191,7 @@ pub async fn await_and_rollback_on_failure(
         futures::channel::oneshot::Receiver<anyhow::Result<()>>,
     )>,
     fs: Arc<dyn Fs>,
+    is_remote: bool,
     cx: &mut AsyncWindowContext,
 ) -> anyhow::Result<Vec<PathBuf>> {
     // Only the worktrees that were actually created. A path whose
@@ -266,21 +267,11 @@ pub async fn await_and_rollback_on_failure(
             git_remove_failed = true;
         }
 
-        if git_remove_failed {
-            if let Err(fs_err) = fs
-                .remove_dir(
-                    &path,
-                    fs::RemoveOptions {
-                        recursive: true,
-                        ignore_if_not_exists: true,
-                    },
-                )
-                .await
-            {
-                let msg = format!("{}: failed to remove directory: {fs_err}", path.display());
-                log::error!("{}", msg);
-                rollback_failures.push(msg);
-            }
+        if git_remove_failed
+            && let Err(message) = remove_rolled_back_directory(fs.as_ref(), &path, is_remote).await
+        {
+            log::error!("{message}");
+            rollback_failures.push(message);
         }
     }
     let mut error_message = format!("Failed to create worktree: {err}");
@@ -289,6 +280,35 @@ pub async fn await_and_rollback_on_failure(
         error_message.push_str(&rollback_failures.join(", "));
     }
     Err(anyhow!(error_message))
+}
+
+/// The fallback when git could not remove a worktree being rolled back: the
+/// directory itself, recursively.
+///
+/// Never for a remote project. `fs` is this machine's, and the path names a
+/// directory on the remote host -- here it names nothing, or someone's work
+/// that merely shares the path.
+async fn remove_rolled_back_directory(
+    fs: &dyn Fs,
+    path: &Path,
+    is_remote: bool,
+) -> Result<(), String> {
+    if is_remote {
+        return Err(format!(
+            "{}: not removed; it is on the remote host, which this machine's file system \
+             cannot reach",
+            path.display()
+        ));
+    }
+    fs.remove_dir(
+        path,
+        fs::RemoveOptions {
+            recursive: true,
+            ignore_if_not_exists: true,
+        },
+    )
+    .await
+    .map_err(|error| format!("{}: failed to remove directory: {error}", path.display()))
 }
 
 /// Splits creation outcomes into the worktrees that exist and the first failure.
@@ -678,7 +698,9 @@ async fn do_create_worktree(
 
     let fs = cx.update(|_, cx| <dyn Fs>::global(cx))?;
 
-    let created_paths = await_and_rollback_on_failure(creation_infos, fs, cx).await?;
+    let created_paths =
+        await_and_rollback_on_failure(creation_infos, fs, remote_connection_options.is_some(), cx)
+            .await?;
 
     let mut all_paths = created_paths;
     let has_non_git = !non_git_paths.is_empty();
@@ -1044,9 +1066,41 @@ async fn open_worktree_workspace(
 
 #[cfg(test)]
 mod rollback_tests {
-    use super::partition_creations;
+    use super::{partition_creations, remove_rolled_back_directory};
     use anyhow::anyhow;
-    use std::path::PathBuf;
+    use fs::{FakeFs, Fs as _};
+    use serde_json::json;
+    use std::path::{Path, PathBuf};
+
+    /// A remote project's worktree is a directory on the remote host, and the
+    /// `Fs` the rollback holds is this machine's: removing the path here would
+    /// take a local directory that merely shares it. The local half proves the
+    /// fixture is one the fallback does remove.
+    #[gpui::test]
+    async fn a_remote_rollback_never_removes_a_local_directory(cx: &mut gpui::TestAppContext) {
+        let fs = FakeFs::new(cx.executor());
+        fs.insert_tree(
+            "/worktrees",
+            json!({ "remote": { "work.txt": "" }, "local": { "work.txt": "" } }),
+        )
+        .await;
+
+        let remote = Path::new("/worktrees/remote");
+        let outcome = remove_rolled_back_directory(fs.as_ref(), remote, true).await;
+        assert!(
+            fs.is_dir(remote).await,
+            "a local directory sharing a remote worktree's path must survive"
+        );
+        assert!(
+            outcome.is_err(),
+            "and the rollback must say it was not cleaned up"
+        );
+
+        let local = Path::new("/worktrees/local");
+        let outcome = remove_rolled_back_directory(fs.as_ref(), local, false).await;
+        assert_eq!(outcome, Ok(()));
+        assert!(!fs.is_dir(local).await, "a local rollback still removes it");
+    }
 
     fn path(name: &str) -> PathBuf {
         PathBuf::from(format!("/worktrees/{name}/project"))

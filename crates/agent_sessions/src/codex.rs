@@ -179,7 +179,11 @@ impl SessionProvider for CodexProvider {
                 return Ok(Vec::new());
             }
         };
-        Ok(rows.into_iter().map(Row::into_summary).collect())
+        Ok(rows
+            .into_iter()
+            .filter(Row::rollout_is_on_disk)
+            .map(Row::into_summary)
+            .collect())
     }
 
     /// One indexed row, not the whole table — `id` is the primary key.
@@ -261,6 +265,20 @@ struct Row {
 }
 
 impl Row {
+    /// Whether the transcript the row names is still there.
+    ///
+    /// Deleting a session trashes its rollout and leaves the row: the database
+    /// is Codex's and is opened read-only. A row whose rollout is gone is a
+    /// session Codex can no longer resume, so the list drops it; without this a
+    /// deleted session came back on the next scan. A row naming no rollout at
+    /// all is left to the list, as before.
+    fn rollout_is_on_disk(&self) -> bool {
+        match self.rollout.as_deref() {
+            Some(path) if !path.is_empty() => Path::new(path).exists(),
+            _ => true,
+        }
+    }
+
     /// The one place column order is written down.
     ///
     /// `LIST_QUERY` and `FIND_QUERY` select the same columns in the same order,
@@ -414,16 +432,18 @@ mod tests {
     #[test]
     fn a_thread_the_user_typed_in_lists_even_with_has_user_event_zero() {
         let dir = tempfile::tempdir().unwrap();
+        let rollout = dir.path().join("rollout.jsonl");
+        std::fs::write(&rollout, "").unwrap();
         let connection = thread_store(dir.path());
         connection
             .execute(
                 "insert into threads (id, rollout_path, created_at, updated_at, source, \
                  model_provider, cwd, title, sandbox_policy, approval_mode, has_user_event, \
                  git_branch, first_user_message, model, preview, recency_at_ms) \
-                 values ('t1', '/nowhere/rollout.jsonl', 1, 2, 'cli', 'openai', '/w/one', \
+                 values ('t1', ?1, 1, 2, 'cli', 'openai', '/w/one', \
                  'xin chào bạn', 'ro', 'auto', 0, 'main', 'xin chào bạn', 'gpt-5.6-terra', \
                  'xin chào bạn', 1787416263443)",
-                [],
+                [rollout.to_string_lossy()],
             )
             .unwrap();
         drop(connection);
@@ -442,6 +462,45 @@ mod tests {
         assert_eq!(session.branch.as_deref(), Some("main"));
         assert_eq!(session.model.as_deref(), Some("gpt-5.6-terra"));
         assert_eq!(session.agent, AgentKind::Codex);
+    }
+
+    /// The reported defect: deleting a Codex session moved its rollout to the
+    /// trash, but the thread row stays in Codex's database -- which this editor
+    /// only reads -- so the next scan listed the deleted session again.
+    #[test]
+    fn a_thread_whose_rollout_is_gone_is_not_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        let kept = dir.path().join("rollout-kept.jsonl");
+        std::fs::write(&kept, "").unwrap();
+        let trashed = dir.path().join("rollout-trashed.jsonl");
+        let connection = thread_store(dir.path());
+        for (id, rollout) in [("kept", &kept), ("trashed", &trashed)] {
+            connection
+                .execute(
+                    "insert into threads (id, rollout_path, created_at, updated_at, source, \
+                     model_provider, cwd, title, sandbox_policy, approval_mode, \
+                     first_user_message, preview, recency_at_ms) \
+                     values (?1, ?2, 1, 2, 'cli', 'openai', '/w/one', ?1, 'ro', 'auto', \
+                     ?1, ?1, 1)",
+                    rusqlite::params![id, rollout.to_string_lossy()],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let provider = CodexProvider::new(dir.path().to_path_buf());
+        let listed: Vec<String> = provider
+            .list()
+            .unwrap()
+            .iter()
+            .map(|session| session.id.to_string())
+            .collect();
+        assert_eq!(listed, vec!["kept".to_string()]);
+        assert!(
+            provider.find("trashed").unwrap().is_some(),
+            "find still answers for the row, so a tab is never told its own \
+             session vanished between Codex writing the row and the rollout"
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ use gpui::{
     FocusHandle, Focusable, InteractiveElement, ParentElement, Render, Styled, Subscription,
     WeakEntity, Window, anchored, deferred, point,
 };
+use markdown_preview::markdown_preview_view::MarkdownPreviewView;
 use project::project_settings::DiagnosticSeverity;
 use search::{BufferSearchBar, buffer_search};
 use settings::{Settings, SettingsStore};
@@ -72,13 +73,24 @@ impl QuickActionBar {
         if new_show != self.show {
             self.show = new_show;
             cx.emit(ToolbarItemEvent::ChangeLocation(
-                self.get_toolbar_item_location(),
+                self.get_toolbar_item_location(cx),
             ));
         }
     }
 
-    fn get_toolbar_item_location(&self) -> ToolbarItemLocation {
-        if self.show && self.active_editor().is_some() {
+    /// A markdown preview standing in the tab of the editor it renders. The bar shows for it too,
+    /// carrying only the button that brings the editor back.
+    fn active_replacing_markdown_preview(&self, cx: &App) -> bool {
+        self.active_item
+            .as_ref()
+            .and_then(|item| item.downcast::<MarkdownPreviewView>())
+            .is_some_and(|preview| preview.read(cx).replaces_editor())
+    }
+
+    fn get_toolbar_item_location(&self, cx: &App) -> ToolbarItemLocation {
+        if self.show
+            && (self.active_editor().is_some() || self.active_replacing_markdown_preview(cx))
+        {
             ToolbarItemLocation::PrimaryRight
         } else {
             ToolbarItemLocation::Hidden
@@ -89,6 +101,11 @@ impl QuickActionBar {
 impl Render for QuickActionBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(editor) = self.active_editor() else {
+            if self.active_replacing_markdown_preview(cx) {
+                return div()
+                    .id("quick action bar")
+                    .children(self.render_preview_button(self.workspace.clone(), cx));
+            }
             return div().id("empty quick action bar");
         };
 
@@ -715,6 +732,6 @@ impl ToolbarItemView for QuickActionBar {
                     }));
             }
         }
-        self.get_toolbar_item_location()
+        self.get_toolbar_item_location(cx)
     }
 }

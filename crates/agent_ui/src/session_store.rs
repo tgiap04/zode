@@ -16,24 +16,179 @@
 //! synchronous and free of `gpui`. This is the half that needs a window: the
 //! background task, the global, and the change notification.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use agent_sessions::{SessionIndex, SessionProvider};
-use gpui::{App, AppContext as _, Context, Entity, Global, Task};
+use agent_sessions::{AgentKind, SessionIndex};
+use gpui::{
+    App, AppContext as _, Context, Entity, EntityId, Global, SharedString, Subscription, Task,
+    WeakEntity,
+};
+use project::{
+    Project,
+    agent_session_host::{AgentSessionHost, SessionListing},
+};
+use util::paths::PathStyle;
+use workspace::RemoteConnectionIdentity;
 
 /// Handle to the process-wide store.
 struct GlobalSessionStore(Entity<SessionStore>);
 
 impl Global for GlobalSessionStore {}
 
+/// One store per remote host, by the identity of its connection.
+///
+/// Keyed by host rather than by project: every project on a WSL distro or an
+/// SSH host shares that host's home, and so its stores. A store per project
+/// would sweep the same thousands of transcripts once per window.
+///
+/// Bounded by the hosts this app has opened a project on in this session, a
+/// handful at most. An entry outlives the last window on its host on purpose:
+/// opening another project there finds the list it left, and what it holds
+/// once no project is open is one index -- its connections leave with their
+/// projects (see [`SweepHosts::Remote`]).
+#[derive(Default)]
+struct RemoteSessionStores(HashMap<RemoteConnectionIdentity, Entity<SessionStore>>);
+
+impl Global for RemoteSessionStores {}
+
+/// The machine a project's agent sessions are on, as something listing the
+/// sessions of every open window tells machines apart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProjectSessionSource {
+    /// This machine.
+    Here,
+    /// A WSL distro, an SSH host or a dev container.
+    Remote {
+        identity: RemoteConnectionIdentity,
+        /// What the host is shown as: an SSH nickname or host name, a distro, a
+        /// container's name. Never a user name or a port.
+        label: String,
+        path_style: PathStyle,
+    },
+}
+
+/// Where `project`'s sessions are kept, without creating or sweeping a store.
+///
+/// `None` for a collaboration guest, whose sessions are on a collaborator's
+/// machine, and for a project reached through the relay, whose host is a
+/// device of its own and lists its own sessions.
+pub fn project_session_source(project: &Entity<Project>, cx: &App) -> Option<ProjectSessionSource> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(assigned) = assigned_remote_host(project, cx) {
+        return Some(ProjectSessionSource::Remote {
+            identity: assigned.identity.clone(),
+            label: assigned.label.clone(),
+            path_style: assigned.host.path_style(),
+        });
+    }
+    let project = project.read(cx);
+    if project.is_local() {
+        return Some(ProjectSessionSource::Here);
+    }
+    if !project.is_via_remote_server() {
+        return None;
+    }
+    let options = project.remote_connection_options(cx)?;
+    let identity = workspace::remote_connection_identity(&options);
+    if matches!(identity, RemoteConnectionIdentity::Relay { .. }) {
+        return None;
+    }
+    Some(ProjectSessionSource::Remote {
+        identity,
+        label: options.display_name(),
+        path_style: project.path_style(cx),
+    })
+}
+
+/// A project a test has said is on a remote host, and the host its sessions
+/// are swept from.
+#[cfg(any(test, feature = "test-support"))]
+struct AssignedRemoteHost {
+    identity: RemoteConnectionIdentity,
+    label: String,
+    host: AgentSessionHost,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[derive(Default)]
+struct AssignedRemoteHosts(HashMap<EntityId, AssignedRemoteHost>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl Global for AssignedRemoteHosts {}
+
+#[cfg(any(test, feature = "test-support"))]
+fn assigned_remote_host<'a>(
+    project: &Entity<Project>,
+    cx: &'a App,
+) -> Option<&'a AssignedRemoteHost> {
+    cx.try_global::<AssignedRemoteHosts>()?
+        .0
+        .get(&project.entity_id())
+}
+
+/// Has `project`, a project on this machine's disk, read as one on the remote
+/// host `identity` names, shown as `label`, whose sessions are swept from
+/// `host`. Only the session store and [`project_session_source`] see it: the
+/// connection is the one thing a test cannot stand up.
+#[cfg(any(test, feature = "test-support"))]
+pub fn assign_remote_host_for_test(
+    project: &Entity<Project>,
+    identity: RemoteConnectionIdentity,
+    label: &str,
+    host: AgentSessionHost,
+    cx: &mut App,
+) {
+    cx.default_global::<AssignedRemoteHosts>().0.insert(
+        project.entity_id(),
+        AssignedRemoteHost {
+            identity,
+            label: label.to_string(),
+            host,
+        },
+    );
+}
+
+/// What a sweep asks.
+enum SweepHosts {
+    /// One host for the whole store: this machine's own.
+    Here(AgentSessionHost),
+    /// The projects open on one remote host, oldest first, each through its
+    /// own connection. A sweep asks through the first whose connection is
+    /// still up.
+    ///
+    /// A project leaves this list the moment it is released. Holding its
+    /// connection past that would keep a dead link alive and have the next
+    /// sweep wait on it, while other windows on the same host still have
+    /// connections that answer.
+    Remote(Vec<RemoteRegistrant>),
+}
+
+struct RemoteRegistrant {
+    project: EntityId,
+    /// Weak so this store never keeps a closed window's project alive; read
+    /// at sweep time to pass over one whose connection has dropped.
+    project_handle: WeakEntity<Project>,
+    host: AgentSessionHost,
+    _released: Subscription,
+}
+
 pub struct SessionStore {
     index: Arc<SessionIndex>,
-    providers: Vec<Arc<dyn SessionProvider>>,
+    hosts: SweepHosts,
+    /// Why the last sweep found nothing to show, when it could not ask at all
+    /// -- a remote server too old to answer, or one that did not. Cleared by
+    /// the next sweep that succeeds.
+    error: Option<SharedString>,
+    /// The stores the last sweep could not read, and why.
+    unavailable: Vec<(AgentKind, String)>,
     /// The sweep in flight. Held in a field rather than detached so closing the
     /// app drops it -- a detached background scan outlives everything that
     /// wanted its answer.
     scanning: Option<Task<()>>,
+    /// The remote project the sweep in flight is asking through. If it closes,
+    /// the answer can no longer arrive, so the sweep is started over.
+    sweeping_through: Option<EntityId>,
     /// A refresh that arrived while a sweep was already running. Coalesced to a
     /// single re-run rather than queued: ten requests during one sweep must
     /// cost one more sweep, not ten.
@@ -58,19 +213,164 @@ impl SessionStore {
         if let Some(global) = cx.try_global::<GlobalSessionStore>() {
             return global.0.clone();
         }
-        let store = cx.new(|_| Self::new(agent_sessions::default_providers()));
+        let store = cx.new(|_| {
+            Self::new(SweepHosts::Here(AgentSessionHost::Local(
+                agent_sessions::default_providers(),
+            )))
+        });
         cx.set_global(GlobalSessionStore(store.clone()));
         store
+    }
+
+    /// The store holding `project`'s sessions: the process-wide one for a
+    /// project on this machine, and the one for its host for a remote project.
+    ///
+    /// A collaboration guest gets the process-wide one, as it always has: there
+    /// is no host it could ask instead, and its deletes refuse on their own.
+    pub fn for_project(project: &Entity<Project>, cx: &mut App) -> Entity<Self> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(assigned) = assigned_remote_host(project, cx) {
+            let identity = assigned.identity.clone();
+            let host = assigned.host.clone();
+            return Self::for_remote_host(identity, project, host, cx);
+        }
+        let remote = {
+            let project = project.read(cx);
+            project
+                .remote_session_host(cx)
+                .zip(project.remote_connection_options(cx))
+        };
+        match remote {
+            Some((host, options)) => Self::for_remote_host(
+                workspace::remote_connection_identity(&options),
+                project,
+                AgentSessionHost::Remote(host),
+                cx,
+            ),
+            None => Self::global(cx),
+        }
+    }
+
+    /// The store [`Self::for_project`] would give `project`, if it has been
+    /// created, without creating it or registering `project` with it. For
+    /// read-only callers that must not bring a sweep into existence.
+    ///
+    /// `None` for a collaboration guest: no store here holds its sessions,
+    /// and the process-wide one would answer with this machine's.
+    pub fn try_for_project(project: &Entity<Project>, cx: &App) -> Option<Entity<Self>> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(assigned) = assigned_remote_host(project, cx) {
+            return cx
+                .try_global::<RemoteSessionStores>()?
+                .0
+                .get(&assigned.identity)
+                .cloned();
+        }
+        let project = project.read(cx);
+        if project.is_local() {
+            return Self::try_global(cx);
+        }
+        if !project.is_via_remote_server() {
+            return None;
+        }
+        let identity =
+            workspace::remote_connection_identity(&project.remote_connection_options(cx)?);
+        cx.try_global::<RemoteSessionStores>()?
+            .0
+            .get(&identity)
+            .cloned()
+    }
+
+    /// The store for the host `identity` names, created on first use, with
+    /// `project` -- reached through `host` -- among those a sweep may ask.
+    ///
+    /// A project already registered has its host replaced: the store must ask
+    /// through the connection the project has now.
+    pub(crate) fn for_remote_host(
+        identity: RemoteConnectionIdentity,
+        project: &Entity<Project>,
+        host: AgentSessionHost,
+        cx: &mut App,
+    ) -> Entity<Self> {
+        let existing = cx
+            .default_global::<RemoteSessionStores>()
+            .0
+            .get(&identity)
+            .cloned();
+        let store = match existing {
+            Some(store) => store,
+            None => {
+                let store = cx.new(|_| Self::new(SweepHosts::Remote(Vec::new())));
+                cx.default_global::<RemoteSessionStores>()
+                    .0
+                    .insert(identity, store.clone());
+                store
+            }
+        };
+        store.update(cx, |store, cx| store.register(project, host, cx));
+        store
+    }
+
+    fn register(
+        &mut self,
+        project: &Entity<Project>,
+        host: AgentSessionHost,
+        cx: &mut Context<Self>,
+    ) {
+        let SweepHosts::Remote(registrants) = &mut self.hosts else {
+            return;
+        };
+        let project_id = project.entity_id();
+        if let Some(registrant) = registrants
+            .iter_mut()
+            .find(|registrant| registrant.project == project_id)
+        {
+            registrant.host = host;
+            return;
+        }
+        let released = cx.observe_release(project, move |this, _, cx| {
+            if let SweepHosts::Remote(registrants) = &mut this.hosts {
+                registrants.retain(|registrant| registrant.project != project_id);
+            }
+            if this.sweeping_through == Some(project_id) {
+                this.scanning = None;
+                this.sweeping_through = None;
+                this.refresh(cx);
+            }
+        });
+        registrants.push(RemoteRegistrant {
+            project: project_id,
+            project_handle: project.downgrade(),
+            host,
+            _released: released,
+        });
+    }
+
+    /// Where the next sweep asks, if anywhere can be asked, and through which
+    /// remote project.
+    fn sweep_host(&self, cx: &App) -> Option<(Option<EntityId>, AgentSessionHost)> {
+        match &self.hosts {
+            SweepHosts::Here(host) => Some((None, host.clone())),
+            SweepHosts::Remote(registrants) => registrants
+                .iter()
+                .find(|registrant| {
+                    registrant
+                        .project_handle
+                        .upgrade()
+                        .is_some_and(|project| !project.read(cx).is_disconnected(cx))
+                })
+                .map(|registrant| (Some(registrant.project), registrant.host.clone())),
+        }
     }
 
     /// Installs a store that sweeps `providers` instead of the real ones, which
     /// read the developer's home directory.
     #[cfg(any(test, feature = "test-support"))]
     pub fn install_global_for_test(
-        providers: Vec<Arc<dyn SessionProvider>>,
+        providers: Vec<Arc<dyn agent_sessions::SessionProvider>>,
         cx: &mut App,
     ) -> Entity<Self> {
-        let store = cx.new(|_| Self::new(providers));
+        let store = cx.new(|_| Self::new(SweepHosts::Here(AgentSessionHost::Local(providers))));
         cx.set_global(GlobalSessionStore(store.clone()));
         store
     }
@@ -82,11 +382,14 @@ impl SessionStore {
             .map(|global| global.0.clone())
     }
 
-    fn new(providers: Vec<Arc<dyn SessionProvider>>) -> Self {
+    fn new(hosts: SweepHosts) -> Self {
         Self {
             index: Arc::new(SessionIndex::empty()),
-            providers,
+            hosts,
+            error: None,
+            unavailable: Vec::new(),
             scanning: None,
+            sweeping_through: None,
             rescan_requested: false,
             generation: 0,
             forgotten_during_sweep: HashSet::default(),
@@ -103,6 +406,16 @@ impl SessionStore {
 
     pub fn is_scanning(&self) -> bool {
         self.scanning.is_some()
+    }
+
+    /// Why the last sweep could not ask the host at all.
+    pub fn error(&self) -> Option<&SharedString> {
+        self.error.as_ref()
+    }
+
+    /// The stores the last sweep could not read, and why.
+    pub fn unavailable(&self) -> &[(AgentKind, String)] {
+        &self.unavailable
     }
 
     /// Whether `id` was deleted while the sweep now in flight was running, so
@@ -122,33 +435,61 @@ impl SessionStore {
             return;
         }
 
-        let providers = self.providers.clone();
+        let Some((through, host)) = self.sweep_host(cx) else {
+            self.install_listing(
+                Err(anyhow::anyhow!("no project on this remote host is open")),
+                cx,
+            );
+            return;
+        };
+        let listing = host.list(cx);
+        self.sweeping_through = through;
         self.scanning = Some(cx.spawn(async move |this, cx| {
-            let sessions = cx
-                .background_spawn(async move { agent_sessions::list_all(&providers) })
-                .await;
-
-            this.update(cx, |this, cx| {
-                let forgotten = std::mem::take(&mut this.forgotten_during_sweep);
-                let sessions = if forgotten.is_empty() {
-                    sessions
-                } else {
-                    sessions
-                        .into_iter()
-                        .filter(|session| !forgotten.contains(&session.id))
-                        .collect()
-                };
-                this.index = Arc::new(SessionIndex::new(sessions));
-                this.generation += 1;
-                this.scanning = None;
-                cx.notify();
-
-                if std::mem::take(&mut this.rescan_requested) {
-                    this.refresh(cx);
-                }
-            })
-            .ok();
+            let listing = listing.await;
+            this.update(cx, |this, cx| this.install_listing(listing, cx))
+                .ok();
         }));
+    }
+
+    /// Puts a finished sweep's answer in place.
+    ///
+    /// A sweep that could not ask the host at all leaves an empty list and the
+    /// reason, and asks again only when something asks this store to: a server
+    /// too old to answer will not have changed a moment later, and a store that
+    /// retried on its own would put a request on the wire for as long as the
+    /// window stays open.
+    fn install_listing(&mut self, listing: anyhow::Result<SessionListing>, cx: &mut Context<Self>) {
+        let forgotten = std::mem::take(&mut self.forgotten_during_sweep);
+        let sessions = match listing {
+            Ok(listing) => {
+                self.error = None;
+                self.unavailable = listing.unavailable;
+                listing.sessions
+            }
+            Err(error) => {
+                log::warn!("listing agent sessions failed: {error:#}");
+                self.error = Some(error.to_string().into());
+                self.unavailable = Vec::new();
+                Vec::new()
+            }
+        };
+        let sessions = if forgotten.is_empty() {
+            sessions
+        } else {
+            sessions
+                .into_iter()
+                .filter(|session| !forgotten.contains(&session.id))
+                .collect()
+        };
+        self.index = Arc::new(SessionIndex::new(sessions));
+        self.generation += 1;
+        self.scanning = None;
+        self.sweeping_through = None;
+        cx.notify();
+
+        if std::mem::take(&mut self.rescan_requested) {
+            self.refresh(cx);
+        }
     }
 
     /// Drops a session that has already been removed from disk.
@@ -189,6 +530,19 @@ impl SessionStore {
         forget_names(ids.iter().cloned(), cx);
     }
 
+    /// Starts a sweep that never lands, as one through a connection that has
+    /// stopped answering does until its timeout.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn begin_endless_sweep_for_test(&mut self, cx: &mut Context<Self>) {
+        self.scanning = Some(cx.spawn(async move |_, _| std::future::pending::<()>().await));
+    }
+
+    /// Lands a sweep that could not ask its host, with `error` as the reason.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fail_sweep_for_test(&mut self, error: &str, cx: &mut Context<Self>) {
+        self.install_listing(Err(anyhow::anyhow!(error.to_string())), cx);
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_index_for_test(
         &mut self,
@@ -211,7 +565,8 @@ fn forget_names(ids: impl IntoIterator<Item = Arc<str>>, cx: &mut App) {
 mod tests {
     use super::*;
     use agent_sessions::{
-        AgentCommand, AgentKind, Availability, Deletion, Fork, SessionCounts, SessionSummary,
+        AgentCommand, AgentKind, Availability, Deletion, Fork, SessionCounts, SessionProvider,
+        SessionSummary,
     };
     use gpui::TestAppContext;
     use std::collections::HashSet;
@@ -276,7 +631,8 @@ mod tests {
             list_calls: list_calls.clone(),
             sessions: vec![session("a", "/repo/main"), session("b", "/repo/feature")],
         });
-        let store = cx.new(|_| SessionStore::new(vec![provider]));
+        let store = cx
+            .new(|_| SessionStore::new(SweepHosts::Here(AgentSessionHost::Local(vec![provider]))));
         (store, list_calls)
     }
 
@@ -501,6 +857,300 @@ mod tests {
             assert_eq!(store.generation(), 1);
             assert_eq!(store.index().len(), 1);
             assert!(store.index().find("only").is_some());
+        });
+    }
+
+    fn counting_host(sessions: Vec<SessionSummary>) -> (AgentSessionHost, Arc<AtomicUsize>) {
+        let list_calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(CountingProvider {
+            list_calls: list_calls.clone(),
+            sessions,
+        });
+        (AgentSessionHost::Local(vec![provider]), list_calls)
+    }
+
+    async fn test_project(cx: &mut TestAppContext) -> Entity<Project> {
+        cx.update(|cx| {
+            if !cx.has_global::<settings::SettingsStore>() {
+                let settings_store = settings::SettingsStore::test(cx);
+                cx.set_global(settings_store);
+            }
+        });
+        let fs = fs::FakeFs::new(cx.executor());
+        Project::test(fs, Vec::<&Path>::new(), cx).await
+    }
+
+    /// Every project on one remote host reads the same home, so they share one
+    /// store and one sweep: a second window on the same distro must not read
+    /// its thousands of transcripts again. A second host is a second store.
+    #[gpui::test]
+    async fn two_projects_on_one_host_share_one_store_and_one_sweep(cx: &mut TestAppContext) {
+        let first_project = test_project(cx).await;
+        let second_project = test_project(cx).await;
+        let (host, list_calls) = counting_host(vec![session("a", "/home/u/p")]);
+        let wsl = RemoteConnectionIdentity::Mock { id: 7 };
+
+        let first = cx.update(|cx| {
+            SessionStore::for_remote_host(wsl.clone(), &first_project, host.clone(), cx)
+        });
+        let second = cx.update(|cx| {
+            SessionStore::for_remote_host(wsl.clone(), &second_project, host.clone(), cx)
+        });
+        first.update(cx, |store, cx| store.refresh(cx));
+        cx.run_until_parked();
+
+        assert_eq!(first.entity_id(), second.entity_id());
+        assert_eq!(list_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(second.read_with(cx, |store, _| store.index().len()), 1);
+
+        let (other_host, other_calls) = counting_host(Vec::new());
+        let ssh = RemoteConnectionIdentity::Mock { id: 8 };
+        let other =
+            cx.update(|cx| SessionStore::for_remote_host(ssh, &first_project, other_host, cx));
+        assert_ne!(other.entity_id(), first.entity_id());
+        let global = cx.update(|cx| SessionStore::global(cx));
+        assert_ne!(global.entity_id(), first.entity_id());
+        assert_eq!(other_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// Each project on a host has a connection of its own. Closing one must
+    /// leave the sweep asking through a project still open -- not through the
+    /// connection that went away with the closed one, whether that was the
+    /// last project to open the store or the first.
+    #[gpui::test]
+    async fn a_sweep_asks_through_a_project_still_open_on_the_host(cx: &mut TestAppContext) {
+        let first_project = test_project(cx).await;
+        let second_project = test_project(cx).await;
+        let third_project = test_project(cx).await;
+        let (first_host, first_calls) = counting_host(vec![session("a", "/home/u/p")]);
+        let (second_host, second_calls) = counting_host(vec![session("a", "/home/u/p")]);
+        let (third_host, third_calls) = counting_host(vec![session("a", "/home/u/p")]);
+        let wsl = RemoteConnectionIdentity::Mock { id: 9 };
+        let store = cx.update(|cx| {
+            SessionStore::for_remote_host(wsl.clone(), &first_project, first_host, cx)
+        });
+        cx.update(|cx| {
+            SessionStore::for_remote_host(wsl.clone(), &second_project, second_host, cx)
+        });
+        cx.update(|cx| SessionStore::for_remote_host(wsl.clone(), &third_project, third_host, cx));
+        let calls = || {
+            [&first_calls, &second_calls, &third_calls].map(|calls| calls.load(Ordering::SeqCst))
+        };
+        let sweep = |cx: &mut TestAppContext| {
+            store.update(cx, |store, cx| store.refresh(cx));
+            cx.run_until_parked();
+        };
+
+        // A dropped entity is released when effects next flush.
+        drop(third_project);
+        cx.update(|_| {});
+        sweep(cx);
+        assert_eq!(calls(), [1, 0, 0], "the last to register has closed");
+
+        drop(first_project);
+        cx.update(|_| {});
+        sweep(cx);
+        assert_eq!(calls(), [1, 1, 0], "the first to register has closed");
+        store.read_with(cx, |store, _| {
+            assert_eq!(store.index().len(), 1);
+            assert!(store.error().is_none());
+        });
+
+        drop(second_project);
+        cx.update(|_| {});
+        sweep(cx);
+        assert_eq!(calls(), [1, 1, 0]);
+        store.read_with(cx, |store, _| {
+            assert!(
+                !store.is_scanning(),
+                "with no project left to ask, a refresh must end, not wait"
+            );
+            assert!(store.error().is_some());
+        });
+    }
+
+    /// A project still open whose connection has died must not be the one a
+    /// sweep asks through while another window on the host still answers.
+    #[gpui::test]
+    async fn a_sweep_passes_over_a_project_whose_connection_is_gone(cx: &mut TestAppContext) {
+        let first_project = test_project(cx).await;
+        let second_project = test_project(cx).await;
+        let (first_host, first_calls) = counting_host(vec![session("a", "/home/u/p")]);
+        let (second_host, second_calls) = counting_host(vec![session("a", "/home/u/p")]);
+        let wsl = RemoteConnectionIdentity::Mock { id: 10 };
+        let store = cx.update(|cx| {
+            SessionStore::for_remote_host(wsl.clone(), &first_project, first_host, cx)
+        });
+        cx.update(|cx| SessionStore::for_remote_host(wsl, &second_project, second_host, cx));
+
+        first_project.update(cx, |project, cx| {
+            project.mark_as_collab_for_testing();
+            project.disconnected_from_host(cx);
+        });
+        store.update(cx, |store, cx| store.refresh(cx));
+        cx.run_until_parked();
+
+        assert_eq!(first_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            second_calls.load(Ordering::SeqCst),
+            1,
+            "the sweep must ask through the connection that still answers"
+        );
+    }
+
+    /// The project a sweep is asking through closes mid-sweep: its connection
+    /// is gone, so the answer it was waiting for never comes. The sweep starts
+    /// over through the next project instead of waiting out its timeout.
+    #[gpui::test]
+    async fn a_sweep_whose_project_closes_starts_over_through_the_next(cx: &mut TestAppContext) {
+        let first_project = test_project(cx).await;
+        let second_project = test_project(cx).await;
+        let (first_host, _first_calls) = counting_host(vec![session("a", "/home/u/p")]);
+        let (second_host, second_calls) = counting_host(vec![session("a", "/home/u/p")]);
+        let wsl = RemoteConnectionIdentity::Mock { id: 11 };
+        let store = cx.update(|cx| {
+            SessionStore::for_remote_host(wsl.clone(), &first_project, first_host, cx)
+        });
+        cx.update(|cx| SessionStore::for_remote_host(wsl, &second_project, second_host, cx));
+
+        store.update(cx, |store, cx| store.refresh(cx));
+        drop(first_project);
+        cx.update(|_| {});
+        cx.run_until_parked();
+
+        assert_eq!(
+            second_calls.load(Ordering::SeqCst),
+            1,
+            "a sweep through a closed project must start over through one still open"
+        );
+        store.read_with(cx, |store, _| {
+            assert!(!store.is_scanning());
+            assert_eq!(store.index().len(), 1);
+        });
+    }
+
+    /// Looking a store up never creates one, and a collaboration guest is
+    /// never handed this machine's: its sessions are not the ones in it.
+    #[gpui::test]
+    async fn looking_a_store_up_creates_none_and_gives_a_guest_none(cx: &mut TestAppContext) {
+        let local = test_project(cx).await;
+        let guest = test_project(cx).await;
+        guest.update(cx, |project, _| project.mark_as_collab_for_testing());
+
+        assert!(cx.update(|cx| SessionStore::try_for_project(&local, cx).is_none()));
+        assert!(cx.update(|cx| SessionStore::try_global(cx).is_none()));
+
+        let global = cx.update(|cx| SessionStore::global(cx));
+        assert_eq!(
+            cx.update(|cx| SessionStore::try_for_project(&local, cx))
+                .map(|store| store.entity_id()),
+            Some(global.entity_id())
+        );
+        assert!(cx.update(|cx| SessionStore::try_for_project(&guest, cx).is_none()));
+    }
+
+    /// A project on this machine, and a collaboration guest's, read this
+    /// machine's own stores: both get the process-wide one.
+    #[gpui::test]
+    async fn a_project_not_on_a_remote_host_gets_the_process_wide_store(cx: &mut TestAppContext) {
+        let local = test_project(cx).await;
+        let guest = test_project(cx).await;
+        guest.update(cx, |project, _| project.mark_as_collab_for_testing());
+
+        let global = cx.update(|cx| SessionStore::global(cx));
+        let for_local = cx.update(|cx| SessionStore::for_project(&local, cx));
+        let for_guest = cx.update(|cx| SessionStore::for_project(&guest, cx));
+
+        assert_eq!(for_local.entity_id(), global.entity_id());
+        assert_eq!(for_guest.entity_id(), global.entity_id());
+        assert!(cx.update(|cx| {
+            cx.try_global::<RemoteSessionStores>()
+                .is_none_or(|stores| stores.0.is_empty())
+        }));
+    }
+
+    /// What a list of every window's sessions is told about each project: this
+    /// machine for a local one, nothing for a guest, and the host -- by its
+    /// shown name, with its store -- for one on a remote host.
+    #[gpui::test]
+    async fn a_project_names_the_machine_its_sessions_are_on(cx: &mut TestAppContext) {
+        let local = test_project(cx).await;
+        let guest = test_project(cx).await;
+        guest.update(cx, |project, _| project.mark_as_collab_for_testing());
+        let remote = test_project(cx).await;
+        let (host, list_calls) = counting_host(vec![session("a", "/home/u/p")]);
+        let identity = RemoteConnectionIdentity::Mock { id: 12 };
+        cx.update(|cx| assign_remote_host_for_test(&remote, identity.clone(), "Ubuntu", host, cx));
+
+        let source = |project: &Entity<Project>, cx: &mut TestAppContext| {
+            cx.update(|cx| project_session_source(project, cx))
+        };
+        assert_eq!(source(&local, cx), Some(ProjectSessionSource::Here));
+        assert_eq!(source(&guest, cx), None);
+        assert_eq!(
+            source(&remote, cx),
+            Some(ProjectSessionSource::Remote {
+                identity,
+                label: "Ubuntu".into(),
+                path_style: PathStyle::local(),
+            })
+        );
+        assert_eq!(
+            list_calls.load(Ordering::SeqCst),
+            0,
+            "naming the host sweeps nothing"
+        );
+        assert!(cx.update(|cx| SessionStore::try_for_project(&remote, cx).is_none()));
+
+        let store = cx.update(|cx| SessionStore::for_project(&remote, cx));
+        let global = cx.update(|cx| SessionStore::global(cx));
+        assert_ne!(store.entity_id(), global.entity_id());
+        store.update(cx, |store, cx| store.refresh(cx));
+        cx.run_until_parked();
+        assert_eq!(list_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            cx.update(|cx| SessionStore::try_for_project(&remote, cx))
+                .map(|found| found.entity_id()),
+            Some(store.entity_id())
+        );
+    }
+
+    /// A sweep that could not ask the host shows nothing and says why, and
+    /// nothing asks again until someone does.
+    #[gpui::test]
+    async fn a_failed_sweep_empties_the_list_names_the_reason_and_does_not_retry(
+        cx: &mut TestAppContext,
+    ) {
+        let (store, list_calls) = store(cx);
+        store.update(cx, |store, cx| store.refresh(cx));
+        cx.run_until_parked();
+        let sweeps = list_calls.load(Ordering::SeqCst);
+
+        store.update(cx, |store, cx| {
+            store.install_listing(
+                Err(anyhow::anyhow!(
+                    project::agent_session_host::REMOTE_SESSIONS_OUT_OF_DATE
+                )),
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        store.read_with(cx, |store, _| {
+            assert_eq!(store.index().len(), 0);
+            assert_eq!(
+                store.error().map(|error| error.as_ref()),
+                Some(project::agent_session_host::REMOTE_SESSIONS_OUT_OF_DATE)
+            );
+            assert!(!store.is_scanning());
+        });
+        assert_eq!(list_calls.load(Ordering::SeqCst), sweeps, "no retry");
+
+        store.update(cx, |store, cx| store.refresh(cx));
+        cx.run_until_parked();
+        store.read_with(cx, |store, _| {
+            assert!(store.error().is_none(), "a sweep that answers clears it");
+            assert_eq!(store.index().len(), 2);
         });
     }
 

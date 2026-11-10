@@ -174,6 +174,7 @@ impl DatabasePanel {
                         sql,
                         offset,
                         limit,
+                        selected_row: None,
                     }),
                     Err(error) => QueryState::Failed(QueryError::from_anyhow(&error)),
                 };

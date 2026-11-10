@@ -186,11 +186,15 @@ async fn right_clicking_a_connection_opens_a_menu_the_panel_owns(cx: &mut TestAp
 }
 
 fn set_connections(cx: &mut gpui::VisualTestContext, entries: &[(&str, &str)]) {
+    set_connections_for(cx, "sqlite", entries);
+}
+
+fn set_connections_for(cx: &mut gpui::VisualTestContext, driver: &str, entries: &[(&str, &str)]) {
     let entries: Vec<_> = entries
         .iter()
         .map(|(name, url)| settings::DatabaseConnectionContent {
             name: Some((*name).to_string()),
-            driver: Some("sqlite".into()),
+            driver: Some(driver.into()),
             url: Some((*url).to_string()),
         })
         .collect();
@@ -368,11 +372,25 @@ pub(crate) async fn modal_for_test<'a>(
     gpui::Entity<crate::connection_modal::ConnectionModal>,
     &'a mut gpui::VisualTestContext,
 ) {
+    modal_on_host_for_test(cx, installed, |_| crate::driver_registry::DriverHost::Local).await
+}
+
+/// [`modal_for_test`], listing and starting the drivers of whatever host
+/// `drivers` names instead of this machine's.
+pub(crate) async fn modal_on_host_for_test<'a>(
+    cx: &'a mut TestAppContext,
+    installed: &[&str],
+    drivers: impl FnOnce(&mut gpui::App) -> crate::driver_registry::DriverHost,
+) -> (
+    gpui::Entity<crate::connection_modal::ConnectionModal>,
+    &'a mut gpui::VisualTestContext,
+) {
     init_test(cx);
-    cx.update(|cx| {
+    let drivers = cx.update(|cx| {
         for id in installed {
             crate::driver_registry::install_for_test(id, cx);
         }
+        drivers(cx)
     });
     let fs = FakeFs::new(cx.executor());
     let project = Project::test(fs, [], cx).await;
@@ -382,7 +400,12 @@ pub(crate) async fn modal_for_test<'a>(
 
     let modal = cx.update(|window, cx| {
         cx.new(|cx| {
-            crate::connection_modal::ConnectionModal::new(workspace.downgrade(), window, cx)
+            crate::connection_modal::ConnectionModal::new(
+                workspace.downgrade(),
+                drivers,
+                window,
+                cx,
+            )
         })
     });
     (modal, cx)
@@ -551,6 +574,63 @@ async fn a_driver_that_is_merely_undownloaded_does_not_blame_a_missing_extension
             "nothing may be started for a driver that is not on the machine"
         );
     });
+}
+
+/// In a remote window a connection's driver is the host's: the host is asked
+/// for it, and the host's path is what runs, through the host. This machine
+/// has no `postgres` driver, so any fallback to its drivers fails here.
+#[gpui::test]
+async fn opening_a_connection_in_a_remote_window_runs_the_hosts_driver(cx: &mut TestAppContext) {
+    use crate::driver_registry::remote_test_support::{
+        HOST_NAME, REMOTE_POSTGRES, RecordingHost, remote_host,
+    };
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    let local_store = tempfile::tempdir().expect("a temporary directory");
+    let service = std::rc::Rc::new(RecordingHost::with_postgres());
+    cx.update(|_window, cx| {
+        cx.set_global(zed_credentials_provider::ZedCredentialsProvider(
+            std::sync::Arc::new(MemoryCredentials::default()),
+        ));
+        crate::driver_registry::set_installer_for_test(local_store.path().to_path_buf(), cx);
+    });
+    panel.update(cx, |panel, cx| {
+        panel.drivers = Some(remote_host(service.clone(), cx));
+    });
+    set_connections_for(cx, "postgres", &[("staging", "postgres://localhost/app")]);
+
+    panel.update_in(cx, |panel, window, cx| {
+        panel.toggle_connection(0, window, cx)
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        service.asked.borrow().clone(),
+        vec![("postgres".to_string(), false)],
+        "the host is asked for the driver, and asked to install nothing"
+    );
+    assert_eq!(
+        service.command_host.programs.lock().unwrap().clone(),
+        vec![REMOTE_POSTGRES.to_string()],
+        "the host's path, run through the host"
+    );
+    panel.read_with(cx, |panel, _| {
+        let failure = panel.failure(0).expect("the test host runs nothing");
+        assert!(failure.contains(&format!("on {HOST_NAME}")), "{failure}");
+    });
+    cx.update(|_window, cx| {
+        assert!(
+            !crate::driver_registry::global(cx)
+                .read(cx)
+                .get("postgres")
+                .is_some_and(|driver| driver.is_installed()),
+            "nothing of this machine's stood in"
+        );
+        assert_eq!(crate::driver_registry::installer(cx).waiters("postgres"), 0);
+    });
+    assert!(
+        database::install::test_support::directory_entries(local_store.path(), "postgres")
+            .is_empty()
+    );
 }
 
 /// A view standing on its own lays the table list beside the data once it is
@@ -1461,5 +1541,518 @@ async fn a_long_driver_error_leaves_the_failure_title_in_view(cx: &mut TestAppCo
         "the message ends at {:?}, below the frame's {:?}",
         error.bottom(),
         frame.bottom()
+    );
+}
+
+fn team_session_global(cx: &mut gpui::VisualTestContext) {
+    cx.update(|_window, cx| {
+        let account = cx.new(|_| {
+            zode_account::Account::for_test(zode_account::AccountStatus::SignedIn(
+                zode_account::AccountUser {
+                    id: "u-ada".into(),
+                    email: "ada@example.com".into(),
+                    name: None,
+                    avatar_url: None,
+                },
+            ))
+        });
+        let team = cx.new(|cx| zode_team_vault::TeamVaultSession::new(account, cx));
+        zode_team_vault::TeamVaultSession::set_global(team, cx);
+    });
+}
+
+/// A team connection as `sync_team_connections` leaves it once pulled.
+fn push_team_node(
+    panel: &mut DatabasePanel,
+    byte: u8,
+    name: &str,
+    fetched: bool,
+    password: Option<&str>,
+) {
+    use crate::database_panel::{ConnectionNode, NodeState};
+    use crate::team_connections::TeamOrigin;
+
+    panel.team_group.name = Some("Acme".into());
+    panel.connections.push(ConnectionNode {
+        config: crate::ConnectionConfig {
+            name: name.into(),
+            driver: if fetched {
+                "postgres".into()
+            } else {
+                String::new()
+            },
+            url: if fetched {
+                format!("postgres://app@{name}.internal/app")
+            } else {
+                String::new()
+            },
+        },
+        state: NodeState::Idle,
+        expanded: false,
+        schemas: Vec::new(),
+        collapse_schema_level: false,
+        team: Some(TeamOrigin {
+            entry: zode_env_sync::EntryId::parse(&format!("{byte:02x}").repeat(16))
+                .expect("a valid id"),
+            revision: "1".into(),
+            fetched,
+            shared_password: password.map(|password| zeroize::Zeroizing::new(password.into())),
+        }),
+    });
+}
+
+/// Settings fire on every keystroke in the settings file. A team connection
+/// is not in settings, so a reload must neither drop it nor mistake it for a
+/// personal connection of the same name.
+#[gpui::test]
+async fn team_connections_survive_a_settings_reload_under_their_own_header(
+    cx: &mut TestAppContext,
+) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    set_connections(cx, &[("staging", "/tmp/staging.sqlite")]);
+    panel.update(cx, |panel, _cx| {
+        push_team_node(panel, 0xa1, "staging", true, None);
+    });
+
+    set_connections(
+        cx,
+        &[
+            ("staging", "/tmp/staging.sqlite"),
+            ("local", "/tmp/local.sqlite"),
+        ],
+    );
+
+    panel.update(cx, |panel, _cx| {
+        assert_eq!(
+            panel.connection_names(),
+            vec!["staging", "local", "staging"],
+            "personal connections first, the team's after them, the same name kept apart"
+        );
+        assert!(panel.connections[0].team.is_none());
+        assert!(panel.connections[2].team.is_some());
+
+        let rows = panel.rows();
+        let header = rows
+            .iter()
+            .position(|row| matches!(row, crate::connection_tree::Row::TeamHeader { .. }))
+            .expect("the team's connections sit under a header");
+        assert!(
+            matches!(
+                rows.get(header + 1),
+                Some(crate::connection_tree::Row::Connection { index: 2 })
+            ),
+            "the header comes right before the first team connection"
+        );
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+/// A team that shares nothing, or has not been loaded, still shows where its
+/// connections would be, with the button that loads them.
+#[gpui::test]
+async fn an_empty_team_group_draws_its_header_and_note(cx: &mut TestAppContext) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    panel.update(cx, |panel, _cx| {
+        panel.team_group.name = Some("Acme".into());
+        panel.team_group.note = Some("Press reload to load shared connections".into());
+        let rows = panel.rows();
+        assert!(matches!(
+            rows.first(),
+            Some(crate::connection_tree::Row::TeamHeader { .. })
+        ));
+        assert!(matches!(
+            rows.get(1),
+            Some(crate::connection_tree::Row::Note { .. })
+        ));
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+/// The shared password goes into the keychain once, after it worked, under
+/// the same key `Set Password…` uses -- and the copy in memory goes with it,
+/// so every later open reads the keychain like any personal connection.
+#[gpui::test]
+async fn a_shared_password_is_stored_once_and_then_forgotten(cx: &mut TestAppContext) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    let store = std::sync::Arc::new(MemoryCredentials::default());
+    cx.update(|_window, cx| {
+        cx.set_global(zed_credentials_provider::ZedCredentialsProvider(
+            store.clone(),
+        ));
+    });
+    panel.update(cx, |panel, _cx| {
+        push_team_node(panel, 0xa1, "staging", true, Some("hunter2"));
+    });
+
+    panel.update(cx, |panel, cx| {
+        let shared = panel.connections[0]
+            .team
+            .as_ref()
+            .and_then(|team| team.shared_password.clone())
+            .expect("the fixture shares a password");
+        // What a successful open hands over: the keychain had nothing.
+        let choice = crate::team_connections::choose_secret(None, Some(shared));
+        assert_eq!(choice.secret.as_deref(), Some("hunter2"));
+        let remember = choice.remember.expect("kept after it worked");
+        panel.remember_shared_password(0, remember, cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        store.entry("postgres://app@staging.internal/app"),
+        Some(("staging".to_string(), b"hunter2".to_vec())),
+        "stored under the URL, as Set Password… does"
+    );
+    panel.update(cx, |panel, _cx| {
+        assert!(
+            panel.connections[0]
+                .team
+                .as_ref()
+                .is_some_and(|team| team.shared_password.is_none()),
+            "the in-memory copy is dropped once the keychain has it"
+        );
+        let next = crate::team_connections::choose_secret(
+            Some("hunter2".into()),
+            panel.connections[0]
+                .team
+                .as_ref()
+                .and_then(|team| team.shared_password.clone()),
+        );
+        assert_eq!(next.remember, None, "the next open stores nothing again");
+    });
+}
+
+/// A team connection's settings live sealed in the team vault, so opening it
+/// pulls them first -- and with no team key here, it says so rather than
+/// starting a driver with an empty URL.
+#[gpui::test]
+async fn opening_an_unfetched_team_connection_pulls_it_first(cx: &mut TestAppContext) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    team_session_global(cx);
+    cx.update(|_window, cx| crate::driver_registry::install_for_test("postgres", cx));
+    panel.update(cx, |panel, _cx| {
+        push_team_node(panel, 0xa1, "staging", false, None);
+    });
+
+    panel.update_in(cx, |panel, window, cx| {
+        panel.toggle_connection(0, window, cx);
+        assert!(
+            panel.is_reaching_for_a_driver(0),
+            "the row shows it is working while the entry is fetched"
+        );
+    });
+    cx.run_until_parked();
+
+    panel.update(cx, |panel, _cx| {
+        let failure = panel
+            .failure(0)
+            .expect("without the team key the pull fails");
+        assert!(failure.contains("team key"), "{failure}");
+        assert!(
+            panel.connections[0]
+                .team
+                .as_ref()
+                .is_some_and(|team| !team.fetched),
+            "nothing was opened with settings it never received"
+        );
+    });
+}
+
+/// Sharing a connection leaves the password at home unless asked.
+#[gpui::test]
+async fn sharing_a_connection_starts_without_its_password(cx: &mut TestAppContext) {
+    let (workspace, panel, cx) = workspace_with_panel(cx).await;
+    team_session_global(cx);
+    set_connections(cx, &[("staging", "/tmp/staging.sqlite")]);
+
+    panel.update_in(cx, |panel, window, cx| panel.share_with_team(0, window, cx));
+    draw_again(cx);
+
+    let modal = workspace
+        .read_with(cx, |workspace, cx| {
+            workspace.active_modal::<crate::team_connections::ShareConnectionModal>(cx)
+        })
+        .expect("the share window must be showing");
+    modal.read_with(cx, |modal, _cx| {
+        assert!(!modal.include_password, "the password box starts unticked");
+    });
+    assert!(cx.debug_bounds("database-share-connection").is_some());
+}
+
+/// A team connection is not in settings: it has no pin to offer, and the menu
+/// still opens on it.
+#[gpui::test]
+async fn right_clicking_a_team_connection_opens_its_menu(cx: &mut TestAppContext) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    panel.update(cx, |panel, _cx| {
+        push_team_node(panel, 0xa1, "staging", true, None);
+    });
+    panel.update_in(cx, |panel, window, cx| {
+        panel.deploy_connection_menu(0, gpui::point(gpui::px(10.), gpui::px(10.)), window, cx);
+        assert!(panel.context_menu.is_some());
+    });
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+/// Which connection is open is remembered by place in the list. Removing one
+/// above it shifts every place by one, and a panel still pointing at the old
+/// place would be showing -- and running queries against -- a different
+/// database than the one the user opened.
+#[gpui::test]
+async fn removing_an_earlier_connection_keeps_the_open_one_open(cx: &mut TestAppContext) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    set_connections(cx, &[("a", "/tmp/a.sqlite"), ("b", "/tmp/b.sqlite")]);
+
+    panel.update(cx, |panel, _cx| {
+        panel.active = Some(1);
+        panel.open_table = Some(crate::database_panel::OpenTable {
+            connection: 1,
+            schema: "main".into(),
+            table: "people".into(),
+            columns: None,
+        });
+    });
+
+    set_connections(cx, &[("b", "/tmp/b.sqlite")]);
+
+    panel.read_with(cx, |panel, _| {
+        assert_eq!(panel.connection_names(), vec!["b"]);
+        assert_eq!(
+            panel.active,
+            Some(0),
+            "`b` is still the one queries run against"
+        );
+        assert_eq!(
+            panel.open_table.as_ref().map(|open| open.connection),
+            Some(0),
+            "and its table is still the one showing"
+        );
+    });
+
+    // The open connection itself going away takes what it was showing with it.
+    set_connections(cx, &[("c", "/tmp/c.sqlite")]);
+    panel.read_with(cx, |panel, _| {
+        assert_eq!(panel.active, None);
+        assert!(panel.open_table.is_none());
+    });
+}
+
+async fn settings_file_text(
+    workspace: &gpui::Entity<workspace::Workspace>,
+    cx: &mut gpui::VisualTestContext,
+) -> String {
+    let fs = workspace.read_with(cx, |workspace, cx| {
+        workspace.project().read(cx).fs().clone()
+    });
+    fs.load(paths::settings_file()).await.unwrap_or_default()
+}
+
+fn memory_credentials(cx: &mut gpui::VisualTestContext) -> std::sync::Arc<MemoryCredentials> {
+    let store = std::sync::Arc::new(MemoryCredentials::default());
+    cx.update(|_window, cx| {
+        cx.set_global(zed_credentials_provider::ZedCredentialsProvider(
+            store.clone(),
+        ));
+    });
+    store
+}
+
+fn store_password(store: &MemoryCredentials, url: &str) {
+    store
+        .entries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(url.to_string(), ("app".to_string(), b"secret".to_vec()));
+}
+
+/// Removing a connection takes everything this machine kept for it: the
+/// settings entry, the password, and the pin. A password left in the keychain
+/// for a connection nobody can see any more is one nobody will ever clean up.
+#[gpui::test]
+async fn removing_a_connection_forgets_its_entry_its_password_and_its_pin(cx: &mut TestAppContext) {
+    let (workspace, panel, cx) = workspace_with_panel(cx).await;
+    let store = memory_credentials(cx);
+    store_password(&store, "/tmp/a.sqlite");
+    store_password(&store, "/tmp/b.sqlite");
+    set_connections(cx, &[("a", "/tmp/a.sqlite"), ("b", "/tmp/b.sqlite")]);
+    // The same two on disk, which is what removing has to edit.
+    let fs = workspace.read_with(cx, |workspace, cx| {
+        workspace.project().read(cx).fs().clone()
+    });
+    fs.create_dir(paths::config_dir())
+        .await
+        .expect("config dir");
+    fs.atomic_write(
+        paths::settings_file().clone(),
+        r#"{
+  "database": {
+    "connections": [
+      { "name": "a", "driver": "sqlite", "url": "/tmp/a.sqlite" },
+      { "name": "b", "driver": "sqlite", "url": "/tmp/b.sqlite" }
+    ]
+  }
+}
+"#
+        .to_string(),
+    )
+    .await
+    .expect("settings written");
+    panel.update(cx, |panel, cx| panel.toggle_pin("a", cx));
+
+    panel.update(cx, |panel, cx| panel.remove_connection("a", cx));
+    cx.run_until_parked();
+
+    assert!(
+        store.entry("/tmp/a.sqlite").is_none(),
+        "the removed connection's password is gone"
+    );
+    assert!(store.entry("/tmp/b.sqlite").is_some(), "and nobody else's");
+    assert!(
+        !panel.read_with(cx, |panel, _| panel.is_pinned("a")),
+        "a pin outliving its connection would pin the next one given that name"
+    );
+    let settings = settings_file_text(&workspace, cx).await;
+    assert!(
+        !settings.contains("/tmp/a.sqlite"),
+        "the entry is gone from settings:\n{settings}"
+    );
+    assert!(
+        settings.contains("/tmp/b.sqlite"),
+        "and only that entry:\n{settings}"
+    );
+}
+
+/// The keychain holds one password per URL, so two connections to the same
+/// server share it. Removing one must not log the other out.
+#[gpui::test]
+async fn a_password_another_connection_still_uses_is_kept(cx: &mut TestAppContext) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    let store = memory_credentials(cx);
+    store_password(&store, "/tmp/shared.sqlite");
+    set_connections(
+        cx,
+        &[("a", "/tmp/shared.sqlite"), ("b", "/tmp/shared.sqlite")],
+    );
+
+    panel.update(cx, |panel, cx| panel.remove_connection("a", cx));
+    cx.run_until_parked();
+
+    assert!(store.entry("/tmp/shared.sqlite").is_some());
+}
+
+/// Removing is not undoable, so the menu entry only asks; nothing is removed
+/// until the answer is "Remove".
+#[gpui::test]
+async fn removing_from_the_menu_asks_first(cx: &mut TestAppContext) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    let store = memory_credentials(cx);
+    store_password(&store, "/tmp/a.sqlite");
+    set_connections(cx, &[("a", "/tmp/a.sqlite")]);
+
+    panel.update_in(cx, |panel, window, cx| {
+        panel.confirm_remove_connection(0, window, cx)
+    });
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(
+        store.entry("/tmp/a.sqlite").is_some(),
+        "cancelling removes nothing"
+    );
+
+    panel.update_in(cx, |panel, window, cx| {
+        panel.confirm_remove_connection(0, window, cx)
+    });
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Remove");
+    cx.run_until_parked();
+    assert!(store.entry("/tmp/a.sqlite").is_none());
+}
+
+/// A grid cell is one truncated line, so a long or multi-line value could not
+/// be read in full anywhere. Clicking a row opens it in a detail view, one
+/// field per column; clicking the same row again closes it.
+#[gpui::test]
+async fn clicking_a_row_opens_its_detail_and_clicking_again_closes_it(cx: &mut TestAppContext) {
+    use database::protocol::{Cell, ResultColumn, ResultSet};
+
+    init_test(cx);
+    let languages = std::sync::Arc::new(language::LanguageRegistry::new(cx.executor()));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let panel = cx.new(|cx| {
+            DatabasePanel::standalone(
+                gpui::WeakEntity::new_invalid(),
+                languages.clone(),
+                window,
+                cx,
+            )
+        });
+        ResultsFrame { panel }
+    });
+    let panel = view.read_with(cx, |view, _| view.panel.clone());
+
+    panel.update(cx, |panel, cx| {
+        panel.query = crate::query::QueryState::Done(crate::query::Page {
+            result: ResultSet {
+                columns: vec![
+                    ResultColumn {
+                        name: "id".into(),
+                        type_name: "int".into(),
+                    },
+                    ResultColumn {
+                        name: "note".into(),
+                        type_name: "text".into(),
+                    },
+                ],
+                rows: vec![
+                    vec![
+                        Cell::Number { value: "1".into() },
+                        Cell::Text {
+                            value: "first line\nsecond line".into(),
+                        },
+                    ],
+                    vec![Cell::Number { value: "2".into() }, Cell::Null],
+                ],
+                truncated: false,
+                elapsed_ms: 1,
+            },
+            sql: "select * from notes".into(),
+            offset: 0,
+            limit: 200,
+            selected_row: None,
+        });
+        cx.notify();
+    });
+    view.update(cx, |_, cx| cx.notify());
+    draw_again(cx);
+    assert!(
+        cx.debug_bounds("database-row-detail").is_none(),
+        "nothing is shown before a row is clicked"
+    );
+
+    let row = bounds_of(cx, "database-result-row-1");
+    cx.simulate_click(row.center(), gpui::Modifiers::none());
+    draw_again(cx);
+    bounds_of(cx, "database-row-detail");
+    bounds_of(cx, "database-row-detail-field-0");
+    bounds_of(cx, "database-row-detail-field-1");
+    assert_eq!(
+        panel.read_with(cx, |panel, _| match &panel.query {
+            crate::query::QueryState::Done(page) => page.selected_row,
+            _ => None,
+        }),
+        Some(1)
+    );
+
+    let row = bounds_of(cx, "database-result-row-1");
+    cx.simulate_click(row.center(), gpui::Modifiers::none());
+    draw_again(cx);
+    assert!(
+        cx.debug_bounds("database-row-detail").is_none(),
+        "clicking the shown row again closes the detail"
     );
 }

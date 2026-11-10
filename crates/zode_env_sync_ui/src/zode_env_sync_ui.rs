@@ -13,27 +13,54 @@
 
 mod env_diff_modal;
 pub mod masking;
+mod team_members_modal;
+mod team_vault_section;
 mod toolbar_button;
 mod vault_modal;
 mod wire_panel;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use gpui::{App, Entity, Window};
+use gpui::{App, Entity, Window, actions};
 use notifications::status_toast::StatusToast;
+use project::{Project, worktree_store::RemotePrivateFile};
 use ui::prelude::*;
+use util::ResultExt as _;
 use workspace::Workspace;
 use zode_account::Account;
-use zode_env_sync::{EnvSession, EnvStatus};
+use zode_env_sync::{
+    Checkout, EntryId, EnvFile, EnvFileFuture, EnvSession, EnvStatus, EnvSyncError, LocalEnvFile,
+};
 
 pub use env_diff_modal::EnvDiffModal;
+pub use team_members_modal::TeamMembersModal;
+pub use team_vault_section::TeamVaultSection;
 pub use toolbar_button::EnvSyncToolbar;
 pub use vault_modal::VaultModal;
 pub use wire_panel::WirePanel;
 
+actions!(
+    team_sharing,
+    [
+        /// Opens the team's members: key fingerprints, granting access and
+        /// rotating the team key.
+        OpenTeamMembers
+    ]
+);
+
 pub fn init(cx: &mut App) {
+    // The team session reads nothing and sends nothing until a team window
+    // opens; installing it here is what lets the Team tab and the database
+    // panel's Team group find it.
+    if zode_team_vault::TeamVaultSession::global(cx).is_none()
+        && let Some(account) = Account::global(cx)
+    {
+        zode_team_vault::init(account, cx);
+    }
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
         workspace
+            .register_action(open_team_members)
             .register_action(open_vault)
             .register_action(set_up)
             .register_action(push_env_file)
@@ -98,6 +125,23 @@ fn open_vault(
     });
 }
 
+fn open_team_members(
+    workspace: &mut Workspace,
+    _: &OpenTeamMembers,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    if session(workspace, cx).is_none() {
+        return;
+    }
+    let Some(team) = zode_team_vault::TeamVaultSession::global(cx) else {
+        return;
+    };
+    workspace.toggle_modal(window, cx, move |_window, cx| {
+        TeamMembersModal::new(team, cx)
+    });
+}
+
 fn set_up(
     workspace: &mut Workspace,
     _: &zed_actions::env_sync::SetUpEnvSync,
@@ -121,7 +165,18 @@ fn bind_project(
     let Some(session) = session(workspace, cx) else {
         return;
     };
-    let Some(root) = active_worktree_root(workspace, cx) else {
+    let Some(checkout) = active_checkout(workspace, cx) else {
+        if let Some(reason) = nothing_to_bind(workspace.project().read(cx)) {
+            let toast = StatusToast::new(reason, cx, |this, _cx| {
+                this.icon(
+                    Icon::new(IconName::Info)
+                        .size(IconSize::Small)
+                        .color(Color::Muted),
+                )
+                .dismiss_button(true)
+            });
+            workspace.toggle_status_toast(toast, cx);
+        }
         return;
     };
     session
@@ -129,8 +184,16 @@ fn bind_project(
         .detach();
     let handle = cx.weak_entity();
     workspace.toggle_modal(window, cx, move |window, cx| {
-        VaultModal::binding(session.clone(), handle, root, window, cx)
+        VaultModal::binding(session.clone(), handle, checkout, window, cx)
     });
+}
+
+/// Why a project has no checkout to bind, when that is a fact about the
+/// project rather than about what happens to be open.
+fn nothing_to_bind(project: &Project) -> Option<&'static str> {
+    project.is_via_collab().then_some(
+        "This project is shared with you: its environment files stay with its host, so there is no checkout here to bind",
+    )
 }
 
 fn push_env_file(
@@ -170,9 +233,9 @@ fn transfer(
         return;
     };
 
-    let Some(entry) = session
-        .read(cx)
-        .entry_for(&file.worktree_root, &file.absolute)
+    let Some(entry) = file
+        .relative_path()
+        .and_then(|relative| session.read(cx).entry_at(&file.checkout, &relative))
     else {
         // Not in the catalogue yet. Exactly one fact is missing — which
         // project owns this file — so the window asks for that and nothing
@@ -198,27 +261,30 @@ fn transfer(
             // Built, then shown, then sent — in that order, always. There is no
             // path from this action to the network that does not pass through a
             // window displaying the exact bytes.
-            session.update(cx, |session, cx| {
-                session.prepare(entry, file.absolute.clone(), cx)
-            });
-            let Some(wire) = session.read(cx).prepared().cloned() else {
-                // Nothing to send, or it failed to build. This used to return
-                // on the strength of "the status already says which" -- but no
-                // window opens on this path to carry it, and `Done` is
-                // deliberately absent from the status bar. Pushing an
-                // unchanged file a second time therefore produced the correct
-                // answer and showed it nowhere at all.
-                let outcome = session.read(cx).status().clone();
-                report(workspace, &outcome, cx);
+            if let Some(local_path) = file.file.local_path() {
+                let local_path = local_path.to_path_buf();
+                session.update(cx, |session, cx| session.prepare(entry, local_path, cx));
+                show_prepared(workspace, &session, entry, window, cx);
                 return;
-            };
-            workspace.toggle_modal(window, cx, |window, cx| {
-                WirePanel::new(session.clone(), wire, entry, window, cx)
+            }
+            // A remote file is read over the connection first, so the window
+            // opens once that read has answered.
+            let prepared = session.update(cx, |session, cx| {
+                session.prepare_file(entry, file.file.clone(), file.absolute.clone(), cx)
             });
+            cx.spawn_in(window, async move |workspace, cx| {
+                prepared.await;
+                workspace
+                    .update_in(cx, |workspace, window, cx| {
+                        show_prepared(workspace, &session, entry, window, cx)
+                    })
+                    .log_err();
+            })
+            .detach();
         }
         Direction::Pull => {
             session.update(cx, |session, cx| {
-                session.pull(entry, file.absolute.clone(), cx)
+                session.pull_file(entry, file.file.clone(), file.absolute.clone(), cx)
             });
             // A pull that finds a difference holds it rather than writing; this
             // is the window that shows what it would do.
@@ -227,6 +293,31 @@ fn transfer(
             });
         }
     }
+}
+
+/// Opens the window showing what a built push would send, or says why there
+/// is nothing to show.
+fn show_prepared(
+    workspace: &mut Workspace,
+    session: &Entity<EnvSession>,
+    entry: EntryId,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    let Some(wire) = session.read(cx).prepared().cloned() else {
+        // Nothing to send, or it failed to build. This used to return on the
+        // strength of "the status already says which" -- but no window opens
+        // on this path to carry it, and `Done` is deliberately absent from the
+        // status bar. Pushing an unchanged file a second time therefore
+        // produced the correct answer and showed it nowhere at all.
+        let outcome = session.read(cx).status().clone();
+        report(workspace, &outcome, cx);
+        return;
+    };
+    let session = session.clone();
+    workspace.toggle_modal(window, cx, |window, cx| {
+        WirePanel::new(session, wire, entry, window, cx)
+    });
 }
 
 /// Says something that has no window of its own to appear in.
@@ -259,13 +350,36 @@ fn report(workspace: &mut Workspace, status: &EnvStatus, cx: &mut Context<Worksp
 }
 
 /// An environment file open in the active editor.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ActiveEnvFile {
+    /// Where reads and writes go: this machine's disk, or the project's host.
+    pub file: Arc<dyn EnvFile>,
+    /// The checkout the file is in, and the machine that checkout is on.
+    pub checkout: Checkout,
+    /// The file's path on its own machine. For a remote project that is a
+    /// path on the host, shown and never opened here.
     pub absolute: PathBuf,
-    pub worktree_root: PathBuf,
+}
+
+impl std::fmt::Debug for ActiveEnvFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActiveEnvFile")
+            .field("checkout", &self.checkout)
+            .field("absolute", &self.absolute)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ActiveEnvFile {
+    /// A file on this machine.
+    pub fn local(worktree_root: PathBuf, absolute: PathBuf) -> Self {
+        Self {
+            file: Arc::new(LocalEnvFile::new(absolute.clone())),
+            checkout: Checkout::local(worktree_root),
+            absolute,
+        }
+    }
+
     /// The file's own name, for a window title.
     pub fn display_name(&self) -> SharedString {
         self.absolute
@@ -275,6 +389,12 @@ impl ActiveEnvFile {
             .into()
     }
 
+    /// The slash-separated path the catalogue records, when the file is inside
+    /// its checkout.
+    pub fn relative_path(&self) -> Option<String> {
+        self.checkout.relative(&self.absolute)
+    }
+
     /// Where the file sits inside its checkout.
     ///
     /// Shown rather than the absolute path because the absolute path is both a
@@ -282,12 +402,35 @@ impl ActiveEnvFile {
     /// thing to reason about: what gets stored, and what a pull on another
     /// machine reproduces, is this.
     pub fn relative_label(&self) -> SharedString {
-        self.absolute
-            .strip_prefix(&self.worktree_root)
-            .ok()
-            .map(|rest| rest.to_string_lossy().replace('\\', "/"))
+        self.relative_path()
             .map(SharedString::from)
             .unwrap_or_else(|| self.display_name())
+    }
+}
+
+/// A private file on a remote project's host.
+///
+/// Only the file's bytes cross the connection. The key, the decryption, the
+/// sync state and the backup of what a pull replaces all stay on this machine.
+struct RemoteEnvFile(RemotePrivateFile);
+
+impl EnvFile for RemoteEnvFile {
+    fn read(&self) -> EnvFileFuture<'_, Option<Vec<u8>>> {
+        Box::pin(async move {
+            self.0
+                .load()
+                .await
+                .map_err(|error| EnvSyncError::Io(format!("{error:#}")))
+        })
+    }
+
+    fn write_atomic(&self, contents: Vec<u8>) -> EnvFileFuture<'_, ()> {
+        Box::pin(async move {
+            self.0
+                .write(contents)
+                .await
+                .map_err(|error| EnvSyncError::Io(format!("{error:#}")))
+        })
     }
 }
 
@@ -297,46 +440,132 @@ impl ActiveEnvFile {
 /// the rest, and it is user-configurable. Asking the worktree rather than
 /// carrying a second glob table here is what stops the two drifting — a
 /// second table is the same class of bug as two copies of one alphabet.
+///
+/// A remote project's file is offered too, and read and written on its host:
+/// the encryption key never leaves this machine, because only the file's bytes
+/// travel. The host asks `private_files` again, but its user layer is this
+/// machine's synced settings, so that is agreement rather than a boundary;
+/// what the host enforces is that only this machine is served, that the path
+/// stays inside the worktree, and that the file is written owner-only.
 pub fn active_env_file(workspace: &Workspace, cx: &App) -> Option<ActiveEnvFile> {
     let project = workspace.project().read(cx);
     let path = workspace.active_item(cx)?.project_path(cx)?;
     let worktree = project.worktree_for_id(path.worktree_id, cx)?;
     let worktree = worktree.read(cx);
+    let absolute = worktree.absolutize(&path.path);
+    let root = worktree.abs_path().to_path_buf();
 
-    // Local only, and `as_local` returning `None` for a remote worktree is the
-    // right answer rather than a gap: decision D7 keeps sync on the machine
-    // running the UI, so the encryption key never travels to a remote host.
-    let local = worktree.as_local()?;
-    if !local.is_path_private(&path.path) {
+    if let Some(local) = worktree.as_local() {
+        if !local.is_path_private(&path.path) {
+            return None;
+        }
+        return Some(ActiveEnvFile::local(root, absolute));
+    }
+
+    let checkout = checkout_of(project, root, cx)?;
+    let worktree_store = project.worktree_store();
+    let worktree_store = worktree_store.read(cx);
+    if !worktree_store.is_path_private_here(&path, cx) {
         return None;
     }
+    let remote = worktree_store.remote_private_file(path.worktree_id, path.path, cx)?;
     Some(ActiveEnvFile {
-        absolute: worktree.absolutize(&path.path),
-        worktree_root: worktree.abs_path().to_path_buf(),
+        file: Arc::new(RemoteEnvFile(remote)),
+        checkout,
+        absolute,
     })
 }
 
-fn active_worktree_root(workspace: &Workspace, cx: &App) -> Option<PathBuf> {
+/// The checkout `root` names in `project`, on the machine it is a directory
+/// on. `None` for a collaboration guest: those directories are on someone
+/// else's machine, and no binding here speaks for them.
+fn checkout_of(project: &Project, root: PathBuf, cx: &App) -> Option<Checkout> {
+    match project.remote_connection_options(cx) {
+        Some(options) => Some(Checkout::remote(
+            workspace::remote_connection_identity(&options).stable_key(),
+            root,
+        )),
+        None if project.is_local() => Some(Checkout::local(root)),
+        None => None,
+    }
+}
+
+fn active_checkout(workspace: &Workspace, cx: &App) -> Option<Checkout> {
     let project = workspace.project().read(cx);
     // The worktree the active item belongs to, falling back to the only one
     // when nothing is open. Guessing between several would bind the wrong
     // checkout, so several plus no active item means no answer.
-    if let Some(path) = workspace
+    let root = if let Some(path) = workspace
         .active_item(cx)
         .and_then(|item| item.project_path(cx))
     {
-        return Some(
-            project
-                .worktree_for_id(path.worktree_id, cx)?
-                .read(cx)
-                .abs_path()
-                .to_path_buf(),
+        project
+            .worktree_for_id(path.worktree_id, cx)?
+            .read(cx)
+            .abs_path()
+            .to_path_buf()
+    } else {
+        let mut worktrees = project.visible_worktrees(cx);
+        let only = worktrees.next()?;
+        if worktrees.next().is_some() {
+            return None;
+        }
+        only.read(cx).abs_path().to_path_buf()
+    };
+    checkout_of(project, root, cx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use project::FakeFs;
+
+    #[gpui::test]
+    async fn a_shared_project_says_why_there_is_nothing_to_bind(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let settings_store = settings::SettingsStore::test(cx);
+            cx.set_global(settings_store);
+        });
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        project.read_with(cx, |project, _| {
+            assert_eq!(
+                nothing_to_bind(project),
+                None,
+                "a local project can be bound"
+            );
+        });
+
+        project.update(cx, |project, _| project.mark_as_collab_for_testing());
+        project.read_with(cx, |project, _| {
+            let reason = nothing_to_bind(project).expect("a guest is told why");
+            assert!(reason.contains("host"), "{reason}");
+        });
+    }
+
+    #[gpui::test]
+    async fn a_remote_checkout_is_keyed_by_its_host(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let fs = FakeFs::new(cx.executor());
+        let (project, _server) = Project::test_remote(fs, cx, server_cx).await;
+
+        let checkout = project
+            .read_with(cx, |project, cx| {
+                checkout_of(project, PathBuf::from("/home/me/acme"), cx)
+            })
+            .expect("a remote project's checkout has a host");
+
+        assert!(
+            !checkout.is_local(),
+            "a remote root was keyed as a directory on this machine"
+        );
+        assert_ne!(
+            checkout,
+            Checkout::local("/home/me/acme"),
+            "a remote and a local root with one path must not share a binding"
         );
     }
-    let mut worktrees = project.visible_worktrees(cx);
-    let only = worktrees.next()?;
-    worktrees
-        .next()
-        .is_none()
-        .then(|| only.read(cx).abs_path().to_path_buf())
 }

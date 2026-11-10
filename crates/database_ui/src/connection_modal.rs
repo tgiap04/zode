@@ -11,7 +11,7 @@
 //! what "Import from URL" switches to deliberately.
 
 use crate::connection_store::{DatabaseSettings, write_secret};
-use crate::driver_registry::{self, CatalogueEntry};
+use crate::driver_registry::{self, CatalogueEntry, DriverHost};
 use crate::session::driver_capabilities;
 use database::install::InstallProgress;
 use database::protocol::{ConnectionField, ConnectionForm};
@@ -45,8 +45,8 @@ fn fallback_form() -> ConnectionForm {
 ///
 /// Installed first, then alphabetically: an engine someone can actually reach
 /// today should not sit below one they cannot.
-fn sorted_catalogue(cx: &mut App) -> Vec<CatalogueEntry> {
-    let mut engines = driver_registry::catalogue(cx);
+fn sorted_catalogue(drivers: &DriverHost, cx: &mut App) -> Vec<CatalogueEntry> {
+    let mut engines = driver_registry::catalogue(drivers, cx);
     engines.sort_by(|a, b| b.installed.cmp(&a.installed).then(a.name.cmp(&b.name)));
     engines
 }
@@ -104,6 +104,9 @@ pub(crate) struct ConnectionModal {
     /// Held for the project's `Fs`, which is what writes the settings file, and
     /// for reaching the panel after "Save & Connect".
     workspace: WeakEntity<Workspace>,
+    /// Whose drivers are listed, downloaded and started: this machine's, or
+    /// those of the remote host the project lives on.
+    pub(crate) drivers: DriverHost,
     pub(crate) engines: Vec<CatalogueEntry>,
     /// Which row the picker has highlighted. `Continue` acts on it, so a click
     /// selects rather than commits -- an engine chosen by a stray click is one
@@ -116,18 +119,28 @@ pub(crate) struct ConnectionModal {
     pub(crate) name_editor: Entity<InputField>,
     pub(crate) test: TestState,
     pub(crate) error: Option<SharedString>,
+    /// Where a URL is pasted to fill the chosen engine's form.
+    pub(crate) url_import: Entity<InputField>,
+    /// What the last import filled, and what the URL held that the form has no
+    /// field for.
+    pub(crate) url_import_note: Option<SharedString>,
     _task: Option<Task<()>>,
     _test_task: Option<Task<()>>,
+    _refresh_task: Task<()>,
     _search_edited: Subscription,
 }
 
 impl ConnectionModal {
+    /// `drivers` is taken rather than read from `workspace`, which is being
+    /// updated while the modal is built.
     pub(crate) fn new(
         workspace: WeakEntity<Workspace>,
+        drivers: DriverHost,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let name_editor = cx.new(|cx| InputField::new(window, cx, "Connection name"));
+        let url_import = cx.new(|cx| InputField::new(window, cx, "Paste a connection URL"));
         let search_editor = cx
             .new(|cx| InputField::new(window, cx, "Search").start_icon(IconName::MagnifyingGlass));
         // Redrawn on every keystroke so the list narrows as it is typed.
@@ -142,11 +155,25 @@ impl ConnectionModal {
             cx,
         );
 
-        let engines = sorted_catalogue(cx);
+        let engines = sorted_catalogue(&drivers, cx);
+        // A remote host's drivers are known only once it has said: until then
+        // every engine there reads as not downloaded.
+        let refresh = drivers.refresh_all(cx);
+        let refresh_task = cx.spawn(async move |this, cx| {
+            let refreshed = refresh.await;
+            this.update(cx, |this, cx| {
+                if let Err(error) = refreshed {
+                    this.error = Some(format!("{error:#}").into());
+                }
+                this.reload_engines(cx);
+            })
+            .ok();
+        });
 
         Self {
             focus_handle: cx.focus_handle(),
             workspace,
+            drivers,
             engines,
             selected: 0,
             search_editor,
@@ -154,8 +181,11 @@ impl ConnectionModal {
             name_editor,
             test: TestState::Untested,
             error: None,
+            url_import,
+            url_import_note: None,
             _task: None,
             _test_task: None,
+            _refresh_task: refresh_task,
             _search_edited: search_edited,
         }
     }
@@ -214,7 +244,7 @@ impl ConnectionModal {
     /// driver downloaded for one engine lands while the list is on screen.
     pub(crate) fn reload_engines(&mut self, cx: &mut Context<Self>) {
         let selected = self.selected_engine().map(|engine| engine.name.clone());
-        self.engines = sorted_catalogue(cx);
+        self.engines = sorted_catalogue(&self.drivers, cx);
         // Kept on the same engine rather than the same index: installing a
         // driver moves it up the list, and following the index would silently
         // select whatever slid into its place.
@@ -249,13 +279,18 @@ impl ConnectionModal {
             // SQL Server share a protocol with nothing here. Said rather than
             // silently ignored: a Continue button that does nothing is the
             // worst answer available.
-            self.error = Some(
-                format!(
+            // An extension installed here names a path on this machine, so it
+            // is no answer for a remote host.
+            let message = match self.drivers.host_name() {
+                Some(host_name) => {
+                    format!("No driver for {} is available on {host_name}.", engine.name)
+                }
+                None => format!(
                     "No driver for {} is installed. An extension can provide one.",
                     engine.name
-                )
-                .into(),
-            );
+                ),
+            };
+            self.error = Some(message.into());
             cx.notify();
             return;
         }
@@ -303,7 +338,7 @@ impl ConnectionModal {
         self.error = None;
         cx.notify();
 
-        let asked = driver_capabilities(descriptor, cx);
+        let asked = driver_capabilities(self.drivers.clone(), descriptor, cx);
         self._task = Some(cx.spawn_in(window, async move |this, cx| {
             let capabilities = asked.await;
             this.update_in(cx, |this, window, cx| match capabilities {
@@ -323,7 +358,8 @@ impl ConnectionModal {
     }
 
     fn descriptor_for(&self, engine: &CatalogueEntry, cx: &mut App) -> Option<DriverDescriptor> {
-        driver_registry::global(cx)
+        self.drivers
+            .registry(cx)
             .read(cx)
             .get(&engine.driver)
             .cloned()
@@ -355,6 +391,9 @@ impl ConnectionModal {
             });
         }
         self.test = TestState::Untested;
+        self.url_import_note = None;
+        self.url_import
+            .update(cx, |input, cx| input.set_text("", window, cx));
         self.step = Step::Filling {
             engine,
             form,
@@ -386,7 +425,7 @@ impl ConnectionModal {
     }
 
     /// Reads the form, and says what is missing rather than saving half of it.
-    fn filled(&self, cx: &App) -> Result<Filled, SharedString> {
+    pub(crate) fn filled(&self, cx: &App) -> Result<Filled, SharedString> {
         let Step::Filling {
             engine,
             form,
@@ -477,7 +516,9 @@ impl ConnectionModal {
         // on screen: the import path's engine is a stand-in with no driver, so
         // this lookup failed for it -- and failed by returning, which is a
         // button that does nothing at all when pressed.
-        let Some(descriptor) = driver_registry::global(cx)
+        let Some(descriptor) = self
+            .drivers
+            .registry(cx)
             .read(cx)
             .get(&filled.driver)
             .cloned()
@@ -498,8 +539,10 @@ impl ConnectionModal {
             url: filled.url.clone(),
         };
         let secret = filled.secret;
+        let drivers = self.drivers.clone();
         self._test_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let opened = crate::session::Session::open(descriptor, config, secret, cx).await;
+            let opened =
+                crate::session::Session::open(drivers, descriptor, config, secret, cx).await;
             this.update(cx, |this, cx| {
                 this.test = match opened {
                     // Dropped right here, which kills the driver: this was a
@@ -560,13 +603,13 @@ impl ConnectionModal {
 }
 
 /// A form that has been read and found complete.
-struct Filled {
+pub(crate) struct Filled {
     name: String,
     driver: String,
-    url: String,
+    pub(crate) url: String,
     /// Kept apart from `url` the whole way down: this goes to the keychain and
     /// nowhere else.
-    secret: Option<String>,
+    pub(crate) secret: Option<String>,
 }
 
 impl Filled {
@@ -1397,5 +1440,87 @@ mod tests {
                 "a phrase from one description must find exactly that engine"
             );
         });
+    }
+
+    /// An extension installed here cannot serve a remote host, so in a
+    /// remote window the dialog does not send anyone looking for one.
+    #[gpui::test]
+    async fn in_a_remote_window_an_engine_with_no_driver_is_missing_on_the_host(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::driver_registry::remote_test_support::{HOST_NAME, RecordingHost, remote_host};
+        let service = std::rc::Rc::new(RecordingHost::default());
+        let (modal, cx) = crate::database_panel_tests::modal_on_host_for_test(cx, &[], |cx| {
+            remote_host(service.clone(), cx)
+        })
+        .await;
+        cx.run_until_parked();
+
+        modal.update_in(cx, |modal, window, cx| {
+            select_engine(modal, "oracle", cx);
+            modal.advance(window, cx);
+
+            assert!(matches!(modal.step, Step::PickEngine));
+            let error = modal.error.clone().expect("it must say why");
+            assert_eq!(
+                error.as_ref(),
+                format!("No driver for Oracle is available on {HOST_NAME}.")
+            );
+        });
+    }
+
+    /// In a remote window the host installs its own driver: this machine
+    /// downloads nothing, and the dialog says where the driver lives.
+    #[gpui::test]
+    async fn a_download_in_a_remote_window_happens_on_the_host(cx: &mut gpui::TestAppContext) {
+        use crate::driver_registry::remote_test_support::{
+            HOST_NAME, REMOTE_POSTGRES, RecordingHost, remote_host,
+        };
+        let local_store = tempfile::tempdir().expect("a temporary directory");
+        let service = std::rc::Rc::new(RecordingHost::default());
+        let (modal, cx) = crate::database_panel_tests::modal_on_host_for_test(cx, &[], |cx| {
+            driver_registry::set_installer_for_test(local_store.path().to_path_buf(), cx);
+            remote_host(service.clone(), cx)
+        })
+        .await;
+        cx.run_until_parked();
+
+        let engine = postgres_entry(&modal, cx);
+        assert!(!engine.installed, "the host has no driver yet");
+        modal.update_in(cx, |modal, window, cx| {
+            assert_eq!(modal.drivers.host_name(), Some(HOST_NAME.into()));
+            modal.download_driver(engine, window, cx)
+        });
+        cx.run_until_parked();
+
+        assert!(
+            service.asked.borrow().ends_with(&[
+                ("postgres".to_string(), false),
+                ("postgres".to_string(), true)
+            ]),
+            "resolved first, then installed on the host: {:?}",
+            service.asked.borrow()
+        );
+        assert_eq!(
+            service.command_host.programs.lock().unwrap().clone(),
+            vec![REMOTE_POSTGRES.to_string()],
+            "the driver asked what it can do is the host's"
+        );
+        assert!(
+            !postgres_installed(cx),
+            "nothing was installed on this machine"
+        );
+        assert_eq!(
+            cx.update(|_window, cx| driver_registry::installer(cx).waiters("postgres")),
+            0
+        );
+        assert!(
+            database::install::test_support::directory_entries(local_store.path(), "postgres")
+                .is_empty()
+        );
+        assert!(
+            postgres_entry(&modal, cx).installed,
+            "the host's answer is what the list shows"
+        );
     }
 }

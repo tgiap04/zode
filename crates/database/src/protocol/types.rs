@@ -265,7 +265,7 @@ pub fn split_password(url: &str) -> (String, Option<String>) {
 }
 
 /// Undoes [`percent_encode`] for the one value that leaves a URL again.
-fn percent_decode(value: &str) -> String {
+pub(crate) fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut decoded: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut index = 0;

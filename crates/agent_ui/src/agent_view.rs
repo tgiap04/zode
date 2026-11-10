@@ -10,11 +10,12 @@ use gpui::{
 };
 use project::agent_bypass::BypassCheck;
 use project::agent_server_store::AgentServerStore;
+use project::agent_session_host::AgentSessionHost;
 use project::{AgentBinary, AgentBinaryMissing, AgentId, Project, builtin_agent};
 
-use crate::permission_bypass::PermissionBypassStore;
+use crate::permission_bypass::{BypassHost, PermissionBypassStore};
 use crate::subagents::{
-    ScanRequest, SubagentPass, SubagentTracker, SuccessorSearch, provider_for_agent,
+    ScanRequest, SubagentPass, SubagentTracker, SuccessorSearch, agent_reports_turns,
 };
 use crate::turn_tracker::{
     SilenceWatch, TurnEvent, TurnPass, TurnTracker, approval_is_quiet, approval_next,
@@ -144,6 +145,12 @@ pub struct AgentView {
     mode: AgentViewMode,
     state: State,
     project: Entity<Project>,
+    /// Where this tab's sessions are read: this machine's stores for a local
+    /// project, the remote server's for a remote one, and nowhere for a
+    /// collaboration guest's. Held for the life of the tab, so its pollers ask
+    /// one host rather than building one per tick; a project does not move
+    /// between hosts.
+    session_host: Option<AgentSessionHost>,
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
     self_handle: WeakEntity<Self>,
@@ -605,6 +612,7 @@ impl AgentView {
             _rename_subscription: None,
             mode,
             state: State::Starting,
+            session_host: project.read(cx).agent_session_host(cx),
             project,
             workspace,
             focus_handle: cx.focus_handle(),
@@ -735,6 +743,7 @@ impl AgentView {
             _rename_subscription: None,
             mode,
             state: State::Starting,
+            session_host: project.read(cx).agent_session_host(cx),
             project,
             workspace,
             focus_handle: cx.focus_handle(),
@@ -1144,8 +1153,9 @@ impl AgentView {
     /// to the turn state run on this, never on [`Self::reports_turns`] -- a tab
     /// that has fallen back still has to look, to notice when marks appear.
     fn follows_transcript(&self) -> bool {
-        matches!(self.origin.intent, SessionIntent::Tracked(_))
-            && provider_for_agent(&self.agent).is_some_and(|provider| provider.reports_turns())
+        self.session_host.is_some()
+            && matches!(self.origin.intent, SessionIntent::Tracked(_))
+            && agent_reports_turns(&self.agent)
     }
 
     /// Accounts for `elapsed` of the CLI writing or not, and says so, once, when a
@@ -1181,9 +1191,13 @@ impl AgentView {
     /// check behind however long a disk takes. Two loops, and neither waits on
     /// the other.
     fn track_subagents(&mut self, cx: &mut Context<Self>) {
+        // A collaboration guest's sessions are on a machine nothing here can ask.
+        let Some(host) = self.session_host.clone() else {
+            return;
+        };
         // Resolved once, outside the loop: neither can change for the life of
         // a tab, and both are needed on the first pass.
-        let Some(provider) = provider_for_agent(&self.agent) else {
+        let Some(agent) = AgentKind::from_builtin_agent_id(self.agent.as_ref()) else {
             return;
         };
         // Nothing to look up. An untracked tab holds no session id, so there is
@@ -1202,6 +1216,17 @@ impl AgentView {
 
         self._subagent_tick = Some(cx.spawn(async move |this, cx| {
             loop {
+                // Every request to a host that is out of reach waits out its
+                // deadline, so the beat is spent waiting for the link instead.
+                let Ok(disconnected) =
+                    this.update(cx, |this, cx| this.project.read(cx).is_disconnected(cx))
+                else {
+                    return;
+                };
+                if disconnected {
+                    cx.background_executor().timer(SUBAGENT_SCAN_EVERY).await;
+                    continue;
+                }
                 let Ok(request) = this.update(cx, |this, cx| {
                     this.next_subagent_request(follows_transcript, started_at, cx)
                 }) else {
@@ -1210,14 +1235,10 @@ impl AgentView {
                 let Some(request) = request else {
                     return;
                 };
-                // Off the UI thread: this opens files, and one of them is a
-                // transcript that reaches megabytes on its first pass.
-                let pass = cx
-                    .background_spawn({
-                        let provider = provider.clone();
-                        async move { SubagentTracker::scan(&provider, request) }
-                    })
-                    .await;
+                // Awaited before the next request is made, so a host that is
+                // slow to answer is never asked twice for this tab at once.
+                let pass = SubagentTracker::scan(&host, agent, request, cx).await;
+                let behind = pass.behind();
 
                 let Ok(still_running) = this.update(cx, |this, cx| {
                     this.fold_subagent_pass(pass, follows_transcript, cx)
@@ -1228,7 +1249,11 @@ impl AgentView {
                     return;
                 }
 
-                cx.background_executor().timer(SUBAGENT_SCAN_EVERY).await;
+                // The rest of a transcript read in slices is read at once: the
+                // tab treats it as the past until it reaches the end.
+                if !behind {
+                    cx.background_executor().timer(SUBAGENT_SCAN_EVERY).await;
+                }
             }
         }));
     }
@@ -1749,6 +1774,10 @@ impl AgentView {
             .visible_worktrees(cx)
             .next()
             .map(|worktree| worktree.read(cx).abs_path().to_path_buf());
+        // A remote checkout's bypass is recorded against its host; a guest's
+        // has none, and so is never on.
+        let bypass_host = BypassHost::for_project(project.read(cx), cx);
+        let session_host = self.session_host.clone();
 
         self._startup = Some(cx.spawn_in(window, async move |this, cx| {
             // `store` and `project` are strong handles owned by this task, so the
@@ -1785,20 +1814,28 @@ impl AgentView {
             // the task that was already awaiting the binary, rather than at
             // construction, because a tab has to be able to exist before it knows
             // whether its session is still on disk.
-            let session =
-                match resolve_session(&agent, &intent, anchor, default_cwd.clone(), cx).await {
-                    SessionStart::Fresh => None,
-                    SessionStart::Command(command) => Some(command),
-                    SessionStart::Gone => {
-                        this.update(cx, |this, cx| {
-                            this.state = State::SessionGone;
-                            cx.emit(AgentViewEvent::UpdateTab);
-                            cx.notify();
-                        })
-                        .ok();
-                        return;
-                    }
-                };
+            let session = match resolve_session(
+                &agent,
+                &intent,
+                anchor,
+                default_cwd.clone(),
+                session_host,
+                cx,
+            )
+            .await
+            {
+                SessionStart::Fresh => None,
+                SessionStart::Command(command) => Some(command),
+                SessionStart::Gone => {
+                    this.update(cx, |this, cx| {
+                        this.state = State::SessionGone;
+                        cx.emit(AgentViewEvent::UpdateTab);
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
 
             // The directory the agent will actually run in. A resumed session
             // runs where it ran before, not where this window happens to be
@@ -1808,19 +1845,28 @@ impl AgentView {
             // and the spawn come to disagree about which checkout this is.
             let cwd = launch_cwd(session.as_ref(), default_cwd);
 
-            let extra_args =
-                match resolve_bypass(&agent, &binary, cwd.as_deref(), prompts, &store, cx).await {
-                    Ok(extra_args) => extra_args,
-                    Err(refusal) => {
-                        this.update(cx, |this, cx| {
-                            this.state = State::Failed(refusal);
-                            cx.emit(AgentViewEvent::UpdateTab);
-                            cx.notify();
-                        })
-                        .ok();
-                        return;
-                    }
-                };
+            let extra_args = match resolve_bypass(
+                &agent,
+                &binary,
+                bypass_host.as_ref(),
+                cwd.as_deref(),
+                prompts,
+                &store,
+                cx,
+            )
+            .await
+            {
+                Ok(extra_args) => extra_args,
+                Err(refusal) => {
+                    this.update(cx, |this, cx| {
+                        this.state = State::Failed(refusal);
+                        cx.emit(AgentViewEvent::UpdateTab);
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
 
             let extra_args_taken = extra_args.clone();
             let terminal = project
@@ -2104,71 +2150,55 @@ fn intent_for_new_tab(agent: &AgentId) -> SessionIntent {
 /// choose for itself.
 ///
 /// An [`SessionIntent::Untracked`] tab has nothing to look up. A `Tracked` one
-/// asks the agent's own store: a session that is there is resumed, and one that
-/// is not is started fresh **under the same id**, which is what keeps a tab that
-/// was opened and never typed in from coming back broken — Claude writes its
-/// transcript only after the first message. A `Fork` one asks the store for its
-/// source and branches off it.
+/// asks the store on the project's host: a session that is there is resumed,
+/// and one that is not is started fresh **under the same id**, which is what
+/// keeps a tab that was opened and never typed in from coming back broken --
+/// Claude writes its transcript only after the first message. A `Fork` one asks
+/// the host for its source and branches off it.
 ///
-/// A store that cannot be read lands a `Tracked` tab on `Fresh`, which spawns the
-/// agent with no session arguments: the same thing every tab did before this
-/// feature existed, so the worst case is the old behaviour rather than a dead
-/// tab. A `Fork` has nothing to fall back to, so it lands on `Gone`.
+/// The host decides, never the id the tab remembers: for a remote project that
+/// id may be one the remote CLI never received, and only the remote store can
+/// say. A host that cannot be asked lands a `Tracked` tab on `Fresh`, which
+/// spawns the agent with no session arguments: the same thing every tab did
+/// before this feature existed, so the worst case is the old behaviour rather
+/// than a dead tab. A `Fork` has nothing to fall back to, so it lands on `Gone`.
 async fn resolve_session(
     agent: &AgentId,
     intent: &SessionIntent,
     anchor: Option<SessionSummary>,
     default_cwd: Option<std::path::PathBuf>,
+    session_host: Option<AgentSessionHost>,
     cx: &mut gpui::AsyncApp,
 ) -> SessionStart {
+    let Some(host) = session_host else {
+        return hostless_session_start(intent);
+    };
     let id = match intent {
         SessionIntent::Untracked => return SessionStart::Fresh,
         SessionIntent::Tracked(id) | SessionIntent::Fork(id) => id.to_string(),
     };
     let Some(kind) = AgentKind::from_builtin_agent_id(agent.as_ref()) else {
-        // A user-configured agent: this editor reads three stores and has no
-        // business guessing at a fourth's.
+        // A user-configured agent: this editor reads four stores and has no
+        // business guessing at a fifth's.
         return SessionStart::Fresh;
     };
-    let provider = agent_sessions::provider_for(kind);
-    let intent = intent.clone();
-    cx.background_spawn(async move {
-        let lookup = lookup_session(provider.as_ref(), &id, anchor);
-        start_after_lookup(provider.as_ref(), &intent, default_cwd, &id, lookup)
-    })
-    .await
+    let lookup = cx
+        .update(|cx| host.find_pinned(kind, &id, anchor, cx))
+        .await;
+    // Asked only to spell the command line, which it builds from the summary
+    // without reading anything.
+    let commands = agent_sessions::provider_for(kind);
+    start_after_lookup(commands.as_ref(), intent, default_cwd, &id, lookup)
 }
 
-/// The session a tab starts from: the store's answer for the id, unless the tab
-/// was pinned to a particular copy of it.
-///
-/// Asked for an id that two transcripts carry, the store answers with whichever
-/// it reaches first, and the tab would then run the CLI in *that* one's
-/// directory -- possibly outside every folder the person who vetted the other
-/// copy checked. So when the answer is not the pinned copy, the pinned copy wins,
-/// provided its transcript is still on disk: one deleted since is a session that
-/// is gone, and answering with another copy in its place would be the same
-/// substitution.
-///
-/// The store still gets the first word on whether the session exists at all. A
-/// store that keeps sessions as rows, whose transcript can be missing while the
-/// session is not, is not second-guessed by a file check.
-fn lookup_session(
-    provider: &dyn agent_sessions::SessionProvider,
-    id: &str,
-    anchor: Option<SessionSummary>,
-) -> anyhow::Result<Option<SessionSummary>> {
-    match (anchor, provider.find(id)?) {
-        (None, found) => Ok(found),
-        // Nothing holds the id any more, whichever copy was pinned.
-        (Some(_), None) => Ok(None),
-        (Some(anchor), Some(found)) => {
-            if found.cwd == anchor.cwd && found.log_path == anchor.log_path {
-                return Ok(Some(found));
-            }
-            let still_there = anchor.log_path.as_ref().is_none_or(|path| path.is_file());
-            Ok(still_there.then_some(anchor))
-        }
+/// What a tab with no host to ask starts as: a collaboration guest's, whose
+/// sessions are on a collaborator's machine. A tracked tab starts fresh rather
+/// than relaunching under `--session-id <its id>`, which collides once that CLI
+/// has written the session; a fork, which has no source it can read, is gone.
+fn hostless_session_start(intent: &SessionIntent) -> SessionStart {
+    match intent {
+        SessionIntent::Untracked | SessionIntent::Tracked(_) => SessionStart::Fresh,
+        SessionIntent::Fork(_) => SessionStart::Gone,
     }
 }
 
@@ -2345,6 +2375,7 @@ impl AgentView {
 async fn resolve_bypass(
     agent: &AgentId,
     binary: &std::path::Path,
+    host: Option<&BypassHost>,
     cwd: Option<&std::path::Path>,
     prompts: PermissionPrompts,
     store: &Entity<AgentServerStore>,
@@ -2359,7 +2390,7 @@ async fn resolve_bypass(
     let wanted = match prompts {
         PermissionPrompts::SkipOnce => true,
         PermissionPrompts::AsConfigured => {
-            let Some(cwd) = cwd else {
+            let (Some(cwd), Some(host)) = (cwd, host) else {
                 return Ok(Vec::new());
             };
             let bypass = cx.update(|_, cx| PermissionBypassStore::global(cx));
@@ -2367,7 +2398,7 @@ async fn resolve_bypass(
                 return Ok(Vec::new());
             };
             bypass.update(cx, |bypass, cx| bypass.load(cx)).await;
-            bypass.read_with(cx, |bypass, _| bypass.is_enabled(cwd))
+            bypass.read_with(cx, |bypass, _| bypass.is_enabled(host, cwd))
         }
     };
     if !wanted {
@@ -3109,8 +3140,11 @@ mod tests {
         // Enabled first. Without this the `set(.., false)` below removes nothing
         // and the store never reaches the state this test is named for -- it
         // would still go red against a render-time lookup, but by accident.
-        store.update(cx, |store, cx| store.set(checkout, anchor, true, cx));
-        store.update(cx, |store, cx| store.set(checkout, anchor, false, cx));
+        let host = crate::BypassHost::Local;
+        store.update(cx, |store, cx| store.set(&host, checkout, anchor, true, cx));
+        store.update(cx, |store, cx| {
+            store.set(&host, checkout, anchor, false, cx)
+        });
 
         view.read_with(cx, |view, _| {
             assert!(
@@ -3857,6 +3891,7 @@ mod tests {
             mode: AgentViewMode::Terminal,
             state: State::Starting,
             project: project.clone(),
+            session_host: Some(AgentSessionHost::Local(Vec::new())),
             workspace: workspace.downgrade(),
             focus_handle: cx.focus_handle(),
             self_handle: cx.entity().downgrade(),
@@ -4453,6 +4488,7 @@ mod tests {
             mode: AgentViewMode::Terminal,
             state: State::Terminal(terminal_view.clone()),
             project: project.clone(),
+            session_host: Some(AgentSessionHost::Local(Vec::new())),
             workspace: workspace.downgrade(),
             focus_handle: cx.focus_handle(),
             self_handle: cx.entity().downgrade(),
@@ -5410,6 +5446,49 @@ mod tests {
             cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
         let workspace = multi_workspace.read_with(cx, |multi, _| multi.workspace().clone());
         (workspace, project, cx)
+    }
+
+    /// Built through the real constructor, so what is checked is the decision
+    /// a launched tab carries: a tracked tab of a project with a host to ask
+    /// follows its transcript there, and the same tab of a collaboration
+    /// guest's project, whose sessions are on a machine nothing here can ask,
+    /// follows none.
+    #[gpui::test]
+    async fn a_tab_of_a_guest_project_never_follows_a_transcript(cx: &mut TestAppContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let tracked_tab = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                cx.new(|cx| {
+                    AgentView::new(
+                        AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                        AgentViewMode::Terminal,
+                        project.clone(),
+                        workspace.downgrade(),
+                        SessionOrigin::new(SessionIntent::Tracked("0b1c".into()), None),
+                        PermissionPrompts::AsConfigured,
+                        window,
+                        cx,
+                    )
+                })
+            })
+        };
+
+        let local = tracked_tab(cx);
+        assert!(
+            local.read_with(cx, |view, _| view.follows_transcript()),
+            "the fixture must be a tab that follows its transcript when local"
+        );
+
+        project.update(cx, |project, _| project.mark_as_collab_for_testing());
+        let remote = tracked_tab(cx);
+        remote.read_with(cx, |view, _| {
+            assert!(view.session_host.is_none());
+            assert!(
+                !view.follows_transcript(),
+                "a tab whose transcript no host here can read must not follow one"
+            );
+        });
+        cx.run_until_parked();
     }
 
     fn open_claude(workspace: &Entity<Workspace>, cx: &mut gpui::VisualTestContext) {
@@ -6623,11 +6702,11 @@ mod tests {
             assert!(view.read_with(cx, |view, _| view.needs_attention()));
         }
 
-        /// A provider that, asked for the id, answers with a copy other than the
-        /// one the caller vetted.
-        struct AnswersWithAnotherCopy(Option<agent_sessions::SessionSummary>);
+        /// A store that, asked for any id, answers with the copy it was given,
+        /// or fails when it was given none to fail with.
+        struct HostStore(anyhow::Result<Option<agent_sessions::SessionSummary>>);
 
-        impl SessionProvider for AnswersWithAnotherCopy {
+        impl SessionProvider for HostStore {
             fn agent(&self) -> AgentKind {
                 AgentKind::Claude
             }
@@ -6635,10 +6714,13 @@ mod tests {
                 agent_sessions::Availability::Ready
             }
             fn list(&self) -> anyhow::Result<Vec<agent_sessions::SessionSummary>> {
-                Ok(self.0.iter().cloned().collect())
+                Ok(Vec::new())
             }
             fn find(&self, _id: &str) -> anyhow::Result<Option<agent_sessions::SessionSummary>> {
-                Ok(self.0.clone())
+                match &self.0 {
+                    Ok(found) => Ok(found.clone()),
+                    Err(error) => Err(anyhow::anyhow!("{error}")),
+                }
             }
             fn new_session_command(
                 &self,
@@ -6655,14 +6737,10 @@ mod tests {
             }
             fn resume_command(
                 &self,
-                session: &agent_sessions::SessionSummary,
+                _session: &agent_sessions::SessionSummary,
                 _fork: Fork,
             ) -> Option<AgentCommand> {
-                Some(AgentCommand {
-                    program: "claude".into(),
-                    args: vec!["--resume".into(), session.id.to_string()],
-                    cwd: session.cwd.clone(),
-                })
+                None
             }
             fn deletion(
                 &self,
@@ -6670,6 +6748,12 @@ mod tests {
             ) -> agent_sessions::Deletion {
                 agent_sessions::Deletion::Nothing
             }
+        }
+
+        fn host_holding(
+            found: anyhow::Result<Option<agent_sessions::SessionSummary>>,
+        ) -> Option<AgentSessionHost> {
+            Some(AgentSessionHost::Local(vec![Arc::new(HostStore(found))]))
         }
 
         fn copy(cwd: &str, log: Option<PathBuf>) -> agent_sessions::SessionSummary {
@@ -6680,84 +6764,322 @@ mod tests {
             }
         }
 
-        /// The same id under two project directories: the host vetted one, and
-        /// the store, asked by id, answers with the other.
-        #[test]
-        fn a_tab_runs_the_copy_that_was_vetted_and_not_the_one_a_lookup_finds_first() {
+        async fn resolve(
+            intent: SessionIntent,
+            anchor: Option<agent_sessions::SessionSummary>,
+            host: Option<AgentSessionHost>,
+            cx: &mut TestAppContext,
+        ) -> SessionStart {
+            resolve_session(
+                &AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                &intent,
+                anchor,
+                Some(PathBuf::from("/default")),
+                host,
+                &mut cx.to_async(),
+            )
+            .await
+        }
+
+        fn args_of(start: SessionStart) -> Option<(Vec<String>, PathBuf)> {
+            match start {
+                SessionStart::Command(command) => Some((command.args, command.cwd)),
+                SessionStart::Fresh | SessionStart::Gone => None,
+            }
+        }
+
+        /// The host is where the session is, and for a remote project that is
+        /// not this machine: what its store holds decides, never this one's.
+        #[gpui::test]
+        async fn a_tracked_tab_resumes_the_session_its_host_holds(cx: &mut TestAppContext) {
+            let on_host = copy("/home/u/project", None);
+            let start = resolve(
+                SessionIntent::Tracked(ONE.into()),
+                None,
+                host_holding(Ok(Some(on_host))),
+                cx,
+            )
+            .await;
+            assert_eq!(
+                args_of(start),
+                Some((
+                    vec!["--resume".to_string(), ONE.to_string()],
+                    PathBuf::from("/home/u/project")
+                )),
+                "the session the host holds is resumed where it ran"
+            );
+        }
+
+        #[gpui::test]
+        async fn a_fork_branches_off_the_source_its_host_holds(cx: &mut TestAppContext) {
+            let source = copy("/home/u/project", None);
+            let start = resolve(
+                SessionIntent::Fork(ONE.into()),
+                Some(source.clone()),
+                host_holding(Ok(Some(source))),
+                cx,
+            )
+            .await;
+            assert_eq!(
+                args_of(start),
+                Some((
+                    vec![
+                        "--resume".to_string(),
+                        ONE.to_string(),
+                        "--fork-session".to_string()
+                    ],
+                    PathBuf::from("/home/u/project")
+                ))
+            );
+        }
+
+        /// A stored id is a claim, not a fact: the host says whether the CLI
+        /// ever wrote that session. One it does not hold starts under the id,
+        /// so the tab's next restart finds it.
+        #[gpui::test]
+        async fn a_tracked_tab_its_host_holds_nothing_for_starts_under_its_id(
+            cx: &mut TestAppContext,
+        ) {
+            let start = resolve(
+                SessionIntent::Tracked(ONE.into()),
+                None,
+                host_holding(Ok(None)),
+                cx,
+            )
+            .await;
+            assert_eq!(
+                args_of(start),
+                Some((
+                    vec!["--session-id".to_string(), ONE.to_string()],
+                    PathBuf::from("/default")
+                ))
+            );
+        }
+
+        #[gpui::test]
+        async fn a_host_that_cannot_answer_starts_a_tab_fresh_and_loses_a_fork(
+            cx: &mut TestAppContext,
+        ) {
+            let tracked = resolve(
+                SessionIntent::Tracked(ONE.into()),
+                None,
+                host_holding(Err(anyhow::anyhow!("the remote server did not answer"))),
+                cx,
+            )
+            .await;
+            assert!(matches!(tracked, SessionStart::Fresh));
+            let fork = resolve(
+                SessionIntent::Fork(ONE.into()),
+                None,
+                host_holding(Err(anyhow::anyhow!("the remote server did not answer"))),
+                cx,
+            )
+            .await;
+            assert!(matches!(fork, SessionStart::Gone));
+        }
+
+        /// A collaboration guest's sessions are on a collaborator's machine,
+        /// which nothing here can ask: nothing is looked up, anywhere.
+        #[gpui::test]
+        async fn a_tab_with_no_host_to_ask_starts_fresh_and_a_fork_is_gone(
+            cx: &mut TestAppContext,
+        ) {
+            assert!(matches!(
+                resolve(SessionIntent::Tracked(ONE.into()), None, None, cx).await,
+                SessionStart::Fresh
+            ));
+            assert!(matches!(
+                resolve(SessionIntent::Fork(ONE.into()), None, None, cx).await,
+                SessionStart::Gone
+            ));
+            assert!(matches!(
+                resolve(SessionIntent::Untracked, None, None, cx).await,
+                SessionStart::Fresh
+            ));
+        }
+
+        /// The same id under two project directories: the tab was opened onto
+        /// one, and the host, asked by id, answers with the other.
+        #[gpui::test]
+        async fn a_tab_runs_the_copy_that_was_vetted_and_not_the_one_a_lookup_finds_first(
+            cx: &mut TestAppContext,
+        ) {
             let directory = tempfile::tempdir().unwrap();
             let vetted_log = directory.path().join("vetted.jsonl");
             std::fs::write(&vetted_log, "{}\n").unwrap();
             let vetted = copy("/inside/an/open/folder", Some(vetted_log));
             let other = copy("/outside/every/open/folder", None);
-            let provider = AnswersWithAnotherCopy(Some(other.clone()));
 
+            let start = resolve(
+                SessionIntent::Tracked(ONE.into()),
+                Some(vetted),
+                host_holding(Ok(Some(other))),
+                cx,
+            )
+            .await;
             assert_eq!(
-                lookup_session(&provider, ONE, None).unwrap(),
-                Some(other),
-                "with nothing pinned the store's answer stands"
-            );
-
-            let found = lookup_session(&provider, ONE, Some(vetted.clone())).unwrap();
-            assert_eq!(found, Some(vetted));
-
-            let SessionStart::Command(command) =
-                session_start(&provider, ONE, Some(PathBuf::from("/default")), found)
-            else {
-                panic!("a session the store holds is resumed");
-            };
-            assert_eq!(
-                command.cwd,
-                PathBuf::from("/inside/an/open/folder"),
+                args_of(start).map(|(_, cwd)| cwd),
+                Some(PathBuf::from("/inside/an/open/folder")),
                 "the CLI runs where the vetted copy ran"
             );
         }
 
-        #[test]
-        fn a_vetted_copy_whose_transcript_has_gone_is_not_replaced_by_another() {
-            let directory = tempfile::tempdir().unwrap();
-            let vetted = copy("/inside", Some(directory.path().join("deleted.jsonl")));
-            let provider = AnswersWithAnotherCopy(Some(copy("/outside", None)));
-
-            assert_eq!(
-                lookup_session(&provider, ONE, Some(vetted)).unwrap(),
-                None,
-                "a copy nobody vetted is not what the host agreed to start"
-            );
+        /// A transcript that grows by a hundred bytes per read, and remembers
+        /// where each read began -- or fails every read, when told to.
+        struct GrowingTranscript {
+            reads_from: Arc<std::sync::Mutex<Vec<u64>>>,
+            failing: bool,
         }
 
-        /// A store whose sessions are rows can have a session with no transcript
-        /// on disk, and its own answer is the one that counts.
-        #[test]
-        fn a_vetted_session_with_no_transcript_file_of_its_own_still_stands() {
-            let vetted = copy("/inside", None);
-            let provider = AnswersWithAnotherCopy(Some(copy("/outside", None)));
-            assert_eq!(
-                lookup_session(&provider, ONE, Some(vetted.clone())).unwrap(),
-                Some(vetted),
-            );
-        }
-
-        #[test]
-        fn a_vetted_copy_the_store_agrees_on_is_the_stores_own_summary() {
-            let vetted = copy("/inside", Some(PathBuf::from("/nowhere/at/all.jsonl")));
-            let fresher = agent_sessions::SessionSummary {
-                title: "retitled since".into(),
-                ..vetted.clone()
-            };
-            let provider = AnswersWithAnotherCopy(Some(fresher.clone()));
-            assert_eq!(
-                lookup_session(&provider, ONE, Some(vetted)).unwrap(),
-                Some(fresher),
-                "the same copy, so the store's word on it stands, even with its file out of sight"
-            );
-        }
-
-        #[test]
-        fn a_session_the_store_no_longer_holds_is_gone_whatever_was_vetted() {
-            let provider = AnswersWithAnotherCopy(None);
-            assert_eq!(
-                lookup_session(&provider, ONE, Some(copy("/inside", None))).unwrap(),
+        impl SessionProvider for GrowingTranscript {
+            fn agent(&self) -> AgentKind {
+                AgentKind::Claude
+            }
+            fn availability(&self) -> agent_sessions::Availability {
+                agent_sessions::Availability::Ready
+            }
+            fn list(&self) -> anyhow::Result<Vec<agent_sessions::SessionSummary>> {
+                Ok(Vec::new())
+            }
+            fn find(&self, id: &str) -> anyhow::Result<Option<agent_sessions::SessionSummary>> {
+                Ok(Some(summary(AgentKind::Claude, id)))
+            }
+            fn new_session_command(
+                &self,
+                _id: &str,
+                _cwd: &std::path::Path,
+            ) -> Option<AgentCommand> {
                 None
+            }
+            fn counts(
+                &self,
+                _session: &agent_sessions::SessionSummary,
+            ) -> anyhow::Result<agent_sessions::SessionCounts> {
+                Ok(agent_sessions::SessionCounts::default())
+            }
+            fn transcript_progress(
+                &self,
+                _session: &agent_sessions::SessionSummary,
+                from: u64,
+            ) -> anyhow::Result<agent_sessions::TranscriptProgress> {
+                if let Ok(mut reads_from) = self.reads_from.lock() {
+                    reads_from.push(from);
+                }
+                if self.failing {
+                    anyhow::bail!("the remote server did not answer within 30s");
+                }
+                Ok(agent_sessions::TranscriptProgress {
+                    scanned_to: from + 100,
+                    ..agent_sessions::TranscriptProgress::default()
+                })
+            }
+            fn reports_turns(&self) -> bool {
+                true
+            }
+            fn resume_command(
+                &self,
+                _session: &agent_sessions::SessionSummary,
+                _fork: Fork,
+            ) -> Option<AgentCommand> {
+                None
+            }
+            fn deletion(
+                &self,
+                _session: &agent_sessions::SessionSummary,
+            ) -> agent_sessions::Deletion {
+                agent_sessions::Deletion::Nothing
+            }
+        }
+
+        /// Starts the subagent loop of a live tab whose sessions are on
+        /// `provider`'s host, and says where each read of the transcript began.
+        async fn tracking_through(
+            failing: bool,
+            cx: &mut TestAppContext,
+        ) -> (
+            Entity<AgentView>,
+            Arc<std::sync::Mutex<Vec<u64>>>,
+            &mut gpui::VisualTestContext,
+        ) {
+            let (workspace, project, cx) = workspace_with_agents(cx).await;
+            let view = resumed_tab(&workspace, &project, tracked(ONE), cx);
+            let reads_from: Arc<std::sync::Mutex<Vec<u64>>> = Arc::default();
+            let host = AgentSessionHost::Local(vec![Arc::new(GrowingTranscript {
+                reads_from: reads_from.clone(),
+                failing,
+            })]);
+            view.update(cx, |view, cx| {
+                view.session_host = Some(host);
+                view.simulate_cli_alive(true, cx);
+                view.track_subagents(cx);
+            });
+            cx.run_until_parked();
+            (view, reads_from, cx)
+        }
+
+        fn reads(reads_from: &Arc<std::sync::Mutex<Vec<u64>>>) -> Vec<u64> {
+            reads_from
+                .lock()
+                .map(|reads_from| reads_from.clone())
+                .unwrap_or_default()
+        }
+
+        /// The tab asks its own host, once per beat, from where the last
+        /// answer stopped -- never a second request while one is out, and never
+        /// the whole transcript again.
+        #[gpui::test]
+        async fn a_tab_reads_its_hosts_transcript_once_a_beat_from_where_it_stopped(
+            cx: &mut TestAppContext,
+        ) {
+            let (_view, reads_from, cx) = tracking_through(false, cx).await;
+            assert_eq!(reads(&reads_from), vec![0], "the first pass runs at once");
+
+            for _ in 0..3 {
+                cx.executor().advance_clock(SUBAGENT_SCAN_EVERY);
+                cx.run_until_parked();
+            }
+
+            assert_eq!(reads(&reads_from), vec![0, 100, 200, 300]);
+        }
+
+        /// A host that does not answer is asked again on the next beat and no
+        /// sooner: a failure does not turn the loop into a spin.
+        #[gpui::test]
+        async fn a_host_that_fails_every_read_is_asked_once_a_beat(cx: &mut TestAppContext) {
+            let (_view, reads_from, cx) = tracking_through(true, cx).await;
+            for _ in 0..3 {
+                cx.executor().advance_clock(SUBAGENT_SCAN_EVERY);
+                cx.run_until_parked();
+            }
+            assert_eq!(
+                reads(&reads_from),
+                vec![0, 0, 0, 0],
+                "one read per beat, each from where nothing was read"
+            );
+        }
+
+        /// A project cut off from its host has nothing to answer with: every
+        /// request would wait out its deadline on a link that is down.
+        #[gpui::test]
+        async fn a_disconnected_project_is_not_asked_for_its_transcript(cx: &mut TestAppContext) {
+            let (view, reads_from, cx) = tracking_through(false, cx).await;
+            assert_eq!(reads(&reads_from), vec![0]);
+            let project = view.read_with(cx, |view, _| view.project.clone());
+            project.update(cx, |project, cx| {
+                project.mark_as_collab_for_testing();
+                project.disconnected_from_host(cx);
+            });
+            assert!(project.read_with(cx, |project, cx| project.is_disconnected(cx)));
+
+            for _ in 0..3 {
+                cx.executor().advance_clock(SUBAGENT_SCAN_EVERY);
+                cx.run_until_parked();
+            }
+
+            assert_eq!(
+                reads(&reads_from),
+                vec![0],
+                "nothing is read while the host is out of reach"
             );
         }
 
@@ -6803,10 +7125,13 @@ mod tests {
                 ..summary(AgentKind::Claude, ONE)
             };
 
-            let refusal = cx
-                .update(|_, cx| crate::resume_refusal_in_background(&session, Fork::Continue, cx));
+            let host = project::agent_session_host::AgentSessionHost::Local(
+                agent_sessions::default_providers(),
+            );
+            let refusal =
+                cx.update(|_, cx| crate::resume_refusal_on(&host, &session, Fork::Continue, cx));
             assert!(!refusal.is_ready(), "nothing was stat-ed on this thread");
-            assert_eq!(refusal.await, None);
+            assert_eq!(refusal.await.expect("this machine answers"), None);
         }
 
         #[gpui::test]

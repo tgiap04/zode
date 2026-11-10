@@ -8,8 +8,8 @@
 
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt as _};
-use std::io;
-use util::command::Command;
+use std::sync::Arc;
+use util::command::{Command, CommandHost};
 
 use crate::backend::{BackendEvent, BackendKind, ContainerBackend, ContainerError};
 use crate::docker_resources::{ComposeProject, DockerImage, DockerNetwork, DockerVolume};
@@ -56,20 +56,25 @@ pub struct DockerBackend {
     /// because every command below is spelled the same for both.
     program: String,
     kind: BackendKind,
+    /// The machine the engine is asked on: this one, or a remote project's
+    /// host. Every command below is built through it.
+    host: Arc<dyn CommandHost>,
 }
 
 impl DockerBackend {
-    pub fn docker() -> Self {
+    pub fn docker(host: Arc<dyn CommandHost>) -> Self {
         Self {
             program: "docker".into(),
             kind: BackendKind::Docker,
+            host,
         }
     }
 
-    pub fn podman() -> Self {
+    pub fn podman(host: Arc<dyn CommandHost>) -> Self {
         Self {
             program: "podman".into(),
             kind: BackendKind::Podman,
+            host,
         }
     }
 
@@ -81,13 +86,12 @@ impl DockerBackend {
         Self {
             program: program.into(),
             kind,
+            host: Arc::new(util::command::LocalCommandHost),
         }
     }
 
-    fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(&self.program);
-        command.args(args);
-        command
+    fn command(&self, args: &[&str]) -> Result<Command, ContainerError> {
+        crate::backend::host_command(self.host.as_ref(), &self.program, args)
     }
 
     /// Runs a command and hands back stdout, classifying the ways it can fail.
@@ -97,27 +101,25 @@ impl DockerBackend {
     /// spawn itself, and a live binary that cannot reach its daemon is confirmed
     /// by asking `info` -- which only happens on the error path, so the common
     /// case pays nothing for it.
-    async fn stdout(&self, mut command: Command) -> Result<String, ContainerError> {
-        let output = match command.output().await {
-            Ok(output) => output,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(ContainerError::EngineMissing {
-                    program: self.program.clone(),
-                });
-            }
-            Err(error) => {
-                return Err(ContainerError::CommandFailed {
-                    program: self.program.clone(),
-                    stderr: error.to_string(),
-                });
-            }
-        };
+    async fn stdout(&self, args: &[&str]) -> Result<String, ContainerError> {
+        let mut command = self.command(args)?;
+        let output = command.output().await.map_err(|error| {
+            crate::backend::spawn_failure(self.host.as_ref(), &self.program, error)
+        })?;
 
         if output.status.success() {
             return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
         }
 
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        if let Some(error) = crate::backend::exit_failure(
+            self.host.as_ref(),
+            &self.program,
+            output.status.code(),
+            &stderr,
+        ) {
+            return Err(error);
+        }
         if !self.daemon_answers().await {
             return Err(ContainerError::EngineNotRunning {
                 program: self.program.clone(),
@@ -131,10 +133,19 @@ impl DockerBackend {
 
     /// Whether the daemon is reachable at all.
     async fn daemon_answers(&self) -> bool {
-        let mut command = self.command(&["info", "--format", "{{.ServerVersion}}"]);
+        let mut command = match self.command(&["info", "--format", "{{.ServerVersion}}"]) {
+            Ok(command) => command,
+            Err(error) => {
+                log::warn!("could not ask whether {} answers: {error}", self.program);
+                return false;
+            }
+        };
         match command.output().await {
             Ok(output) => output.status.success(),
-            Err(_) => false,
+            Err(error) => {
+                log::warn!("could not ask whether {} answers: {error}", self.program);
+                false
+            }
         }
     }
 }
@@ -174,7 +185,7 @@ impl DockerBackend {
         let mut targets = Vec::new();
 
         let images = self
-            .stdout(self.command(&["images", "-f", "dangling=true", "--format", "{{json .}}"]))
+            .stdout(&["images", "-f", "dangling=true", "--format", "{{json .}}"])
             .await?;
         targets.extend(
             parse_json_lines::<DockerImage>(&images)
@@ -183,7 +194,7 @@ impl DockerBackend {
         );
 
         let stopped = self
-            .stdout(self.command(&[
+            .stdout(&[
                 "ps",
                 "-a",
                 "-f",
@@ -192,7 +203,7 @@ impl DockerBackend {
                 "status=created",
                 "--format",
                 "{{json .}}",
-            ]))
+            ])
             .await?;
         targets.extend(
             parse_json_lines::<DockerContainer>(&stopped)
@@ -202,14 +213,14 @@ impl DockerBackend {
 
         if scope.includes_volumes() {
             let volumes = self
-                .stdout(self.command(&[
+                .stdout(&[
                     "volume",
                     "ls",
                     "-f",
                     "dangling=true",
                     "--format",
                     "{{json .}}",
-                ]))
+                ])
                 .await?;
             targets.extend(
                 parse_json_lines::<DockerVolume>(&volumes)
@@ -274,18 +285,14 @@ impl ContainerBackend for DockerBackend {
     async fn list(&self, kind: ResourceKind) -> Result<Vec<Resource>, ContainerError> {
         match kind {
             ResourceKind::Container => {
-                let stdout = self
-                    .stdout(self.command(&["ps", "-a", "--format", "{{json .}}"]))
-                    .await?;
+                let stdout = self.stdout(&["ps", "-a", "--format", "{{json .}}"]).await?;
                 Ok(parse_json_lines::<DockerContainer>(&stdout)
                     .into_iter()
                     .map(DockerContainer::into_resource)
                     .collect())
             }
             ResourceKind::Image => {
-                let stdout = self
-                    .stdout(self.command(&["images", "--format", "{{json .}}"]))
-                    .await?;
+                let stdout = self.stdout(&["images", "--format", "{{json .}}"]).await?;
                 Ok(parse_json_lines::<DockerImage>(&stdout)
                     .into_iter()
                     .map(DockerImage::into_resource)
@@ -293,7 +300,7 @@ impl ContainerBackend for DockerBackend {
             }
             ResourceKind::Volume => {
                 let stdout = self
-                    .stdout(self.command(&["volume", "ls", "--format", "{{json .}}"]))
+                    .stdout(&["volume", "ls", "--format", "{{json .}}"])
                     .await?;
                 Ok(parse_json_lines::<DockerVolume>(&stdout)
                     .into_iter()
@@ -302,7 +309,7 @@ impl ContainerBackend for DockerBackend {
             }
             ResourceKind::Network => {
                 let stdout = self
-                    .stdout(self.command(&["network", "ls", "--format", "{{json .}}"]))
+                    .stdout(&["network", "ls", "--format", "{{json .}}"])
                     .await?;
                 Ok(parse_json_lines::<DockerNetwork>(&stdout)
                     .into_iter()
@@ -314,9 +321,7 @@ impl ContainerBackend for DockerBackend {
             // follows podman's documented output. Anyone with podman should check
             // it -- Phase 08's success criteria record that as an open debt.
             ResourceKind::Pod if self.kind == BackendKind::Podman => {
-                let stdout = self
-                    .stdout(self.command(&["pod", "ps", "--format", "json"]))
-                    .await?;
+                let stdout = self.stdout(&["pod", "ps", "--format", "json"]).await?;
                 // An array, like `docker compose ls`, not one object per line.
                 let pods: Vec<PodmanPod> =
                     serde_json::from_str(stdout.trim()).map_err(|error| ContainerError::Parse {
@@ -329,9 +334,7 @@ impl ContainerBackend for DockerBackend {
                 // than an object per line, so it needs `from_str` and not the
                 // stream reader. Observed on Docker 29.4.3: `[]` with no
                 // projects.
-                let stdout = self
-                    .stdout(self.command(&["compose", "ls", "--format", "json"]))
-                    .await?;
+                let stdout = self.stdout(&["compose", "ls", "--format", "json"]).await?;
                 let projects: Vec<ComposeProject> =
                     serde_json::from_str(stdout.trim()).map_err(|error| ContainerError::Parse {
                         detail: format!("could not read `docker compose ls` output: {error}"),
@@ -378,7 +381,7 @@ impl ContainerBackend for DockerBackend {
         } else {
             vec![verb, "--", id]
         };
-        self.stdout(self.command(&args)).await?;
+        self.stdout(&args).await?;
         Ok(())
     }
 
@@ -409,7 +412,7 @@ impl ContainerBackend for DockerBackend {
                 for target in plan.targets() {
                     let args = remove_args(kind, &target.id)?;
                     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-                    self.stdout(self.command(&borrowed)).await?;
+                    self.stdout(&borrowed).await?;
                 }
                 Ok(())
             }
@@ -420,7 +423,7 @@ impl ContainerBackend for DockerBackend {
                 if scope.includes_volumes() {
                     args.push("--volumes");
                 }
-                self.stdout(self.command(&args)).await?;
+                self.stdout(&args).await?;
                 Ok(())
             }
         }
@@ -487,7 +490,13 @@ impl ContainerBackend for DockerBackend {
     /// A list is cheap to re-read and an incremental update that drifts out of
     /// step with the engine is worse than a refresh.
     fn watch(&self) -> Option<BoxStream<'static, BackendEvent>> {
-        let command = self.command(&["events", "--format", "{{json .}}"]);
+        let command = match self.command(&["events", "--format", "{{json .}}"]) {
+            Ok(command) => command,
+            Err(error) => {
+                log::warn!("could not start an event stream: {error}");
+                return None;
+            }
+        };
         let values = crate::event_stream::json_values::<DockerEvent>(command)?;
         Some(
             values

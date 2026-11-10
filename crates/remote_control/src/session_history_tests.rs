@@ -7,15 +7,18 @@ use std::{
 use agent_sessions::{AgentKind, SessionSummary};
 use gpui::{TestAppContext, UpdateGlobal as _};
 use remote_relay_protocol::{
-    Control, MAX_INNER_PAYLOAD_LEN, SessionCursor, SessionEntry, encode_control,
+    Control, MAX_INNER_PAYLOAD_LEN, SessionCursor, SessionEntry, UnavailableHost, encode_control,
+    host_status,
 };
 use settings::{Settings as _, SettingsStore, WorktreeId};
+use util::paths::PathStyle;
+use workspace::RemoteConnectionIdentity;
 use worktree::WorktreeSettings;
 
 use crate::session_history::{
-    DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, RootScope, clamp_limit, clip, deepest_root_index,
-    is_plausible_session_id, open_roots, opened_a_tab, page, resume_toast, session_replies,
-    wire_agent,
+    DEFAULT_PAGE_LIMIT, HostSessions, HostToken, MAX_PAGE_LIMIT, RootHost, RootScope, clamp_limit,
+    clip, deepest_root_index, host_notice, is_plausible_session_id, open_roots, opened_a_tab, page,
+    page_across, parse_wire_id, resume_toast, session_replies, wire_agent, wire_id,
 };
 
 fn session(id: &str, cwd: &str, secs: u64) -> SessionSummary {
@@ -40,6 +43,8 @@ fn root(worktree_id: u64, path: &str, name: &str) -> RootScope {
         path: PathBuf::from(path),
         name: name.to_string(),
         hidden: None,
+        host: None,
+        path_style: PathStyle::local(),
     }
 }
 
@@ -184,21 +189,24 @@ fn the_deepest_open_folder_holding_a_directory_owns_it() {
         root(2, "/a/zode/crates/terminal", "terminal"),
     ];
     assert_eq!(
-        deepest_root_index(&roots, Path::new("/a/zode/crates/terminal/src")),
+        deepest_root_index(&roots, None, Path::new("/a/zode/crates/terminal/src")),
         Some(1)
     );
     assert_eq!(
-        deepest_root_index(&roots, Path::new("/a/zode/crates/ui")),
+        deepest_root_index(&roots, None, Path::new("/a/zode/crates/ui")),
         Some(0)
     );
-    assert_eq!(deepest_root_index(&roots, Path::new("/a/zode")), Some(0));
+    assert_eq!(
+        deepest_root_index(&roots, None, Path::new("/a/zode")),
+        Some(0)
+    );
 }
 
 #[test]
 fn a_sibling_whose_name_starts_the_same_is_not_inside() {
     let only_zode = [root(1, "/a/zode", "zode")];
     assert_eq!(
-        deepest_root_index(&only_zode, Path::new("/a/zode-kit/web")),
+        deepest_root_index(&only_zode, None, Path::new("/a/zode-kit/web")),
         None
     );
     let both = [
@@ -206,25 +214,35 @@ fn a_sibling_whose_name_starts_the_same_is_not_inside() {
         root(2, "/a/zode-kit", "zode-kit"),
     ];
     assert_eq!(
-        deepest_root_index(&both, Path::new("/a/zode-kit/web")),
+        deepest_root_index(&both, None, Path::new("/a/zode-kit/web")),
         Some(1)
     );
 }
 
 #[test]
 fn nothing_open_or_nothing_near_means_no_owner() {
-    assert_eq!(deepest_root_index(&[], Path::new("/a/zode")), None);
+    assert_eq!(deepest_root_index(&[], None, Path::new("/a/zode")), None);
     let roots = [root(1, "/a/zode", "zode")];
-    assert_eq!(deepest_root_index(&roots, Path::new("/elsewhere")), None);
-    assert_eq!(deepest_root_index(&roots, Path::new("relative/zode")), None);
-    assert_eq!(deepest_root_index(&roots, Path::new("")), None);
+    assert_eq!(
+        deepest_root_index(&roots, None, Path::new("/elsewhere")),
+        None
+    );
+    assert_eq!(
+        deepest_root_index(&roots, None, Path::new("relative/zode")),
+        None
+    );
+    assert_eq!(deepest_root_index(&roots, None, Path::new("")), None);
 }
 
 #[test]
 fn a_directory_that_climbs_out_of_a_folder_is_not_inside_it() {
     let roots = [root(1, "/a/zode", "zode")];
     for cwd in ["/a/zode/../../etc", "/a/zode/crates/../..", "/a/zode/.."] {
-        assert_eq!(deepest_root_index(&roots, Path::new(cwd)), None, "{cwd}");
+        assert_eq!(
+            deepest_root_index(&roots, None, Path::new(cwd)),
+            None,
+            "{cwd}"
+        );
     }
 }
 
@@ -233,7 +251,8 @@ fn one_folder_open_twice_is_always_owned_by_the_same_one() {
     let forward = [root(2, "/a/zode", "zode"), root(9, "/a/zode", "zode")];
     let backward = [root(9, "/a/zode", "zode"), root(2, "/a/zode", "zode")];
     let owner = |roots: &[RootScope]| {
-        deepest_root_index(roots, Path::new("/a/zode/x")).map(|index| roots[index].worktree_id)
+        deepest_root_index(roots, None, Path::new("/a/zode/x"))
+            .map(|index| roots[index].worktree_id)
     };
     assert_eq!(owner(&forward), Some(WorktreeId::from_proto(2)));
     assert_eq!(owner(&backward), Some(WorktreeId::from_proto(2)));
@@ -490,6 +509,7 @@ fn an_entry_carries_what_the_session_knows_and_what_the_host_knows_about_it() {
             updated_at: 6_000,
             can_fork: true,
             open_agent_id: Some("terminal-42".into()),
+            host: None,
         }
     );
     assert_eq!(entries[1].agent, "codex");
@@ -619,6 +639,7 @@ fn entry(index: usize, text: &str) -> SessionEntry {
         updated_at: 1_760_572_800_000 + index as u64,
         can_fork: true,
         open_agent_id: None,
+        host: None,
     }
 }
 
@@ -633,7 +654,7 @@ fn cursor_of(entry: &SessionEntry) -> SessionCursor {
 fn a_short_page_is_one_message_with_its_cursor() {
     let entries = vec![entry(0, "one"), entry(1, "two")];
     let next = cursor_of(&entries[1]);
-    let replies = session_replies(7, entries.clone(), Some(next.clone()));
+    let replies = session_replies(7, entries.clone(), Some(next.clone()), Vec::new());
     assert_eq!(
         replies,
         [Control::SessionsListReply {
@@ -641,6 +662,7 @@ fn a_short_page_is_one_message_with_its_cursor() {
             sessions: entries,
             more: false,
             next: Some(next),
+            unavailable_hosts: Vec::new(),
         }]
     );
 }
@@ -648,12 +670,13 @@ fn a_short_page_is_one_message_with_its_cursor() {
 #[test]
 fn an_empty_page_is_still_answered() {
     assert_eq!(
-        session_replies(3, Vec::new(), None),
+        session_replies(3, Vec::new(), None, Vec::new()),
         [Control::SessionsListReply {
             request_id: 3,
             sessions: Vec::new(),
             more: false,
             next: None,
+            unavailable_hosts: Vec::new(),
         }]
     );
 }
@@ -665,7 +688,7 @@ fn a_long_page_is_split_into_messages_that_each_fit_and_only_the_last_has_a_next
     let heavy = "\u{1}".repeat(200);
     let entries: Vec<_> = (0..200).map(|index| entry(index, &heavy)).collect();
     let next = cursor_of(&entries[199]);
-    let replies = session_replies(9, entries.clone(), Some(next.clone()));
+    let replies = session_replies(9, entries.clone(), Some(next.clone()), Vec::new());
 
     assert!(replies.len() > 1, "{} message", replies.len());
     let mut joined = Vec::new();
@@ -677,6 +700,7 @@ fn a_long_page_is_split_into_messages_that_each_fit_and_only_the_last_has_a_next
             sessions,
             more,
             next: reply_next,
+            ..
         } = reply
         else {
             panic!("not a list reply: {reply:?}");
@@ -698,7 +722,12 @@ fn a_long_page_is_split_into_messages_that_each_fit_and_only_the_last_has_a_next
 fn an_entry_too_big_for_any_message_is_left_out_and_the_rest_still_go() {
     let mut huge = entry(1, "huge");
     huge.branch = Some("b".repeat(MAX_INNER_PAYLOAD_LEN));
-    let replies = session_replies(1, vec![entry(0, "before"), huge, entry(2, "after")], None);
+    let replies = session_replies(
+        1,
+        vec![entry(0, "before"), huge, entry(2, "after")],
+        None,
+        Vec::new(),
+    );
     let sent: Vec<String> = replies
         .iter()
         .flat_map(|reply| match reply {
@@ -759,4 +788,273 @@ fn the_toast_copes_with_no_device_name_no_title_and_a_long_title() {
         .to_string();
     assert_eq!(title.chars().count(), 60);
     assert!(title.ends_with('…'));
+}
+
+fn ubuntu() -> HostToken {
+    HostToken::of(&RemoteConnectionIdentity::Wsl {
+        distro_name: "Ubuntu".into(),
+        user: None,
+    })
+}
+
+fn remote_root(worktree_id: u64, host: &HostToken, path: &str, name: &str) -> RootScope {
+    RootScope {
+        host: Some(RootHost {
+            token: host.clone(),
+            label: "Ubuntu".into(),
+        }),
+        ..root(worktree_id, path, name)
+    }
+}
+
+/// The token is what a stored list resumes by after a restart, so it must not
+/// depend on the run, and must tell two hosts apart.
+#[test]
+fn a_host_token_is_twelve_hex_digits_fixed_by_the_identity() {
+    let token = ubuntu();
+    assert_eq!(token.as_str().len(), 12);
+    assert!(
+        token
+            .as_str()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "{token:?}"
+    );
+    assert_eq!(token, ubuntu());
+    let other = HostToken::of(&RemoteConnectionIdentity::Wsl {
+        distro_name: "Ubuntu".into(),
+        user: Some("root".into()),
+    });
+    assert_ne!(token, other);
+}
+
+#[test]
+fn an_id_on_this_machine_is_sent_as_it_is_and_a_remote_one_carries_its_host() {
+    let host = ubuntu();
+    assert_eq!(wire_id(None, "abc"), "abc");
+    let remote = wire_id(Some(&host), "abc");
+    assert_eq!(remote, format!("{}:abc", host.as_str()));
+    assert_eq!(parse_wire_id(&remote), Some((Some(host), "abc")));
+    assert_eq!(parse_wire_id("abc"), Some((None, "abc")));
+}
+
+#[test]
+fn a_wire_id_that_could_not_name_a_host_and_a_session_is_refused() {
+    let token = ubuntu();
+    let token = token.as_str();
+    let too_long = "a".repeat(129);
+    for wire in [
+        String::new(),
+        ":abc".to_string(),
+        format!("{token}:"),
+        format!("{token}::abc"),
+        format!("{token}:abc:def"),
+        format!("{}:abc", token.to_uppercase()),
+        format!("{}:abc", &token[..11]),
+        format!("{token}0:abc"),
+        "zzzzzzzzzzzz:abc".to_string(),
+        format!("{token}:../etc"),
+        format!("{token}:-rf"),
+        format!("{token}:{too_long}"),
+        too_long,
+        "has a space".to_string(),
+    ] {
+        assert_eq!(parse_wire_id(&wire), None, "{wire:?}");
+    }
+}
+
+/// `/home/me/repo` on a WSL distro and on this machine are two directories:
+/// a session is only ever matched to a folder on its own host.
+#[test]
+fn a_session_belongs_only_to_a_folder_on_its_own_host() {
+    let host = ubuntu();
+    let roots = [
+        root(1, "/home/me/repo", "repo"),
+        remote_root(1, &host, "/home/me/repo", "repo"),
+    ];
+    let cwd = Path::new("/home/me/repo/src");
+    assert_eq!(deepest_root_index(&roots, None, cwd), Some(0));
+    assert_eq!(deepest_root_index(&roots, Some(&host), cwd), Some(1));
+    let elsewhere = HostToken::of(&RemoteConnectionIdentity::Mock { id: 3 });
+    assert_eq!(deepest_root_index(&roots, Some(&elsewhere), cwd), None);
+    assert_eq!(
+        deepest_root_index(&roots[..1], Some(&host), cwd),
+        None,
+        "a host's session is never put in a local folder of the same path"
+    );
+    assert_eq!(
+        deepest_root_index(&roots[1..], None, cwd),
+        None,
+        "nor the other way"
+    );
+}
+
+#[test]
+fn the_same_id_on_this_machine_and_a_host_is_two_entries_each_with_its_own_ids() {
+    let host = ubuntu();
+    let roots = [
+        root(3, "/home/me/repo", "repo"),
+        remote_root(3, &host, "/home/me/repo", "repo"),
+    ];
+    let local = [session("same", "/home/me/repo", 2)];
+    let remote = [session("same", "/home/me/repo", 2)];
+    let (entries, _) = page_across(
+        &[
+            HostSessions {
+                host: None,
+                sessions: &local,
+            },
+            HostSessions {
+                host: Some(&host),
+                sessions: &remote,
+            },
+        ],
+        &roots,
+        None,
+        50,
+        no_open_tab,
+    );
+    let seen: Vec<(&str, &str, Option<&str>)> = entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.id.as_str(),
+                entry.worktree_id.as_str(),
+                entry.host.as_deref(),
+            )
+        })
+        .collect();
+    let remote_id = format!("{}:same", host.as_str());
+    let remote_worktree = format!("{}:3", host.as_str());
+    // Same millisecond, so by id: a token is hex and comes before a letter.
+    assert_eq!(
+        seen,
+        [
+            (remote_id.as_str(), remote_worktree.as_str(), Some("Ubuntu")),
+            ("same", "3", None),
+        ]
+    );
+}
+
+/// One list over every host, paged by the id the device holds: sessions in
+/// the same millisecond on two hosts are neither repeated nor skipped.
+#[test]
+fn paging_across_hosts_neither_repeats_nor_skips_a_tie() {
+    let host = ubuntu();
+    let roots = [root(1, "/r", "r"), remote_root(1, &host, "/r", "r")];
+    let local = [
+        session("b", "/r", 5),
+        session("d", "/r", 5),
+        session("old", "/r", 1),
+    ];
+    let remote = [session("a", "/r", 5), session("c", "/r", 7)];
+    let hosts = [
+        HostSessions {
+            host: None,
+            sessions: &local,
+        },
+        HostSessions {
+            host: Some(&host),
+            sessions: &remote,
+        },
+    ];
+    let mut seen = Vec::new();
+    let mut before: Option<SessionCursor> = None;
+    for _ in 0..10 {
+        let (entries, next) = page_across(&hosts, &roots, before.as_ref(), 2, no_open_tab);
+        seen.extend(entries.into_iter().map(|entry| entry.id));
+        match next {
+            Some(next) => before = Some(next),
+            None => break,
+        }
+    }
+    let token = host.as_str();
+    assert_eq!(
+        seen,
+        [
+            format!("{token}:c"),
+            format!("{token}:a"),
+            "b".to_string(),
+            "d".to_string(),
+            "old".to_string(),
+        ]
+    );
+}
+
+/// A host's folder hides what its own settings say, read in the host's
+/// spelling of a path.
+#[gpui::test]
+async fn a_remote_folder_hides_by_its_own_settings(cx: &mut TestAppContext) {
+    let host = ubuntu();
+    let hiding = RootScope {
+        hidden: Some(settings_hiding(&["**/vault"], &[], cx)),
+        path_style: PathStyle::Posix,
+        ..remote_root(1, &host, "/home/me/repo", "repo")
+    };
+    let sessions = [
+        session("plain", "/home/me/repo/src", 2),
+        session("private", "/home/me/repo/vault", 1),
+    ];
+    let (entries, _) = page_across(
+        &[HostSessions {
+            host: Some(&host),
+            sessions: &sessions,
+        }],
+        std::slice::from_ref(&hiding),
+        None,
+        50,
+        no_open_tab,
+    );
+    assert_eq!(ids(&entries), [format!("{}:plain", host.as_str())]);
+}
+
+/// The reason is one of two fixed words, never what went wrong on the host.
+#[test]
+fn a_host_is_named_only_while_its_sessions_are_missing_and_only_by_a_fixed_reason() {
+    assert_eq!(
+        host_notice("Ubuntu", 0, false),
+        Some(UnavailableHost {
+            host: "Ubuntu".into(),
+            reason: host_status::READING.into()
+        })
+    );
+    assert_eq!(
+        host_notice("Ubuntu", 3, true),
+        Some(UnavailableHost {
+            host: "Ubuntu".into(),
+            reason: host_status::UNAVAILABLE.into()
+        })
+    );
+    assert_eq!(host_notice("Ubuntu", 3, false), None);
+}
+
+/// The hosts that could not be listed ride on the last message alone, and
+/// every message still fits however many there are.
+#[test]
+fn unavailable_hosts_go_on_the_last_message_and_every_message_still_fits() {
+    let heavy = "\u{1}".repeat(200);
+    let entries: Vec<_> = (0..200).map(|index| entry(index, &heavy)).collect();
+    let notices: Vec<UnavailableHost> = (0..40)
+        .map(|index| UnavailableHost {
+            host: format!("{index}{}", "\u{1}".repeat(60)),
+            reason: host_status::UNAVAILABLE.into(),
+        })
+        .collect();
+    let replies = session_replies(9, entries, None, notices);
+    assert!(replies.len() > 1);
+    for (index, reply) in replies.iter().enumerate() {
+        let bytes = encode_control(reply).expect("each message fits one frame");
+        assert!(bytes.len() <= MAX_INNER_PAYLOAD_LEN);
+        let Control::SessionsListReply {
+            unavailable_hosts, ..
+        } = reply
+        else {
+            panic!("{reply:?}");
+        };
+        if index + 1 == replies.len() {
+            assert_eq!(unavailable_hosts.len(), 16, "capped");
+        } else {
+            assert!(unavailable_hosts.is_empty());
+        }
+    }
 }
