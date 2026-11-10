@@ -71,6 +71,9 @@ pub struct SidebarRenderState {
     /// the strip macOS draws its window controls over, so the title bar still
     /// has to reserve the remainder or the controls land on its content.
     pub edge_width: Pixels,
+    /// Whether the title bar spans the whole window and the sidebar starts
+    /// below it, rather than the sidebar running up beside the title bar.
+    pub below_title_bar: bool,
 }
 
 pub enum MultiWorkspaceEvent {
@@ -452,6 +455,12 @@ pub struct MultiWorkspace {
     /// inject synthetic pressure (see `MemoryPressureReader`) — production
     /// always starts with `SysinfoMemoryPressureReader`.
     memory_pressure_reader: Box<dyn MemoryPressureReader>,
+    /// Whether the active workspace's title bar is drawn here across the whole
+    /// window, above the sidebar, instead of by the workspace beside it. Only
+    /// macOS needs the sidebar to run up beside the title bar: the OS draws
+    /// the traffic lights over that corner. A field rather than a `cfg` so
+    /// both layouts are built and tested on every platform.
+    title_bar_spans_the_window: bool,
     /// FR3: recurring background timer driving `memory_governor_tick`.
     /// Stored so dropping `MultiWorkspace` cancels it (GPUI `Task` drop
     /// semantics) rather than leaking a loop that outlives its window.
@@ -476,7 +485,18 @@ impl MultiWorkspace {
                 }
                 _ => px(0.),
             },
+            below_title_bar: self.title_bar_spans_the_window,
         }
+    }
+
+    pub fn title_bar_spans_the_window(&self) -> bool {
+        self.title_bar_spans_the_window
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_title_bar_spans_the_window_for_test(&mut self, spans: bool, cx: &mut Context<Self>) {
+        self.title_bar_spans_the_window = spans;
+        cx.notify();
     }
 
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -580,6 +600,7 @@ impl MultiWorkspace {
             manually_woken_at: HashMap::default(),
             fuse_last_triggered_at: None,
             memory_pressure_reader: Box::new(SysinfoMemoryPressureReader::new()),
+            title_bar_spans_the_window: PlatformStyle::platform() != PlatformStyle::Mac,
             _memory_governor_task: memory_governor_task,
         }
     }
@@ -3210,12 +3231,18 @@ impl Render for MultiWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let multi_workspace_enabled = self.multi_workspace_enabled(cx);
         let panel_open = self.sidebar_open();
+        let title_bar = self.workspace().read(cx).titlebar_item();
+        // Drawn here only when spanning; otherwise the workspace draws it beside
+        // the sidebar.
+        let spanning_title_bar = title_bar
+            .as_ref()
+            .filter(|_| self.title_bar_spans_the_window)
+            .cloned();
         // `None` when nothing is mounted in the title bar slot -- reserving a
         // row for a header that is not drawn would leave a bare strip.
-        let title_bar_row_height = self
-            .workspace()
-            .read(cx)
-            .titlebar_item()
+        let title_bar_row_height = title_bar
+            .as_ref()
+            .filter(|_| !self.title_bar_spans_the_window)
             .map(|_| ui::utils::platform_title_bar_height(window));
         // A column that has taken the whole window takes the rail with it. The
         // rail is drawn here, as the workspace's sibling, so this is the only
@@ -3286,13 +3313,14 @@ impl Render for MultiWorkspace {
                 // the rail and the editor. The rail draws its own right border
                 // as the single separator instead.
                 //
-                // The `Workspace` beside it stacks title bar over centre over
-                // status bar, so a full-height sidebar would run alongside the
-                // title bar rather than starting where the centre does. The
-                // spacer above reserves that row and paints it as title bar, so
-                // the header reads as spanning the whole window the way VS Code's
-                // does -- and on macOS the window controls land on it rather
-                // than on the sidebar.
+                // On macOS the `Workspace` beside it draws the title bar, stacked
+                // over centre over status bar, so a full-height sidebar would run
+                // alongside the title bar rather than starting where the centre
+                // does. The spacer above reserves that row and paints it as title
+                // bar, so the header reads as spanning the whole window -- and the
+                // window controls the OS draws over that corner land on it rather
+                // than on the sidebar. Elsewhere nothing needs that corner, so the
+                // title bar itself spans the window above the sidebar instead.
                 // No `h_full` on the container — an explicit 100% height beats
                 // `self_stretch` and, together with the surface margin, overflows
                 // the column.
@@ -3327,6 +3355,29 @@ impl Render for MultiWorkspace {
 
         let ui_font = theme_settings::setup_ui_font(window, cx);
         let text_color = cx.theme().colors().text;
+
+        // Applied here rather than when settings change, so a window opened
+        // later starts see-through too; the platform calls are cheap when
+        // nothing changed.
+        let theme_settings = theme_settings::ThemeSettings::get_global(cx);
+        let background_opacity = theme_settings.background_opacity();
+        // Decided by the setting, as the theme decides the window's background
+        // appearance: deciding by whether the image has loaded yet would fade
+        // an opaque window to black until it does.
+        let image_is_set = theme_settings.window_background_image.is_some();
+        let content_opacity = if window.supports_vibrancy() {
+            window.set_backdrop_image(crate::window_backdrop::backdrop_image(cx));
+            background_opacity
+        } else if image_is_set {
+            // The image is laid over the window instead; see
+            // `render_window_backdrop`.
+            1.0
+        } else {
+            background_opacity
+        };
+        if window.content_opacity() != content_opacity {
+            window.set_content_opacity(content_opacity);
+        }
 
         let workspace = self.workspace().clone();
         let workspace_key_context = workspace.update(cx, |workspace, cx| workspace.key_context(cx));
@@ -3415,14 +3466,36 @@ impl Render for MultiWorkspace {
                         ))
                     },
                 )
-                .children(sidebar)
-                .child(
-                    div()
+                .map(|root| {
+                    let workspace_column = div()
                         .flex()
                         .flex_1()
                         .size_full()
                         .overflow_hidden()
-                        .child(self.workspace().clone()),
+                        .child(self.workspace().clone());
+                    // Still inside the root, so the bar's menus dispatch through
+                    // the same workspace actions and key context as before.
+                    match spanning_title_bar {
+                        Some(title_bar) => root.child(
+                            v_flex().size_full().child(title_bar).child(
+                                h_flex()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .w_full()
+                                    .children(sidebar)
+                                    .child(workspace_column),
+                            ),
+                        ),
+                        None => root.children(sidebar).child(workspace_column),
+                    }
+                })
+                // Over the workspace and under the modal layer: the image is
+                // laid over the window's contents rather than behind them, so
+                // every part of the window shows it to the same degree.
+                .children(
+                    (!window.supports_vibrancy())
+                        .then(|| crate::window_backdrop::render_window_backdrop(cx))
+                        .flatten(),
                 )
                 .child(self.workspace().read(cx).modal_layer.clone())
                 .children(self.sidebar_overlay.as_ref().map(|view| {

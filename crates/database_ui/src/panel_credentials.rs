@@ -90,6 +90,18 @@ impl DatabasePanel {
                     }
                 })
             })
+            .when(personal, |menu| {
+                menu.separator().entry("Remove Connection…", None, {
+                    let panel = panel.clone();
+                    move |window, cx| {
+                        panel
+                            .update(cx, |panel, cx| {
+                                panel.confirm_remove_connection(index, window, cx)
+                            })
+                            .ok();
+                    }
+                })
+            })
         });
 
         cx.focus_view(&menu, window);

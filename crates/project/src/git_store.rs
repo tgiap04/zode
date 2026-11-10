@@ -2,6 +2,7 @@ pub mod branch_diff;
 mod conflict_set;
 pub mod git_traversal;
 pub mod pending_op;
+mod remote_graph;
 
 use crate::{
     ProjectEnvironment, ProjectItem, ProjectPath,
@@ -65,7 +66,7 @@ use settings::{Settings, WorktreeId};
 use smol::future::yield_now;
 use std::{
     cmp::Ordering,
-    collections::{BTreeSet, HashSet, VecDeque, hash_map::Entry},
+    collections::{BTreeSet, HashSet, VecDeque},
     future::Future,
     mem,
     ops::Range,
@@ -275,6 +276,7 @@ pub struct MergeDetails {
 pub enum CommitDataState {
     Loading,
     Loaded(Arc<GraphCommitData>),
+    Failed(SharedString),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -318,11 +320,104 @@ enum GraphCommitHandlerState {
     Closed,
 }
 
+/// How many pending commit detail requests are answered together; over a remote connection this
+/// is one round trip.
+const COMMIT_DATA_BATCH_SIZE: usize = 64;
+
+/// Most graph logs a repository keeps. A remote client picks the sources a server keeps logs for,
+/// and every log holds a repository's whole history, so finished logs are evicted least recently
+/// used first once there are more.
+const MAX_CACHED_GRAPHS: usize = 4;
+
+enum CommitDataError {
+    /// The commit could not be read, and asking again would fail the same way.
+    Unreadable(SharedString),
+    /// The request carrying the commit failed as a whole, which says nothing about the commit.
+    RequestFailed,
+}
+
+type CommitDataResult = (Oid, Result<GraphCommitData, CommitDataError>);
+
+enum CommitDataSource {
+    Local(git::repository::CommitDataReader),
+    Remote {
+        client: AnyProtoClient,
+        project_id: ProjectId,
+        repository_id: RepositoryId,
+    },
+    Unavailable(SharedString),
+}
+
+impl CommitDataSource {
+    async fn read(&self, shas: Vec<Oid>) -> Vec<CommitDataResult> {
+        match self {
+            CommitDataSource::Local(reader) => {
+                let mut results = Vec::with_capacity(shas.len());
+                for sha in shas {
+                    let result = reader.read(sha).await.map_err(|error| {
+                        log::error!("failed to read commit data for {sha}: {error:?}");
+                        CommitDataError::Unreadable(error.to_string().into())
+                    });
+                    results.push((sha, result));
+                }
+                results
+            }
+            CommitDataSource::Remote {
+                client,
+                project_id,
+                repository_id,
+            } => {
+                let shas_to_retry = shas.clone();
+                match remote_graph::read_remote_commit_data(
+                    client,
+                    *project_id,
+                    *repository_id,
+                    shas,
+                )
+                .await
+                {
+                    Ok(results) => results
+                        .into_iter()
+                        .map(|(sha, result)| (sha, result.map_err(CommitDataError::Unreadable)))
+                        .collect(),
+                    Err(error) => {
+                        log::warn!("failed to request commit data: {error:#}");
+                        shas_to_retry
+                            .into_iter()
+                            .map(|sha| (sha, Err(CommitDataError::RequestFailed)))
+                            .collect()
+                    }
+                }
+            }
+            CommitDataSource::Unavailable(error) => shas
+                .into_iter()
+                .map(|sha| (sha, Err(CommitDataError::Unreadable(error.clone()))))
+                .collect(),
+        }
+    }
+}
+
 pub struct InitialGitGraphData {
-    fetch_task: Task<()>,
+    _fetch_task: Task<()>,
+    /// Tells this fetch apart from an earlier one for the same source and order, so a reader
+    /// paging through it notices when the history it was reading has been dropped.
+    generation: u64,
+    is_loading: bool,
+    /// When the log was last asked for, by the repository's own clock, for eviction.
+    last_used: u64,
+    /// Cloned by every page request waiting on this log; a log with a waiter is never evicted.
+    waiters: Arc<()>,
     pub error: Option<SharedString>,
     pub commit_data: Vec<Arc<InitialGraphCommitData>>,
     pub commit_oid_to_index: HashMap<Oid, usize>,
+}
+
+impl InitialGitGraphData {
+    /// Whether the fetch is still running. It is already false when `FullyLoaded` or
+    /// `LoadingError` is emitted.
+    pub fn is_loading(&self) -> bool {
+        self.is_loading
+    }
 }
 
 pub struct GraphDataResponse<'a> {
@@ -347,6 +442,8 @@ pub struct Repository {
     latest_askpass_id: u64,
     repository_state: Shared<Task<Result<RepositoryState, String>>>,
     initial_graph_data: HashMap<(LogSource, LogOrder), InitialGitGraphData>,
+    next_graph_generation: u64,
+    graph_use_clock: u64,
     graph_commit_data_handler: GraphCommitHandlerState,
     commit_data: HashMap<Oid, CommitDataState>,
 }
@@ -574,6 +671,8 @@ impl GitStore {
         client.add_entity_request_handler(Self::handle_diff_checkpoints);
         client.add_entity_request_handler(Self::handle_load_commit_diff);
         client.add_entity_request_handler(Self::handle_file_history);
+        client.add_entity_request_handler(Self::handle_get_graph_page);
+        client.add_entity_request_handler(Self::handle_get_commit_data);
         client.add_entity_request_handler(Self::handle_checkout_files);
         client.add_entity_request_handler(Self::handle_open_commit_message_buffer);
         client.add_entity_request_handler(Self::handle_set_index_text);
@@ -1909,7 +2008,13 @@ impl GitStore {
                 repository.update(cx, |repository, cx| repository.schedule_scan(None, cx))
             })
             .collect();
+        Self::wait_for_repository_scans(scans, cx)
+    }
 
+    fn wait_for_repository_scans(
+        scans: Vec<oneshot::Receiver<Result<()>>>,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
         cx.background_spawn(async move {
             for scan in scans {
                 match scan.await {
@@ -1921,6 +2026,36 @@ impl GitStore {
                 }
             }
         })
+    }
+
+    /// Re-reads every repository that belongs to the given worktree, including one found in an
+    /// ancestor of its root, resolving once all of those reads are done. Repositories are only
+    /// read on the machine that owns them, so a remote or guest store resolves at once.
+    pub fn rescan_repositories_in_worktree(
+        &mut self,
+        worktree_id: WorktreeId,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        // `Repository::rescan_and_wait` reads this store back, which would panic while it is
+        // being updated, so the scan it schedules is scheduled here directly.
+        let updates_tx = match &self.state {
+            GitStoreState::Local { downstream, .. } => downstream
+                .as_ref()
+                .map(|downstream| downstream.updates_tx.clone()),
+            _ => return Task::ready(()),
+        };
+        let scans = self
+            .worktree_ids
+            .iter()
+            .filter(|(_, worktree_ids)| worktree_ids.contains(&worktree_id))
+            .filter_map(|(repository_id, _)| self.repositories.get(repository_id))
+            .map(|repository| {
+                repository.update(cx, |repository, cx| {
+                    repository.schedule_scan(updates_tx.clone(), cx)
+                })
+            })
+            .collect();
+        Self::wait_for_repository_scans(scans, cx)
     }
 
     /// Returns the original (main) repository working directory for the given worktree.
@@ -4315,21 +4450,8 @@ impl Repository {
             })
             .shared();
 
-        cx.subscribe_self(move |this, event: &RepositoryEvent, _| match event {
-            RepositoryEvent::HeadChanged | RepositoryEvent::BranchListChanged => {
-                if this.scan_id > 1 {
-                    this.initial_graph_data.clear();
-                }
-            }
-            RepositoryEvent::StashEntriesChanged => {
-                if this.scan_id > 1 {
-                    this.initial_graph_data
-                        .retain(|(log_source, _), _| *log_source != LogSource::All);
-                }
-            }
-            _ => {}
-        })
-        .detach();
+        cx.subscribe_self(|this, event: &RepositoryEvent, _| this.invalidate_graph_cache(event))
+            .detach();
 
         Repository {
             this: cx.weak_entity(),
@@ -4345,6 +4467,8 @@ impl Repository {
             job_id: 0,
             active_jobs: Default::default(),
             initial_graph_data: Default::default(),
+            next_graph_generation: 0,
+            graph_use_clock: 0,
             commit_data: Default::default(),
             graph_commit_data_handler: GraphCommitHandlerState::Closed,
         }
@@ -4369,6 +4493,8 @@ impl Repository {
         let repository_state = RemoteRepositoryState { project_id, client };
         let job_sender = Self::spawn_remote_git_worker(repository_state.clone(), cx);
         let repository_state = Task::ready(Ok(RepositoryState::Remote(repository_state))).shared();
+        cx.subscribe_self(|this, event: &RepositoryEvent, _| this.invalidate_graph_cache(event))
+            .detach();
         Self {
             this: cx.weak_entity(),
             snapshot,
@@ -4383,6 +4509,8 @@ impl Repository {
             active_jobs: Default::default(),
             job_id: 0,
             initial_graph_data: Default::default(),
+            next_graph_generation: 0,
+            graph_use_clock: 0,
             commit_data: Default::default(),
             graph_commit_data_handler: GraphCommitHandlerState::Closed,
         }
@@ -4390,6 +4518,23 @@ impl Repository {
 
     pub fn git_store(&self) -> Option<Entity<GitStore>> {
         self.git_store.upgrade()
+    }
+
+    fn invalidate_graph_cache(&mut self, event: &RepositoryEvent) {
+        match event {
+            RepositoryEvent::HeadChanged | RepositoryEvent::BranchListChanged => {
+                if self.scan_id > 1 {
+                    self.initial_graph_data.clear();
+                }
+            }
+            RepositoryEvent::StashEntriesChanged => {
+                if self.scan_id > 1 {
+                    self.initial_graph_data
+                        .retain(|(log_source, _), _| *log_source != LogSource::All);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn reload_buffer_diff_bases(&mut self, cx: &mut Context<Self>) {
@@ -4993,57 +5138,41 @@ impl Repository {
         range: Range<usize>,
         cx: &mut Context<Self>,
     ) -> GraphDataResponse<'_> {
+        let key = (log_source, log_order);
+        if !self.initial_graph_data.contains_key(&key) {
+            self.evict_finished_graphs(MAX_CACHED_GRAPHS - 1);
+        }
+
+        let used_at = post_inc(&mut self.graph_use_clock);
+        let repository_state = self.repository_state.clone();
+        let repository_id = self.snapshot.id;
+        let next_graph_generation = &mut self.next_graph_generation;
+        // A failed fetch stays cached, so its error is what every later call sees; only
+        // `retry_graph_data` fetches it again. Restarting it here would rerun the log on every
+        // render that asks for it.
         let initial_commit_data = self
             .initial_graph_data
-            .entry((log_source.clone(), log_order))
+            .entry(key.clone())
             .or_insert_with(|| {
-                let state = self.repository_state.clone();
-                let log_source = log_source.clone();
-
-                let fetch_task = cx.spawn(async move |repository, cx| {
-                    let state = state.await;
-                    let result = match state {
-                        Ok(RepositoryState::Local(LocalRepositoryState { backend, .. })) => {
-                            Self::local_git_graph_data(
-                                repository.clone(),
-                                backend,
-                                log_source.clone(),
-                                log_order,
-                                cx,
-                            )
-                            .await
-                        }
-                        Ok(RepositoryState::Remote(_)) => {
-                            Err("Git graph is not supported for collab yet".into())
-                        }
-                        Err(e) => Err(SharedString::from(e)),
-                    };
-
-                    if let Err(fetch_task_error) = result {
-                        repository
-                            .update(cx, |repository, _| {
-                                if let Some(data) = repository
-                                    .initial_graph_data
-                                    .get_mut(&(log_source, log_order))
-                                {
-                                    data.error = Some(fetch_task_error);
-                                } else {
-                                    debug_panic!(
-                                        "This task would be dropped if this entry doesn't exist"
-                                    );
-                                }
-                            })
-                            .ok();
-                    }
-                });
-
+                let generation = post_inc(next_graph_generation);
                 InitialGitGraphData {
-                    fetch_task,
+                    _fetch_task: Self::spawn_graph_fetch(
+                        repository_state,
+                        repository_id,
+                        key,
+                        generation,
+                        cx,
+                    ),
+                    generation,
+                    is_loading: true,
+                    last_used: used_at,
+                    waiters: Arc::default(),
                     error: None,
                     commit_data: Vec::new(),
                     commit_oid_to_index: HashMap::default(),
                 }
             });
+        initial_commit_data.last_used = used_at;
 
         let max_start = initial_commit_data.commit_data.len().saturating_sub(1);
         let max_end = initial_commit_data.commit_data.len();
@@ -5051,9 +5180,140 @@ impl Repository {
         GraphDataResponse {
             commits: &initial_commit_data.commit_data
                 [range.start.min(max_start)..range.end.min(max_end)],
-            is_loading: !initial_commit_data.fetch_task.is_ready(),
+            is_loading: initial_commit_data.is_loading,
             error: initial_commit_data.error.clone(),
         }
+    }
+
+    /// Fetches the graph again if its last fetch failed, and otherwise asks for it like
+    /// `graph_data`. Meant for a user's explicit request to reload.
+    pub fn retry_graph_data(
+        &mut self,
+        log_source: LogSource,
+        log_order: LogOrder,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (log_source, log_order);
+        if self
+            .initial_graph_data
+            .get(&key)
+            .is_some_and(|data| !data.is_loading && data.error.is_some())
+        {
+            self.initial_graph_data.remove(&key);
+        }
+        self.graph_data(key.0, key.1, 0..0, cx);
+    }
+
+    /// Drops finished logs, least recently used first, until at most `keep` remain. A log still
+    /// loading or waited on is never dropped, so while several load at once there can be more.
+    fn evict_finished_graphs(&mut self, keep: usize) {
+        while self.initial_graph_data.len() > keep {
+            let Some(key) = self
+                .initial_graph_data
+                .iter()
+                .filter(|(_, data)| !data.is_loading && Arc::strong_count(&data.waiters) == 1)
+                .min_by_key(|(_, data)| data.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.initial_graph_data.remove(&key);
+        }
+    }
+
+    fn spawn_graph_fetch(
+        repository_state: Shared<Task<Result<RepositoryState, String>>>,
+        repository_id: RepositoryId,
+        key: (LogSource, LogOrder),
+        generation: u64,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        cx.spawn(async move |repository, cx| {
+            let (log_source, log_order) = key.clone();
+            let result = match repository_state.await {
+                Ok(RepositoryState::Local(LocalRepositoryState { backend, .. })) => {
+                    Self::local_git_graph_data(
+                        repository.clone(),
+                        backend,
+                        log_source,
+                        log_order,
+                        cx,
+                    )
+                    .await
+                }
+                Ok(RepositoryState::Remote(RemoteRepositoryState { project_id, client })) => {
+                    if client.is_via_collab() {
+                        Err("Git graph is not supported for collab yet".into())
+                    } else {
+                        Self::remote_git_graph_data(
+                            repository.clone(),
+                            client,
+                            project_id,
+                            repository_id,
+                            log_source,
+                            log_order,
+                            cx,
+                        )
+                        .await
+                    }
+                }
+                Err(error) => Err(SharedString::from(error)),
+            };
+
+            repository
+                .update(cx, |repository, cx| {
+                    repository.finish_graph_fetch(key, generation, result, cx)
+                })
+                .log_err();
+        })
+    }
+
+    fn finish_graph_fetch(
+        &mut self,
+        key: (LogSource, LogOrder),
+        generation: u64,
+        result: Result<(), SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(data) = self
+            .initial_graph_data
+            .get_mut(&key)
+            .filter(|data| data.generation == generation)
+        else {
+            debug_panic!("This task would be dropped if this entry doesn't exist");
+            return;
+        };
+        data.is_loading = false;
+        let event = match result {
+            Ok(()) => GitGraphEvent::FullyLoaded,
+            Err(error) => {
+                data.error = Some(error);
+                GitGraphEvent::LoadingError
+            }
+        };
+        cx.emit(RepositoryEvent::GraphEvent(key, event));
+    }
+
+    fn append_graph_commits(
+        &mut self,
+        key: &(LogSource, LogOrder),
+        commits: Vec<Arc<InitialGraphCommitData>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(graph_data) = self.initial_graph_data.get_mut(key) else {
+            debug_panic!("This task should be dropped if data doesn't exist");
+            return;
+        };
+        for commit_data in commits {
+            graph_data
+                .commit_oid_to_index
+                .insert(commit_data.sha, graph_data.commit_data.len());
+            graph_data.commit_data.push(commit_data);
+        }
+        cx.emit(RepositoryEvent::GraphEvent(
+            key.clone(),
+            GitGraphEvent::CountUpdated(graph_data.commit_data.len()),
+        ));
     }
 
     async fn local_git_graph_data(
@@ -5080,28 +5340,7 @@ impl Repository {
 
         while let Ok(initial_graph_commit_data) = request_rx.recv().await {
             this.update(cx, |repository, cx| {
-                let graph_data = repository
-                    .initial_graph_data
-                    .entry(graph_data_key.clone())
-                    .and_modify(|graph_data| {
-                        for commit_data in initial_graph_commit_data {
-                            graph_data
-                                .commit_oid_to_index
-                                .insert(commit_data.sha, graph_data.commit_data.len());
-                            graph_data.commit_data.push(commit_data);
-                        }
-                        cx.emit(RepositoryEvent::GraphEvent(
-                            graph_data_key.clone(),
-                            GitGraphEvent::CountUpdated(graph_data.commit_data.len()),
-                        ));
-                    });
-
-                match &graph_data {
-                    Entry::Occupied(_) => {}
-                    Entry::Vacant(_) => {
-                        debug_panic!("This task should be dropped if data doesn't exist");
-                    }
-                }
+                repository.append_graph_commits(&graph_data_key, initial_graph_commit_data, cx);
             })
             .ok();
         }
@@ -5135,15 +5374,28 @@ impl Repository {
         self.graph_commit_data_handler = GraphCommitHandlerState::Starting;
 
         let state = self.repository_state.clone();
-        let (result_tx, result_rx) = smol::channel::bounded::<(Oid, GraphCommitData)>(64);
+        let repository_id = self.snapshot.id;
+        let (result_tx, result_rx) = smol::channel::bounded::<CommitDataResult>(64);
         let (request_tx, request_rx) = smol::channel::unbounded::<Oid>();
 
         let foreground_task = cx.spawn(async move |this, cx| {
             while let Ok((sha, commit_data)) = result_rx.recv().await {
                 let result = this.update(cx, |this, cx| {
-                    let old_value = this
-                        .commit_data
-                        .insert(sha, CommitDataState::Loaded(Arc::new(commit_data)));
+                    let state = match commit_data {
+                        Ok(commit_data) => CommitDataState::Loaded(Arc::new(commit_data)),
+                        Err(CommitDataError::Unreadable(error)) => CommitDataState::Failed(error),
+                        Err(CommitDataError::RequestFailed) => {
+                            // Forgetting the request lets the next `fetch_commit_data` ask again.
+                            // No notify: a repaint asks for every visible commit, and would resend
+                            // them at once to a server that has just failed them.
+                            if matches!(this.commit_data.get(&sha), Some(CommitDataState::Loading))
+                            {
+                                this.commit_data.remove(&sha);
+                            }
+                            return;
+                        }
+                    };
+                    let old_value = this.commit_data.insert(sha, state);
                     debug_assert!(
                         !matches!(old_value, Some(CommitDataState::Loaded(_))),
                         "We should never overwrite commit data"
@@ -5166,27 +5418,36 @@ impl Repository {
         let background_executor = cx.background_executor().clone();
 
         cx.background_spawn(async move {
-            let backend = match state.await {
-                Ok(RepositoryState::Local(LocalRepositoryState { backend, .. })) => backend,
-                Ok(RepositoryState::Remote(_)) => {
-                    log::error!("commit_data_reader not supported for remote repositories");
-                    return;
+            let source = match state.await {
+                Ok(RepositoryState::Local(LocalRepositoryState { backend, .. })) => {
+                    match backend.commit_data_reader() {
+                        Ok(reader) => CommitDataSource::Local(reader),
+                        Err(error) => {
+                            log::error!("failed to create commit data reader: {error:?}");
+                            CommitDataSource::Unavailable(error.to_string().into())
+                        }
+                    }
+                }
+                Ok(RepositoryState::Remote(RemoteRepositoryState { project_id, client })) => {
+                    if client.is_via_collab() {
+                        CommitDataSource::Unavailable(
+                            "Commit details are not supported for collab yet".into(),
+                        )
+                    } else {
+                        CommitDataSource::Remote {
+                            client,
+                            project_id,
+                            repository_id,
+                        }
+                    }
                 }
                 Err(error) => {
                     log::error!("failed to get repository state: {error}");
-                    return;
+                    CommitDataSource::Unavailable(error.into())
                 }
             };
 
-            let reader = match backend.commit_data_reader() {
-                Ok(reader) => reader,
-                Err(error) => {
-                    log::error!("failed to create commit data reader: {error:?}");
-                    return;
-                }
-            };
-
-            loop {
+            'requests: loop {
                 let timeout = background_executor.timer(std::time::Duration::from_secs(10));
 
                 futures::select_biased! {
@@ -5195,14 +5456,17 @@ impl Repository {
                             break;
                         };
 
-                        match reader.read(sha).await {
-                            Ok(commit_data) => {
-                                if result_tx.send((sha, commit_data)).await.is_err() {
-                                    break;
-                                }
+                        let mut shas = vec![sha];
+                        while shas.len() < COMMIT_DATA_BATCH_SIZE {
+                            match request_rx.try_recv() {
+                                Ok(sha) => shas.push(sha),
+                                Err(_) => break,
                             }
-                            Err(error) => {
-                                log::error!("failed to read commit data for {sha}: {error:?}");
+                        }
+
+                        for result in source.read(shas).await {
+                            if result_tx.send(result).await.is_err() {
+                                break 'requests;
                             }
                         }
                     }

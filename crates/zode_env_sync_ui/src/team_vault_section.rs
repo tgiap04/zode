@@ -36,6 +36,8 @@ pub(crate) struct TeamActions {
     pub create_key: bool,
     /// The stored sharing key does not open here; replacing it is the way out.
     pub replace_sharing_key: bool,
+    /// Not in a team: the way to one is the Team plan on the website.
+    pub team_plans: bool,
 }
 
 pub(crate) fn team_actions(
@@ -72,8 +74,11 @@ pub(crate) fn team_actions(
             replace_sharing_key: true,
             ..TeamActions::default()
         },
-        TeamVaultStatus::NoTeam
-        | TeamVaultStatus::NeedsRecoveryKey
+        TeamVaultStatus::NoTeam => TeamActions {
+            team_plans: true,
+            ..TeamActions::default()
+        },
+        TeamVaultStatus::NeedsRecoveryKey
         | TeamVaultStatus::Working
         | TeamVaultStatus::PlanLimited(_)
         | TeamVaultStatus::Failed(_) => TeamActions::default(),
@@ -89,7 +94,12 @@ pub(crate) fn team_notice(
     let admin = role.is_some_and(TeamRole::can_administer);
     Some(match status {
         TeamVaultStatus::Ready => return None,
-        TeamVaultStatus::NoTeam => ("You are not in a team.".into(), Color::Muted),
+        TeamVaultStatus::NoTeam => (
+            "You are not in a team. The Team plan shares .env files and database \
+             connections with your team, end-to-end encrypted."
+                .into(),
+            Color::Muted,
+        ),
         TeamVaultStatus::NeedsRecoveryKey => (
             "Enter your recovery key first — Account → Enter Recovery Key…".into(),
             Color::Warning,
@@ -1029,6 +1039,13 @@ impl Render for TeamVaultSection {
                             .on_click(|_, _window, cx| cx.open_url(&zode_account::billing_url())),
                     )
                 })
+                .when(actions.team_plans, |this| {
+                    this.child(
+                        Button::new("team-vault-team-plans", "See Team Plans\u{2026}")
+                            .tooltip(Tooltip::text("Opens the plans page in your browser"))
+                            .on_click(|_, _window, cx| cx.open_url(&zode_account::pricing_url())),
+                    )
+                })
                 .when(actions.create_key, |this| {
                     this.child(
                         Button::new("team-vault-create-key", "Create Team Key")
@@ -1133,6 +1150,32 @@ pub(crate) mod tests {
 
     const ADMIN: Option<TeamRole> = Some(TeamRole::Admin);
     const MEMBER: Option<TeamRole> = Some(TeamRole::Member);
+
+    /// Someone on Free or Pro opening the Team tab was told only that they
+    /// are not in a team, with no way from there to the plan that puts them in
+    /// one. Only that state offers it: inside a team it would be an advert in
+    /// the way of the work.
+    #[test]
+    fn only_someone_without_a_team_is_shown_the_team_plans() {
+        assert!(team_actions(&TeamVaultStatus::NoTeam, None, false).team_plans);
+        for status in [
+            TeamVaultStatus::Ready,
+            TeamVaultStatus::ReadOnly,
+            TeamVaultStatus::KeyPending,
+            TeamVaultStatus::NeedsRecoveryKey,
+            TeamVaultStatus::Working,
+        ] {
+            assert!(
+                !team_actions(&status, MEMBER, true).team_plans,
+                "{status:?} is someone already in a team or on the way in"
+            );
+        }
+        let (sentence, _) = team_notice(&TeamVaultStatus::NoTeam, None, false).expect("said");
+        assert!(
+            sentence.contains("Team plan"),
+            "the sentence says what the button leads to: {sentence}"
+        );
+    }
 
     #[test]
     fn a_member_never_sees_delete_and_an_admin_does() {

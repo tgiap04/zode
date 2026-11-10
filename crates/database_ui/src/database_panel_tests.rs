@@ -1797,3 +1797,262 @@ async fn right_clicking_a_team_connection_opens_its_menu(cx: &mut TestAppContext
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
 }
+
+/// Which connection is open is remembered by place in the list. Removing one
+/// above it shifts every place by one, and a panel still pointing at the old
+/// place would be showing -- and running queries against -- a different
+/// database than the one the user opened.
+#[gpui::test]
+async fn removing_an_earlier_connection_keeps_the_open_one_open(cx: &mut TestAppContext) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    set_connections(cx, &[("a", "/tmp/a.sqlite"), ("b", "/tmp/b.sqlite")]);
+
+    panel.update(cx, |panel, _cx| {
+        panel.active = Some(1);
+        panel.open_table = Some(crate::database_panel::OpenTable {
+            connection: 1,
+            schema: "main".into(),
+            table: "people".into(),
+            columns: None,
+        });
+    });
+
+    set_connections(cx, &[("b", "/tmp/b.sqlite")]);
+
+    panel.read_with(cx, |panel, _| {
+        assert_eq!(panel.connection_names(), vec!["b"]);
+        assert_eq!(
+            panel.active,
+            Some(0),
+            "`b` is still the one queries run against"
+        );
+        assert_eq!(
+            panel.open_table.as_ref().map(|open| open.connection),
+            Some(0),
+            "and its table is still the one showing"
+        );
+    });
+
+    // The open connection itself going away takes what it was showing with it.
+    set_connections(cx, &[("c", "/tmp/c.sqlite")]);
+    panel.read_with(cx, |panel, _| {
+        assert_eq!(panel.active, None);
+        assert!(panel.open_table.is_none());
+    });
+}
+
+async fn settings_file_text(
+    workspace: &gpui::Entity<workspace::Workspace>,
+    cx: &mut gpui::VisualTestContext,
+) -> String {
+    let fs = workspace.read_with(cx, |workspace, cx| {
+        workspace.project().read(cx).fs().clone()
+    });
+    fs.load(paths::settings_file()).await.unwrap_or_default()
+}
+
+fn memory_credentials(cx: &mut gpui::VisualTestContext) -> std::sync::Arc<MemoryCredentials> {
+    let store = std::sync::Arc::new(MemoryCredentials::default());
+    cx.update(|_window, cx| {
+        cx.set_global(zed_credentials_provider::ZedCredentialsProvider(
+            store.clone(),
+        ));
+    });
+    store
+}
+
+fn store_password(store: &MemoryCredentials, url: &str) {
+    store
+        .entries
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(url.to_string(), ("app".to_string(), b"secret".to_vec()));
+}
+
+/// Removing a connection takes everything this machine kept for it: the
+/// settings entry, the password, and the pin. A password left in the keychain
+/// for a connection nobody can see any more is one nobody will ever clean up.
+#[gpui::test]
+async fn removing_a_connection_forgets_its_entry_its_password_and_its_pin(cx: &mut TestAppContext) {
+    let (workspace, panel, cx) = workspace_with_panel(cx).await;
+    let store = memory_credentials(cx);
+    store_password(&store, "/tmp/a.sqlite");
+    store_password(&store, "/tmp/b.sqlite");
+    set_connections(cx, &[("a", "/tmp/a.sqlite"), ("b", "/tmp/b.sqlite")]);
+    // The same two on disk, which is what removing has to edit.
+    let fs = workspace.read_with(cx, |workspace, cx| {
+        workspace.project().read(cx).fs().clone()
+    });
+    fs.create_dir(paths::config_dir())
+        .await
+        .expect("config dir");
+    fs.atomic_write(
+        paths::settings_file().clone(),
+        r#"{
+  "database": {
+    "connections": [
+      { "name": "a", "driver": "sqlite", "url": "/tmp/a.sqlite" },
+      { "name": "b", "driver": "sqlite", "url": "/tmp/b.sqlite" }
+    ]
+  }
+}
+"#
+        .to_string(),
+    )
+    .await
+    .expect("settings written");
+    panel.update(cx, |panel, cx| panel.toggle_pin("a", cx));
+
+    panel.update(cx, |panel, cx| panel.remove_connection("a", cx));
+    cx.run_until_parked();
+
+    assert!(
+        store.entry("/tmp/a.sqlite").is_none(),
+        "the removed connection's password is gone"
+    );
+    assert!(store.entry("/tmp/b.sqlite").is_some(), "and nobody else's");
+    assert!(
+        !panel.read_with(cx, |panel, _| panel.is_pinned("a")),
+        "a pin outliving its connection would pin the next one given that name"
+    );
+    let settings = settings_file_text(&workspace, cx).await;
+    assert!(
+        !settings.contains("/tmp/a.sqlite"),
+        "the entry is gone from settings:\n{settings}"
+    );
+    assert!(
+        settings.contains("/tmp/b.sqlite"),
+        "and only that entry:\n{settings}"
+    );
+}
+
+/// The keychain holds one password per URL, so two connections to the same
+/// server share it. Removing one must not log the other out.
+#[gpui::test]
+async fn a_password_another_connection_still_uses_is_kept(cx: &mut TestAppContext) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    let store = memory_credentials(cx);
+    store_password(&store, "/tmp/shared.sqlite");
+    set_connections(
+        cx,
+        &[("a", "/tmp/shared.sqlite"), ("b", "/tmp/shared.sqlite")],
+    );
+
+    panel.update(cx, |panel, cx| panel.remove_connection("a", cx));
+    cx.run_until_parked();
+
+    assert!(store.entry("/tmp/shared.sqlite").is_some());
+}
+
+/// Removing is not undoable, so the menu entry only asks; nothing is removed
+/// until the answer is "Remove".
+#[gpui::test]
+async fn removing_from_the_menu_asks_first(cx: &mut TestAppContext) {
+    let (_workspace, panel, cx) = workspace_with_panel(cx).await;
+    let store = memory_credentials(cx);
+    store_password(&store, "/tmp/a.sqlite");
+    set_connections(cx, &[("a", "/tmp/a.sqlite")]);
+
+    panel.update_in(cx, |panel, window, cx| {
+        panel.confirm_remove_connection(0, window, cx)
+    });
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(
+        store.entry("/tmp/a.sqlite").is_some(),
+        "cancelling removes nothing"
+    );
+
+    panel.update_in(cx, |panel, window, cx| {
+        panel.confirm_remove_connection(0, window, cx)
+    });
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Remove");
+    cx.run_until_parked();
+    assert!(store.entry("/tmp/a.sqlite").is_none());
+}
+
+/// A grid cell is one truncated line, so a long or multi-line value could not
+/// be read in full anywhere. Clicking a row opens it in a detail view, one
+/// field per column; clicking the same row again closes it.
+#[gpui::test]
+async fn clicking_a_row_opens_its_detail_and_clicking_again_closes_it(cx: &mut TestAppContext) {
+    use database::protocol::{Cell, ResultColumn, ResultSet};
+
+    init_test(cx);
+    let languages = std::sync::Arc::new(language::LanguageRegistry::new(cx.executor()));
+    let (view, cx) = cx.add_window_view(|window, cx| {
+        let panel = cx.new(|cx| {
+            DatabasePanel::standalone(
+                gpui::WeakEntity::new_invalid(),
+                languages.clone(),
+                window,
+                cx,
+            )
+        });
+        ResultsFrame { panel }
+    });
+    let panel = view.read_with(cx, |view, _| view.panel.clone());
+
+    panel.update(cx, |panel, cx| {
+        panel.query = crate::query::QueryState::Done(crate::query::Page {
+            result: ResultSet {
+                columns: vec![
+                    ResultColumn {
+                        name: "id".into(),
+                        type_name: "int".into(),
+                    },
+                    ResultColumn {
+                        name: "note".into(),
+                        type_name: "text".into(),
+                    },
+                ],
+                rows: vec![
+                    vec![
+                        Cell::Number { value: "1".into() },
+                        Cell::Text {
+                            value: "first line\nsecond line".into(),
+                        },
+                    ],
+                    vec![Cell::Number { value: "2".into() }, Cell::Null],
+                ],
+                truncated: false,
+                elapsed_ms: 1,
+            },
+            sql: "select * from notes".into(),
+            offset: 0,
+            limit: 200,
+            selected_row: None,
+        });
+        cx.notify();
+    });
+    view.update(cx, |_, cx| cx.notify());
+    draw_again(cx);
+    assert!(
+        cx.debug_bounds("database-row-detail").is_none(),
+        "nothing is shown before a row is clicked"
+    );
+
+    let row = bounds_of(cx, "database-result-row-1");
+    cx.simulate_click(row.center(), gpui::Modifiers::none());
+    draw_again(cx);
+    bounds_of(cx, "database-row-detail");
+    bounds_of(cx, "database-row-detail-field-0");
+    bounds_of(cx, "database-row-detail-field-1");
+    assert_eq!(
+        panel.read_with(cx, |panel, _| match &panel.query {
+            crate::query::QueryState::Done(page) => page.selected_row,
+            _ => None,
+        }),
+        Some(1)
+    );
+
+    let row = bounds_of(cx, "database-result-row-1");
+    cx.simulate_click(row.center(), gpui::Modifiers::none());
+    draw_again(cx);
+    assert!(
+        cx.debug_bounds("database-row-detail").is_none(),
+        "clicking the shown row again closes the detail"
+    );
+}

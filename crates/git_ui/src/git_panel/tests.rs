@@ -4,7 +4,7 @@ use git::{
 };
 use gpui::{TestAppContext, UpdateGlobal, VisualTestContext, px};
 use indoc::indoc;
-use project::FakeFs;
+use project::{FakeFs, WorktreeId};
 use serde_json::json;
 use settings::SettingsStore;
 use theme::LoadThemes;
@@ -2479,6 +2479,7 @@ async fn test_commits_section_height_survives_serialization(cx: &mut TestAppCont
             section_collapse: None,
             commits_section_height: Some(5_000.),
             graph_section_height: None,
+            repositories_section_height: None,
         };
         panel.apply_serialized_state(out_of_range, cx);
         assert_eq!(panel.commits_section_height, COMMITS_SECTION_MAX_HEIGHT);
@@ -2551,6 +2552,244 @@ async fn test_expanding_graph_section_requests_the_log(cx: &mut TestAppContext) 
     );
 }
 
+fn graph_status(panel: &Entity<GitPanel>, cx: &mut VisualTestContext) -> Option<SharedString> {
+    panel.update_in(cx, |panel, _, cx| panel.graph_status_message(cx))
+}
+
+/// A failed log used to look exactly like a slow one: the section said "Loading graph…" for as long
+/// as it had no rows, so the reason nothing arrived was nowhere on screen.
+#[gpui::test]
+async fn test_graph_section_says_why_the_log_failed(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, _repository, mut cx) = init_commits_panel(cx).await;
+    let cx = &mut cx;
+
+    panel
+        .read_with(cx, |panel, _| panel.fs.clone())
+        .as_fake()
+        .set_graph_error(path!("/project/.git").as_ref(), Some("boom".to_string()));
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Graph, cx);
+    });
+    cx.run_until_parked();
+
+    let message = graph_status(&panel, cx).expect("a failed log has to say so");
+    assert!(
+        message.contains("boom"),
+        "the failure's reason must reach the section, got {message:?}"
+    );
+}
+
+/// An empty history and one still being read both have no rows; only the first is final.
+#[gpui::test]
+async fn test_graph_section_tells_an_empty_log_from_a_loading_one(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, _repository, mut cx) = init_commits_panel(cx).await;
+    let cx = &mut cx;
+
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Graph, cx);
+    });
+    assert_eq!(
+        graph_status(&panel, cx),
+        Some(SharedString::from("Loading graph…")),
+        "before the fetch has ended, no rows means still loading"
+    );
+
+    cx.run_until_parked();
+    assert_eq!(
+        graph_status(&panel, cx),
+        Some(SharedString::from("No commits")),
+        "a fetch that ended with nothing is an empty history, not a slow one"
+    );
+}
+
+#[gpui::test]
+async fn test_graph_section_has_no_status_once_rows_arrive(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, _repository, mut cx) = init_commits_panel_with_log(cx, linear_graph_log(3)).await;
+    let cx = &mut cx;
+
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Graph, cx);
+    });
+    cx.run_until_parked();
+
+    assert_eq!(
+        graph_status(&panel, cx),
+        None,
+        "rows on screen need no message above them"
+    );
+}
+
+fn graph_fetch_count(panel: &Entity<GitPanel>, cx: &mut VisualTestContext) -> usize {
+    panel
+        .read_with(cx, |panel, _| panel.fs.clone())
+        .as_fake()
+        .graph_fetch_count(path!("/project/.git").as_ref())
+}
+
+/// The panel re-runs `ensure_graph_loaded` on every status update. A failed log has no rows, so
+/// taking "no rows" for "not loaded" fetched it again on each update, and the section flickered
+/// between the error and "Loading graph…" for as long as files kept changing.
+#[gpui::test]
+async fn test_status_updates_do_not_refetch_a_failed_graph(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, _repository, mut cx) = init_commits_panel(cx).await;
+    let cx = &mut cx;
+    let fs = panel.read_with(cx, |panel, _| panel.fs.clone());
+
+    fs.as_fake()
+        .set_graph_error(path!("/project/.git").as_ref(), Some("boom".to_string()));
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Graph, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(graph_fetch_count(&panel, cx), 1);
+
+    for round in 0..3 {
+        // A new untracked file changes the statuses, which is what schedules a panel update.
+        fs.as_fake()
+            .insert_file(
+                Path::new(path!("/project")).join(format!("untracked_{round}")),
+                b"new\n".to_vec(),
+            )
+            .await;
+        cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+        cx.run_until_parked();
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel
+                .entries
+                .iter()
+                .filter(|entry| entry.status_entry().is_some())
+                .count()),
+            round + 2,
+            "status update {round} should have reached the panel"
+        );
+
+        assert_eq!(
+            graph_fetch_count(&panel, cx),
+            1,
+            "status update {round} fetched the failed graph again"
+        );
+        let message = graph_status(&panel, cx).expect("a failed log has to say so");
+        assert!(
+            message.contains("boom"),
+            "status update {round} replaced the error with {message:?}"
+        );
+    }
+}
+
+/// The reload button is how a failed graph is asked for again.
+#[gpui::test]
+async fn test_reloading_the_graph_retries_a_failed_log(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, _repository, mut cx) = init_commits_panel(cx).await;
+    let cx = &mut cx;
+    let fs = panel.read_with(cx, |panel, _| panel.fs.clone());
+    let dot_git: &Path = path!("/project/.git").as_ref();
+
+    fs.as_fake()
+        .set_graph_error(dot_git, Some("boom".to_string()));
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Graph, cx);
+    });
+    cx.run_until_parked();
+    assert!(graph_status(&panel, cx).is_some_and(|message| message.contains("boom")));
+
+    fs.as_fake().set_graph_error(dot_git, None);
+    fs.as_fake().set_graph_commits(dot_git, linear_graph_log(3));
+    panel.update_in(cx, |panel, _, cx| panel.invalidate_graph(cx));
+    cx.run_until_parked();
+
+    assert_eq!(
+        graph_fetch_count(&panel, cx),
+        2,
+        "reloading must fetch again"
+    );
+    assert_eq!(graph_status(&panel, cx), None);
+    assert_eq!(
+        panel.update_in(cx, |panel, _, _| panel
+            .graph_section
+            .as_ref()
+            .map_or(0, |state| state.graph_data.commits.len())),
+        3
+    );
+
+    panel.update_in(cx, |panel, _, cx| panel.invalidate_graph(cx));
+    cx.run_until_parked();
+    assert_eq!(
+        graph_fetch_count(&panel, cx),
+        2,
+        "a graph that loaded is served from the cache, not fetched again"
+    );
+}
+
+async fn detach_head(panel: &Entity<GitPanel>, cx: &mut VisualTestContext) {
+    panel
+        .read_with(cx, |panel, _| panel.fs.clone())
+        .as_fake()
+        .set_branch_name(path!("/project/.git").as_ref(), None::<&str>);
+    cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+    cx.run_until_parked();
+    assert_eq!(
+        panel.update_in(cx, |panel, _, cx| panel.current_branch_ref(cx)),
+        None,
+        "the fixture should now have no branch checked out"
+    );
+}
+
+/// "Auto" follows the checked-out branch, so with HEAD detached it has nothing to follow, and it
+/// has to say so rather than wait on a log nobody asked for.
+#[gpui::test]
+async fn test_graph_section_on_auto_says_no_branch_is_checked_out(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, _repository, mut cx) = init_commits_panel_with_log(cx, linear_graph_log(3)).await;
+    let cx = &mut cx;
+    detach_head(&panel, cx).await;
+
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Graph, cx);
+    });
+    cx.run_until_parked();
+
+    assert!(panel.update_in(cx, |panel, _, _| panel.graph_log_source_is_auto()));
+    assert_eq!(
+        graph_status(&panel, cx),
+        Some(SharedString::from("No branch checked out"))
+    );
+    assert_eq!(graph_fetch_count(&panel, cx), 0);
+}
+
+/// "All" shows every ref, which needs no branch, so a detached HEAD must not leave it loading.
+#[gpui::test]
+async fn test_graph_section_on_all_loads_with_a_detached_head(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, _repository, mut cx) = init_commits_panel_with_log(cx, linear_graph_log(3)).await;
+    let cx = &mut cx;
+    detach_head(&panel, cx).await;
+
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Graph, cx);
+    });
+    cx.run_until_parked();
+    panel.update_in(cx, |panel, _, cx| panel.toggle_graph_log_source(cx));
+    cx.run_until_parked();
+
+    assert!(
+        !panel.update_in(cx, |panel, _, _| panel.graph_log_source_is_auto()),
+        "the graph should have moved onto all refs"
+    );
+    assert_eq!(graph_status(&panel, cx), None);
+    assert_eq!(
+        panel.update_in(cx, |panel, _, _| panel
+            .graph_section
+            .as_ref()
+            .map_or(0, |state| state.graph_data.commits.len())),
+        3
+    );
+}
+
 /// The handle sits on the section's top edge, the boundary it shares with the section that yields
 /// the space, so dragging it up has to make the section taller. Under the content the opposite held,
 /// and the last section's handle landed against the bottom of the panel.
@@ -2613,6 +2852,10 @@ async fn test_commit_row_keeps_its_subject_beside_two_long_refs(cx: &mut TestApp
         panel.toggle_section(PanelSectionKind::Commits, cx);
     });
     cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+    cx.run_until_parked();
+    // Commit details land after the rows are first drawn; repaint the panel itself so the frame
+    // measured below is one the panel drew rather than one that reused its cached view.
+    panel.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
 
     let row = cx
@@ -2700,6 +2943,70 @@ async fn test_expanded_graph_section_lays_out_its_row_list(cx: &mut TestAppConte
     assert!(
         list_box.item.width > px(0.),
         "the graph row list was laid out with no width"
+    );
+}
+
+/// A log that died partway has rows and an error at once. The error sits above the rows, outside
+/// the lane canvas's container, and the row list still has to get the rest of the section's height.
+/// Measured from a docked panel, since only a frame the window drew itself has `debug_bounds`.
+#[gpui::test]
+async fn test_graph_section_lays_out_its_rows_under_an_error(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, _repository, mut cx) = init_commits_panel_with_log(cx, linear_graph_log(8)).await;
+    let cx = &mut cx;
+    panel
+        .read_with(cx, |panel, _| panel.fs.clone())
+        .as_fake()
+        .set_graph_error(path!("/project/.git").as_ref(), Some("boom".to_string()));
+
+    let workspace = panel.read_with(cx, |panel, _| panel.workspace.clone());
+    workspace
+        .update_in(cx, |workspace, window, cx| {
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace.open_panel::<GitPanel>(window, cx);
+        })
+        .expect("the fixture's workspace is alive");
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Graph, cx);
+    });
+    cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+    cx.run_until_parked();
+    panel.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+
+    assert_eq!(
+        panel.update_in(cx, |panel, _, _| panel
+            .graph_section
+            .as_ref()
+            .map_or(0, |state| state.graph_data.commits.len())),
+        8,
+        "the commits before the failure must still be shown"
+    );
+    assert!(
+        graph_status(&panel, cx).is_some_and(|message| message.contains("boom")),
+        "the failure must be reported beside the rows"
+    );
+
+    let status = cx
+        .debug_bounds("graph-section-status")
+        .expect("the status row must be drawn above the rows");
+    assert!(status.size.height > px(0.));
+
+    let list_box = panel
+        .update_in(cx, |panel, _, _| {
+            panel
+                .graph_section
+                .as_ref()
+                .and_then(|state| state.scroll_handle.0.borrow().last_item_size)
+        })
+        .expect("the row list must reach layout under the status row");
+    let section_height = panel.update_in(cx, |panel, _, _| panel.graph_section_height);
+    assert!(
+        list_box.item.height >= section_height - status.size.height - px(1.),
+        "the row list was laid out {:?} tall in a {:?} section under a {:?} status row",
+        list_box.item.height,
+        section_height,
+        status.size.height
     );
 }
 
@@ -3012,5 +3319,422 @@ async fn test_discard_all_menu_gating_follows_the_changes(cx: &mut TestAppContex
     let (fixture, mut cx) = init_discard_all_panel(cx, true).await;
     fixture.panel.update(&mut cx, |panel, _| {
         assert!(panel.has_discardable_changes());
+    });
+}
+
+async fn init_reload_repositories_panel(
+    fs: &Arc<FakeFs>,
+    roots: &[&Path],
+    cx: &mut TestAppContext,
+) -> (
+    Entity<Project>,
+    Entity<Workspace>,
+    Entity<GitPanel>,
+    VisualTestContext,
+) {
+    let project = Project::test(fs.clone(), roots.iter().copied(), cx).await;
+    let window_handle =
+        cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window_handle
+        .read_with(cx, |mw, _| mw.workspace().clone())
+        .unwrap();
+    let mut cx = VisualTestContext::from_window(window_handle.into(), cx);
+    let panel = workspace.update_in(&mut cx, GitPanel::new);
+    cx.run_until_parked();
+    (project, workspace, panel, cx)
+}
+
+/// Creates repositories the way a watcher across a WSL or SSH boundary can miss them.
+async fn add_repositories_without_a_watcher_event(fs: &FakeFs, directories: &[&str]) {
+    fs.pause_events();
+    for directory in directories {
+        fs.insert_tree(directory, json!({ ".git": {}, "file.txt": "" }))
+            .await;
+    }
+    fs.clear_buffered_events();
+    fs.unpause_events_and_flush();
+}
+
+#[gpui::test]
+async fn test_reload_repositories_rescans_every_visible_worktree(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(path!("/root1"), json!({ ".git": {} })).await;
+    fs.insert_tree(path!("/root2"), json!({ ".git": {} })).await;
+    let (_project, _workspace, panel, mut cx) = init_reload_repositories_panel(
+        &fs,
+        &[Path::new(path!("/root1")), Path::new(path!("/root2"))],
+        cx,
+    )
+    .await;
+    let cx = &mut cx;
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.sorted_repo_ids.len()),
+        2
+    );
+
+    add_repositories_without_a_watcher_event(
+        &fs,
+        &[path!("/root1/nested1"), path!("/root2/nested2")],
+    )
+    .await;
+    cx.run_until_parked();
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.sorted_repo_ids.len()),
+        2,
+        "the watcher missed both repositories"
+    );
+
+    panel.update(cx, |panel, cx| panel.reload_repositories(cx));
+    cx.executor().advance_clock(MIN_RELOAD_SPINNER);
+    cx.run_until_parked();
+
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.sorted_repo_ids.len()),
+        4,
+        "a repository in each worktree is found, not only in the active one"
+    );
+}
+
+#[gpui::test]
+async fn test_reload_repositories_is_single_flight(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(path!("/root"), json!({ ".git": {} })).await;
+    let (_project, _workspace, panel, mut cx) =
+        init_reload_repositories_panel(&fs, &[Path::new(path!("/root"))], cx).await;
+    let cx = &mut cx;
+    let reloading =
+        |cx: &mut VisualTestContext| panel.read_with(cx, |panel, _| panel.reloading_repositories);
+
+    panel.update(cx, |panel, cx| panel.reload_repositories(cx));
+    assert!(reloading(cx), "the spinner starts at once");
+
+    // The scan itself is long done by now; only the spinner is still up.
+    cx.executor().advance_clock(MIN_RELOAD_SPINNER / 2);
+    cx.run_until_parked();
+    let read_dir_calls_before = fs.read_dir_call_count();
+    panel.update(cx, |panel, cx| panel.reload_repositories(cx));
+    cx.run_until_parked();
+    assert_eq!(
+        fs.read_dir_call_count(),
+        read_dir_calls_before,
+        "a press while the spinner is up must not start another batch"
+    );
+
+    // The second press must not restart the minimum spinner time either.
+    cx.executor().advance_clock(MIN_RELOAD_SPINNER / 2);
+    cx.run_until_parked();
+    assert!(
+        !reloading(cx),
+        "the flag clears once the reload has run its course"
+    );
+}
+
+#[gpui::test]
+async fn test_reload_repositories_failure_shows_notification(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(path!("/root1"), json!({ ".git": {} })).await;
+    fs.insert_tree(path!("/root2"), json!({ ".git": {} })).await;
+    let (project, workspace, panel, mut cx) = init_reload_repositories_panel(
+        &fs,
+        &[Path::new(path!("/root1")), Path::new(path!("/root2"))],
+        cx,
+    )
+    .await;
+    let cx = &mut cx;
+    project.update(cx, |project, _| project.mark_as_collab_for_testing());
+
+    let read_dir_calls_before = fs.read_dir_call_count();
+    panel.update(cx, |panel, cx| panel.reload_repositories(cx));
+    cx.executor().advance_clock(MIN_RELOAD_SPINNER);
+    cx.run_until_parked();
+
+    assert_eq!(fs.read_dir_call_count(), read_dir_calls_before);
+    workspace.update(cx, |workspace, _| {
+        assert_eq!(
+            workspace.notification_ids().len(),
+            1,
+            "two refusals are reported as one notification"
+        );
+    });
+    assert!(!panel.read_with(cx, |panel, _| panel.reloading_repositories));
+}
+
+fn visible_worktree_ids(project: &Entity<Project>, cx: &mut VisualTestContext) -> Vec<WorktreeId> {
+    project.read_with(cx, |project, cx| {
+        project
+            .visible_worktrees(cx)
+            .map(|worktree| worktree.read(cx).id())
+            .collect()
+    })
+}
+
+#[gpui::test]
+async fn test_reload_repositories_of_removed_worktrees_stays_silent(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(path!("/root1"), json!({ ".git": {} })).await;
+    fs.insert_tree(path!("/root2"), json!({ ".git": {} })).await;
+    let (project, workspace, panel, mut cx) = init_reload_repositories_panel(
+        &fs,
+        &[Path::new(path!("/root1")), Path::new(path!("/root2"))],
+        cx,
+    )
+    .await;
+    let cx = &mut cx;
+    let worktree_ids = visible_worktree_ids(&project, cx);
+    // A guest refusal is the one failure a local project can produce; what is under test is that
+    // a failure is not reported once its worktree is gone, whatever the failure was.
+    project.update(cx, |project, _| project.mark_as_collab_for_testing());
+
+    panel.update(cx, |panel, cx| panel.reload_repositories(cx));
+    for worktree_id in worktree_ids {
+        project.update(cx, |project, cx| project.remove_worktree(worktree_id, cx));
+    }
+    cx.executor().advance_clock(MIN_RELOAD_SPINNER);
+    cx.run_until_parked();
+
+    workspace.update(cx, |workspace, _| {
+        assert!(
+            workspace.notification_ids().is_empty(),
+            "a reload that failed because its folders were removed has nothing left to tell the user"
+        );
+    });
+    assert!(!panel.read_with(cx, |panel, _| panel.reloading_repositories));
+}
+
+#[gpui::test]
+async fn test_reload_repositories_still_reports_a_worktree_that_remains(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(path!("/root1"), json!({ ".git": {} })).await;
+    fs.insert_tree(path!("/root2"), json!({ ".git": {} })).await;
+    let (project, workspace, panel, mut cx) = init_reload_repositories_panel(
+        &fs,
+        &[Path::new(path!("/root1")), Path::new(path!("/root2"))],
+        cx,
+    )
+    .await;
+    let cx = &mut cx;
+    let worktree_ids = visible_worktree_ids(&project, cx);
+    project.update(cx, |project, _| project.mark_as_collab_for_testing());
+
+    panel.update(cx, |panel, cx| panel.reload_repositories(cx));
+    project.update(cx, |project, cx| {
+        project.remove_worktree(worktree_ids[0], cx)
+    });
+    cx.executor().advance_clock(MIN_RELOAD_SPINNER);
+    cx.run_until_parked();
+
+    workspace.update(cx, |workspace, _| {
+        assert_eq!(
+            workspace.notification_ids().len(),
+            1,
+            "the folder that is still open failed to reload, and that is still news"
+        );
+    });
+}
+
+/// The reload button is drawn only while the pointer is over the header it sits in, and nothing
+/// but the button itself carries a selector. So the pointer walks down the panel until the button
+/// has appeared.
+fn hover_the_repositories_header(cx: &mut VisualTestContext) -> Bounds<Pixels> {
+    let panel_bounds = cx
+        .debug_bounds("dock-panel")
+        .expect("the docked panel is drawn");
+    let mut y = panel_bounds.origin.y;
+    while y < panel_bounds.bottom() {
+        cx.simulate_mouse_move(
+            point(panel_bounds.origin.x + px(40.), y),
+            None,
+            gpui::Modifiers::default(),
+        );
+        if let Some(button) = cx.debug_bounds("reload-repositories") {
+            return button;
+        }
+        y += px(4.);
+    }
+    panic!("no height of the panel showed the reload button on hover");
+}
+
+/// A panel in an open dock, which is what it takes for the window to draw it.
+async fn init_reload_repositories_panel_in_open_dock(
+    fs: &Arc<FakeFs>,
+    root: &Path,
+    cx: &mut TestAppContext,
+) -> (
+    Entity<Project>,
+    Entity<Workspace>,
+    Entity<GitPanel>,
+    VisualTestContext,
+) {
+    let (project, workspace, panel, mut cx) = init_reload_repositories_panel(fs, &[root], cx).await;
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.add_panel(panel.clone(), window, cx);
+        workspace.open_panel::<GitPanel>(window, cx);
+    });
+    cx.run_until_parked();
+    (project, workspace, panel, cx)
+}
+
+fn repositories_section_is_expanded(panel: &Entity<GitPanel>, cx: &mut VisualTestContext) -> bool {
+    panel.read_with(cx, |panel, _| {
+        panel.section_expanded(PanelSectionKind::Repositories)
+    })
+}
+
+#[gpui::test]
+async fn test_pressing_the_disabled_reload_button_leaves_the_section_expanded(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(path!("/root"), json!({ ".git": {} })).await;
+    let (project, _workspace, panel, mut cx) =
+        init_reload_repositories_panel_in_open_dock(&fs, Path::new(path!("/root")), cx).await;
+    let cx = &mut cx;
+    project.update(cx, |project, _| project.mark_as_collab_for_testing());
+    panel.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    assert!(repositories_section_is_expanded(&panel, cx));
+
+    let button = hover_the_repositories_header(cx);
+    cx.simulate_click(button.center(), gpui::Modifiers::default());
+
+    assert!(
+        repositories_section_is_expanded(&panel, cx),
+        "a press on the greyed-out button must not fold the section it sits in"
+    );
+}
+
+#[gpui::test]
+async fn test_pressing_the_reload_button_reloads_and_leaves_the_section_expanded(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(path!("/root"), json!({ ".git": {} })).await;
+    let (_project, _workspace, panel, mut cx) =
+        init_reload_repositories_panel_in_open_dock(&fs, Path::new(path!("/root")), cx).await;
+    let cx = &mut cx;
+
+    let button = hover_the_repositories_header(cx);
+    cx.simulate_click(button.center(), gpui::Modifiers::default());
+
+    assert!(
+        panel.read_with(cx, |panel, _| panel.reloading_repositories),
+        "the press starts a reload"
+    );
+    assert!(
+        repositories_section_is_expanded(&panel, cx),
+        "and does not fold the section it sits in"
+    );
+}
+
+fn repository_rows_height(cx: &mut VisualTestContext) -> Pixels {
+    cx.debug_bounds("repository-rows")
+        .expect("the repository rows are drawn")
+        .size
+        .height
+}
+
+/// Presses the boundary between `Repositories` and `Changes` and moves it by `delta`.
+fn drag_repositories_boundary(cx: &mut VisualTestContext, delta: Pixels) {
+    let handle = cx
+        .debug_bounds("repositories-section-resize-handle")
+        .expect("an expanded Repositories section has a handle on its boundary with Changes");
+    let start = handle.center();
+    let modifiers = gpui::Modifiers::default();
+    // Hit-testing reads the hover state the last mouse move left behind.
+    cx.simulate_mouse_move(start, None, modifiers);
+    cx.simulate_mouse_down(start, MouseButton::Left, modifiers);
+    // The move past GPUI's 2px threshold only starts the drag; the first drag-move after it is what
+    // records where the drag began. Only moves after that one change the height.
+    let past_threshold = point(start.x, start.y + px(3.));
+    cx.simulate_mouse_move(past_threshold, MouseButton::Left, modifiers);
+    let origin = point(start.x, past_threshold.y + px(1.));
+    cx.simulate_mouse_move(origin, MouseButton::Left, modifiers);
+    let end = point(start.x, origin.y + delta);
+    cx.simulate_mouse_move(end, MouseButton::Left, modifiers);
+    cx.simulate_mouse_up(end, MouseButton::Left, modifiers);
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+async fn test_dragging_the_repositories_boundary_resizes_the_section(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(path!("/root"), json!({ ".git": {} })).await;
+    let (_project, _workspace, panel, mut cx) =
+        init_reload_repositories_panel_in_open_dock(&fs, Path::new(path!("/root")), cx).await;
+    let cx = &mut cx;
+
+    let natural_height = repository_rows_height(cx);
+    assert_eq!(
+        natural_height,
+        px(36.),
+        "before any drag the section is as tall as its one row"
+    );
+
+    drag_repositories_boundary(cx, px(100.));
+    assert_eq!(
+        repository_rows_height(cx),
+        natural_height + px(100.),
+        "dragging the boundary down grows Repositories by the same distance"
+    );
+
+    drag_repositories_boundary(cx, px(-40.));
+    assert_eq!(
+        repository_rows_height(cx),
+        natural_height + px(60.),
+        "and dragging it back up shrinks it again"
+    );
+
+    drag_repositories_boundary(cx, px(-1_000.));
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.repositories_section_height),
+        Some(REPOSITORY_ROW_HEIGHT),
+        "the section never shrinks below one row"
+    );
+}
+
+#[gpui::test]
+async fn test_repositories_section_height_survives_serialization(cx: &mut TestAppContext) {
+    init_test(cx);
+    let (panel, _repository, mut cx) = init_commits_panel(cx).await;
+    let cx = &mut cx;
+
+    panel.update_in(cx, |panel, _, cx| {
+        assert_eq!(
+            panel.repositories_section_height, None,
+            "a panel never resized keeps the natural height"
+        );
+        panel.repositories_section_height = Some(px(250.));
+        let round_tripped = serde_json::from_str::<SerializedGitPanel>(
+            &serde_json::to_string(&panel.serialized_state()).expect("serializes"),
+        )
+        .expect("deserializes");
+        panel.repositories_section_height = None;
+        panel.apply_serialized_state(round_tripped, cx);
+        assert_eq!(panel.repositories_section_height, Some(px(250.)));
+    });
+
+    panel.update_in(cx, |panel, _, cx| {
+        let from_an_older_build = serde_json::from_str::<SerializedGitPanel>("{}")
+            .expect("a blob without the field still deserializes");
+        panel.apply_serialized_state(from_an_older_build, cx);
+        assert_eq!(panel.repositories_section_height, None);
+
+        let out_of_range = serde_json::from_str::<SerializedGitPanel>(
+            r#"{ "repositories_section_height": 5000.0 }"#,
+        )
+        .expect("deserializes");
+        panel.apply_serialized_state(out_of_range, cx);
+        assert_eq!(
+            panel.repositories_section_height,
+            Some(COMMITS_SECTION_MAX_HEIGHT)
+        );
     });
 }

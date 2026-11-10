@@ -1,8 +1,10 @@
 pub mod methods;
 pub mod types;
+pub mod url_import;
 
 pub use methods::*;
 pub use types::*;
+pub use url_import::ImportedUrl;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

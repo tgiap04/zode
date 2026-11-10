@@ -470,6 +470,7 @@ impl HeadlessProject {
         session.add_request_handler(cx.weak_entity(), Self::handle_get_remote_profiling_data);
 
         session.add_entity_request_handler(Self::handle_add_worktree);
+        session.add_entity_request_handler(Self::handle_rescan_worktree);
         session.add_request_handler(cx.weak_entity(), Self::handle_remove_worktree);
 
         session.add_entity_request_handler(Self::handle_open_buffer_by_path);
@@ -779,6 +780,34 @@ impl HeadlessProject {
 
         Ok(proto::OpenBufferResponse {
             buffer_id: buffer_id.to_proto(),
+        })
+    }
+
+    pub async fn handle_rescan_worktree(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::RescanWorktree>,
+        mut cx: AsyncApp,
+    ) -> Result<proto::RescanWorktreeResponse> {
+        let worktree_id = WorktreeId::from_proto(envelope.payload.worktree_id);
+        let (worktree_store, git_store) = this.read_with(&cx, |this, _| {
+            (this.worktree_store.clone(), this.git_store.clone())
+        });
+        let worktree = worktree_store
+            .read_with(&cx, |store, cx| store.worktree_for_id(worktree_id, cx))
+            .with_context(|| format!("no worktree with id {worktree_id}"))?;
+
+        worktree
+            .update(&mut cx, |worktree, cx| worktree.rescan(cx))
+            .await?;
+        git_store
+            .update(&mut cx, |git_store, cx| {
+                git_store.rescan_repositories_in_worktree(worktree_id, cx)
+            })
+            .await;
+
+        let scan_id = worktree.read_with(&cx, |worktree, _| worktree.scan_id());
+        Ok(proto::RescanWorktreeResponse {
+            worktree_scan_id: scan_id as u64,
         })
     }
 

@@ -520,6 +520,11 @@ pub(crate) fn register(
         // the editor rather than any buffer. Only the dock buttons, and the
         // remote-control indicator while remote control is on, are added
         // earlier and so sit to its right.
+        // The plan tag sits at the very end, right of the version: like it, a fact about the
+        // editor and not any buffer. It draws nothing unless the account is on a paid plan.
+        let plan_badge = cx.new(|cx| zode_account_ui::PlanBadge::new(cx));
+        status_bar.add_right_item(plan_badge, window, cx);
+
         let rank = status_bar.add_right_item(app_version, window, cx);
         status_bar.register_toggleable_item(APP_VERSION.spec(
             rank,

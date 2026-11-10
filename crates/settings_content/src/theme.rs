@@ -160,6 +160,33 @@ pub struct ThemeSettingsContent {
     #[schemars(range(min = 0.0, max = 0.9))]
     pub unnecessary_code_fade: Option<CodeFade>,
 
+    /// How opaque the window's backgrounds are: 1 is solid, 0 is see-through.
+    /// Every background fades evenly, so all of the window shows what is
+    /// behind -- the desktop, or the background image -- to the same degree.
+    /// On macOS text and icons stay solid (vibrancy); elsewhere, for now, the
+    /// whole window fades, text included. With vibrancy or a background image
+    /// the backgrounds are faded further, to 88% of this, as opaque as
+    /// Tabby's vibrancy looks, so the glass always shows.
+    ///
+    /// Default: 1.0
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub window_opacity: Option<WindowOpacity>,
+
+    /// Vibrancy: the window shows what is behind it through its backgrounds,
+    /// blurred, while text and icons stay solid. Without a background image the
+    /// desktop shows through the system's vibrancy material; with one, the
+    /// image does, blurred.
+    ///
+    /// Default: false
+    pub window_vibrancy: Option<bool>,
+
+    /// An image to show behind the window's surfaces, by its path on this
+    /// machine. The image is read from that path and never copied: moving or
+    /// deleting the file removes it from the window.
+    ///
+    /// Default: "" (no image)
+    pub window_background_image: Option<WindowBackgroundImagePath>,
+
     /// EXPERIMENTAL: Overrides for the current theme.
     ///
     /// These values will override the ones on the current theme specified in `theme`.
@@ -215,6 +242,60 @@ impl From<f32> for FontSize {
 )]
 #[serde(transparent)]
 pub struct CodeFade(#[serde(serialize_with = "serialize_f32_with_two_decimal_places")] pub f32);
+
+/// How opaque the window's surfaces are, from 0 to 1.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    PartialEq,
+    PartialOrd,
+    derive_more::FromStr,
+)]
+#[serde(transparent)]
+pub struct WindowOpacity(
+    #[serde(serialize_with = "serialize_f32_with_two_decimal_places")] pub f32,
+);
+
+impl Display for WindowOpacity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:.2}", self.0)
+    }
+}
+
+impl From<f32> for WindowOpacity {
+    fn from(x: f32) -> Self {
+        Self(x)
+    }
+}
+
+/// The path of the image behind the window. Its own type so the settings UI can
+/// offer a file picker for it rather than only a text box.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct WindowBackgroundImagePath(pub String);
+
+impl From<String> for WindowBackgroundImagePath {
+    fn from(path: String) -> Self {
+        Self(path)
+    }
+}
+
+impl From<WindowBackgroundImagePath> for String {
+    fn from(path: WindowBackgroundImagePath) -> Self {
+        path.0
+    }
+}
+
+impl AsRef<str> for WindowBackgroundImagePath {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
 
 impl Display for CodeFade {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

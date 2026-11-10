@@ -45,10 +45,11 @@ struct MenuEntry {
 pub struct ApplicationMenu {
     entries: SmallVec<[MenuEntry; 8]>,
     pending_menu_open: Option<String>,
+    always_inline: bool,
 }
 
 impl ApplicationMenu {
-    pub fn new(_: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(always_inline: bool, _: &mut Window, cx: &mut Context<Self>) -> Self {
         let menus = cx.get_menus().unwrap_or_default();
         Self {
             entries: menus
@@ -59,6 +60,7 @@ impl ApplicationMenu {
                 })
                 .collect(),
             pending_menu_open: None,
+            always_inline,
         }
     }
 
@@ -205,7 +207,9 @@ impl ApplicationMenu {
                     .with_handle(current_handle.clone()),
             )
             .on_hover(move |hover_enter, window, cx| {
-                if *hover_enter && !current_handle.is_deployed() {
+                let any_menu_open = all_handles.iter().any(|handle| handle.is_deployed());
+                if switches_menu_on_hover(*hover_enter, current_handle.is_deployed(), any_menu_open)
+                {
                     all_handles.iter().for_each(|h| h.hide(cx));
 
                     // We need to defer this so that this menu handle can take focus from the previous menu
@@ -264,11 +268,24 @@ impl ApplicationMenu {
         cx.defer_in(window, move |_, window, cx| next_handle.show(window, cx));
     }
 
+    /// Inline menus sit beside the project items; only the collapsible
+    /// hamburger variant needs the room when it expands.
+    pub fn hides_project_items(&self, cx: &mut Context<Self>) -> bool {
+        !self.always_inline && self.all_menus_shown(cx)
+    }
+
     pub fn all_menus_shown(&self, cx: &mut Context<Self>) -> bool {
-        show_menus(cx)
+        self.always_inline
+            || show_menus(cx)
             || self.entries.iter().any(|entry| entry.handle.is_deployed())
             || self.pending_menu_open.is_some()
     }
+}
+
+/// Bare hover must not open a menu, or sweeping the pointer across an always
+/// visible menu bar would pop them open; hover only moves between open menus.
+fn switches_menu_on_hover(hover_enter: bool, this_menu_open: bool, any_menu_open: bool) -> bool {
+    hover_enter && !this_menu_open && any_menu_open
 }
 
 pub(crate) fn show_menus(cx: &mut App) -> bool {
@@ -323,5 +340,96 @@ impl Render for ApplicationMenu {
                         .map(|entry| self.render_standard_menu(entry)),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+    use workspace::AppState;
+
+    fn push_entries(menu: &mut ApplicationMenu) {
+        for name in ["File", "Edit"] {
+            menu.entries.push(MenuEntry {
+                menu: OwnedMenu {
+                    name: name.into(),
+                    items: Vec::new(),
+                    disabled: false,
+                },
+                handle: PopoverMenuHandle::default(),
+            });
+        }
+    }
+
+    fn menu_window(
+        always_inline: bool,
+        cx: &mut TestAppContext,
+    ) -> (Entity<ApplicationMenu>, &mut gpui::VisualTestContext) {
+        cx.update(AppState::test);
+        let (menu, cx) = cx.add_window_view(|window, cx| {
+            let mut menu = ApplicationMenu::new(always_inline, window, cx);
+            push_entries(&mut menu);
+            menu
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+        (menu, cx)
+    }
+
+    #[gpui::test]
+    async fn inline_menus_draw_no_hamburger(cx: &mut TestAppContext) {
+        let (menu, cx) = menu_window(true, cx);
+        assert!(menu.update(cx, |menu, cx| menu.all_menus_shown(cx)));
+        assert!(
+            cx.debug_bounds("ICON-Menu").is_none(),
+            "always-inline menus must not draw the hamburger"
+        );
+        let (_menu, cx) = menu_window(false, cx);
+        assert!(
+            cx.debug_bounds("ICON-Menu").is_some(),
+            "a collapsible menu still draws the hamburger"
+        );
+    }
+
+    #[gpui::test]
+    async fn inline_menus_never_hide_project_items(cx: &mut TestAppContext) {
+        let (menu, cx) = menu_window(true, cx);
+        menu.update(cx, |menu, cx| {
+            assert!(!menu.hides_project_items(cx));
+            menu.pending_menu_open = Some("File".into());
+            assert!(!menu.hides_project_items(cx));
+        });
+
+        let (menu, cx) = menu_window(false, cx);
+        menu.update(cx, |menu, cx| {
+            assert!(!menu.hides_project_items(cx));
+            menu.pending_menu_open = Some("File".into());
+            assert!(menu.hides_project_items(cx));
+        });
+    }
+
+    #[test]
+    fn switches_menu_on_hover_only_between_open_menus() {
+        // (hover_enter, this_menu_open, any_menu_open) -> switches
+        let cases = [
+            ((false, false, false), false),
+            ((false, false, true), false),
+            ((false, true, true), false),
+            // Sweeping across the bar with nothing open must not pop a menu.
+            ((true, false, false), false),
+            // Already showing this menu: nothing to switch to.
+            ((true, true, true), false),
+            // Another menu is open: hovering this one moves to it.
+            ((true, false, true), true),
+        ];
+        for ((hover_enter, this_menu_open, any_menu_open), expected) in cases {
+            assert_eq!(
+                switches_menu_on_hover(hover_enter, this_menu_open, any_menu_open),
+                expected,
+                "hover_enter={hover_enter} this_menu_open={this_menu_open} any_menu_open={any_menu_open}"
+            );
+        }
     }
 }

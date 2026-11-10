@@ -12186,6 +12186,218 @@ async fn test_initial_scan_complete(cx: &mut gpui::TestAppContext) {
     });
 }
 
+fn sorted_repository_paths(
+    project: &Entity<Project>,
+    cx: &mut gpui::TestAppContext,
+) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = project.read_with(cx, |project, cx| {
+        project
+            .repositories(cx)
+            .values()
+            .map(|repository| repository.read(cx).work_directory_abs_path.to_path_buf())
+            .collect()
+    });
+    paths.sort();
+    paths
+}
+
+#[gpui::test]
+async fn test_project_rescan_worktree_reloads_repository_status(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/root"),
+        json!({
+            ".git": {},
+            "a.txt": "a",
+        }),
+    )
+    .await;
+    fs.set_branch_name(Path::new(path!("/root/.git")), Some("main"));
+    let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
+    cx.executor().run_until_parked();
+    let worktree_id = project.read_with(cx, |project, cx| {
+        project.worktrees(cx).next().unwrap().read(cx).id()
+    });
+    let branch_name = |cx: &mut gpui::TestAppContext| {
+        project.read_with(cx, |project, cx| {
+            project
+                .repositories(cx)
+                .values()
+                .find(|repository| {
+                    repository.read(cx).work_directory_abs_path.as_ref()
+                        == Path::new(path!("/root"))
+                })
+                .and_then(|repository| repository.read(cx).branch.clone())
+                .map(|branch| branch.name().to_string())
+        })
+    };
+    assert_eq!(branch_name(cx).as_deref(), Some("main"));
+
+    // Neither the branch switch nor the new repository reaches the project as a file event,
+    // the way a watcher across a WSL or SSH boundary can miss them.
+    fs.pause_events();
+    fs.set_branch_name(Path::new(path!("/root/.git")), Some("feature"));
+    fs.insert_tree(
+        path!("/root/nested"),
+        json!({
+            ".git": {},
+            "b.txt": "b",
+        }),
+    )
+    .await;
+    fs.clear_buffered_events();
+    fs.unpause_events_and_flush();
+    cx.executor().run_until_parked();
+    assert_eq!(branch_name(cx).as_deref(), Some("main"));
+    assert_eq!(
+        sorted_repository_paths(&project, cx),
+        vec![PathBuf::from(path!("/root"))]
+    );
+
+    project
+        .update(cx, |project, cx| project.rescan_worktree(worktree_id, cx))
+        .await
+        .unwrap();
+    cx.executor().run_until_parked();
+
+    assert_eq!(branch_name(cx).as_deref(), Some("feature"));
+    assert_eq!(
+        sorted_repository_paths(&project, cx),
+        vec![
+            PathBuf::from(path!("/root")),
+            PathBuf::from(path!("/root/nested"))
+        ]
+    );
+}
+
+#[gpui::test]
+async fn test_project_concurrent_rescans_share_one_scan(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        path!("/root"),
+        json!({
+            "dir": { "a.txt": "a" },
+            "b.txt": "b",
+        }),
+    )
+    .await;
+    let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
+    cx.executor().run_until_parked();
+    let worktree_id = project.read_with(cx, |project, cx| {
+        project.worktrees(cx).next().unwrap().read(cx).id()
+    });
+
+    let read_dir_calls_before = fs.read_dir_call_count();
+    project
+        .update(cx, |project, cx| project.rescan_worktree(worktree_id, cx))
+        .await
+        .unwrap();
+    cx.executor().run_until_parked();
+    let single_rescan_read_dir_calls = fs.read_dir_call_count() - read_dir_calls_before;
+    assert!(single_rescan_read_dir_calls > 0);
+
+    let read_dir_calls_before = fs.read_dir_call_count();
+    let (first, second) = project.update(cx, |project, cx| {
+        (
+            project.rescan_worktree(worktree_id, cx),
+            project.rescan_worktree(worktree_id, cx),
+        )
+    });
+    first.await.unwrap();
+    second.await.unwrap();
+    cx.executor().run_until_parked();
+    assert_eq!(
+        fs.read_dir_call_count() - read_dir_calls_before,
+        single_rescan_read_dir_calls
+    );
+
+    // A finished rescan must not be handed to the next caller.
+    fs.pause_events();
+    fs.insert_tree(path!("/root/dir/later"), json!({ "c.txt": "c" }))
+        .await;
+    fs.clear_buffered_events();
+    fs.unpause_events_and_flush();
+    project
+        .update(cx, |project, cx| project.rescan_worktree(worktree_id, cx))
+        .await
+        .unwrap();
+    cx.executor().run_until_parked();
+    project.read_with(cx, |project, cx| {
+        let worktree = project.worktree_for_id(worktree_id, cx).unwrap();
+        assert!(
+            worktree
+                .read(cx)
+                .entry_for_path(rel_path("dir/later/c.txt"))
+                .is_some()
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_project_rescan_unknown_worktree_errors(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root"), json!({ "a.txt": "a" }))
+        .await;
+    let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
+    cx.executor().run_until_parked();
+
+    let error = project
+        .update(cx, |project, cx| {
+            project.rescan_worktree(worktree::WorktreeId::from_usize(999), cx)
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("no worktree with id"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[gpui::test]
+async fn test_guest_rescan_is_refused(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root"), json!({ "a.txt": "a" }))
+        .await;
+    let project = Project::test(fs.clone(), [path!("/root").as_ref()], cx).await;
+    cx.executor().run_until_parked();
+    let worktree_id = project.read_with(cx, |project, cx| {
+        project.worktrees(cx).next().unwrap().read(cx).id()
+    });
+
+    let read_dir_calls_before = fs.read_dir_call_count();
+    let error = project
+        .update(cx, |project, cx| {
+            project.mark_as_collab_for_testing();
+            project.rescan_worktree(worktree_id, cx)
+        })
+        .await
+        .unwrap_err();
+    cx.executor().run_until_parked();
+    assert_eq!(
+        error.to_string(),
+        "Reload is not available to guests of a shared project"
+    );
+    assert_eq!(fs.read_dir_call_count(), read_dir_calls_before);
+}
+
+#[test]
+fn test_rescan_error_message_for_old_server() {
+    assert_eq!(
+        rescan_error_message(&anyhow::anyhow!(
+            "no handler registered for an unknown message"
+        )),
+        "The remote server is older than this version of Zode. Reconnect to update it, then reload again."
+    );
+    assert_eq!(
+        rescan_error_message(&anyhow::anyhow!("connection lost").context("rescan failed")),
+        "rescan failed: connection lost"
+    );
+}
+
 pub fn init_test(cx: &mut gpui::TestAppContext) {
     zlog::init_test();
 

@@ -1264,3 +1264,38 @@ float4 fill_color(Background background,
 
   return color;
 }
+
+// Vibrancy: backgrounds see-through evenly, text and icons solid. While the
+// scene is drawn, alpha holds how much of each pixel is foreground (text,
+// icons, underlines); these full-screen passes turn that into the final
+// premultiplied pixel. See `MetalRenderer::encode_vibrancy`.
+
+struct FullscreenVertexOutput {
+  float4 position [[position]];
+  float2 uv;
+};
+
+vertex FullscreenVertexOutput fullscreen_vertex(uint vertex_id [[vertex_id]]) {
+  float2 corner = float2(float((vertex_id << 1) & 2), float(vertex_id & 2));
+  FullscreenVertexOutput output;
+  output.position = float4(corner * 2.0 - 1.0, 0.0, 1.0);
+  // Texture space runs top to bottom.
+  output.uv = float2(corner.x, 1.0 - corner.y);
+  return output;
+}
+
+// Its alpha, blended with the blend colour, raises the foreground coverage
+// to the background opacity: alpha = opacity + (1 - opacity) * coverage.
+fragment float4 vibrancy_coverage_fragment(constant float *opacity [[buffer(0)]]) {
+  return float4(0.0, 0.0, 0.0, *opacity);
+}
+
+// The backdrop image, scaled to cover the window: `uv_rect` is the part of
+// the image that is visible, as origin and size in texture space.
+fragment float4 vibrancy_backdrop_fragment(FullscreenVertexOutput input [[stage_in]],
+                                          constant float4 *uv_rect [[buffer(0)]],
+                                          texture2d<float> backdrop [[texture(0)]]) {
+  constexpr sampler backdrop_sampler(mag_filter::linear, min_filter::linear);
+  float2 uv = uv_rect->xy + input.uv * uv_rect->zw;
+  return float4(backdrop.sample(backdrop_sampler, uv).rgb, 1.0);
+}

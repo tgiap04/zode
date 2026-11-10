@@ -10686,3 +10686,356 @@ async fn test_only_private_files_are_offered_to_env_sync(cx: &mut gpui::TestAppC
         "a directory must not be offered to sync",
     );
 }
+
+async fn reload_test_panel(
+    fs: &Arc<FakeFs>,
+    roots: &[&Path],
+    cx: &mut TestAppContext,
+) -> (
+    Entity<Project>,
+    Entity<Workspace>,
+    Entity<ProjectPanel>,
+    VisualTestContext,
+) {
+    let project = Project::test(fs.clone(), roots.iter().copied(), cx).await;
+    let window = cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    let workspace = window
+        .read_with(cx, |multi_workspace, _| multi_workspace.workspace().clone())
+        .unwrap();
+    let mut cx = VisualTestContext::from_window(window.into(), cx);
+    let panel = workspace.update_in(&mut cx, |workspace, window, cx| {
+        let panel = ProjectPanel::new(workspace, window, cx);
+        workspace.add_panel(panel.clone(), window, cx);
+        panel
+    });
+    cx.run_until_parked();
+    (project, workspace, panel, cx)
+}
+
+/// Creates files the way a watcher across a WSL or SSH boundary can miss them.
+async fn add_files_without_a_watcher_event(fs: &FakeFs, paths: &[&str]) {
+    fs.pause_events();
+    for path in paths {
+        fs.insert_file(Path::new(path), Vec::new()).await;
+    }
+    fs.clear_buffered_events();
+    fs.unpause_events_and_flush();
+}
+
+fn root_entry_id(
+    project: &Entity<Project>,
+    root_name: &str,
+    cx: &mut VisualTestContext,
+) -> ProjectEntryId {
+    project.read_with(cx, |project, cx| {
+        project
+            .worktrees(cx)
+            .map(|worktree| worktree.read(cx))
+            .find(|worktree| worktree.root_name_str() == root_name)
+            .and_then(|worktree| worktree.root_entry())
+            .map(|entry| entry.id)
+            .expect("the root entry exists")
+    })
+}
+
+#[gpui::test]
+async fn test_reload_worktree_from_root_context_menu_and_action(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root1"), json!({ "a.txt": "" }))
+        .await;
+    fs.insert_tree(path!("/root2"), json!({ "b.txt": "" }))
+        .await;
+    let (project, _workspace, panel, mut cx) = reload_test_panel(
+        &fs,
+        &[path!("/root1").as_ref(), path!("/root2").as_ref()],
+        cx,
+    )
+    .await;
+    let cx = &mut cx;
+
+    add_files_without_a_watcher_event(
+        &fs,
+        &[path!("/root1/missed1.txt"), path!("/root2/missed2.txt")],
+    )
+    .await;
+    cx.run_until_parked();
+    assert_eq!(
+        visible_entries_as_strings(&panel, 0..10, cx),
+        &["v root1", "      a.txt", "v root2", "      b.txt"],
+        "the watcher missed both files"
+    );
+
+    let root1_id = root_entry_id(&project, "root1", cx);
+    panel.update_in(cx, |panel, window, cx| {
+        panel.deploy_context_menu(gpui::point(px(1.), px(1.)), root1_id, window, cx);
+        window.focus(&panel.focus_handle, cx);
+    });
+    cx.dispatch_action(ReloadWorktree);
+    cx.executor().advance_clock(MIN_RELOAD_SPINNER);
+    cx.run_until_parked();
+
+    assert_eq!(
+        visible_entries_as_strings(&panel, 0..10, cx),
+        &[
+            "v root1  <== selected",
+            "      a.txt",
+            "      missed1.txt",
+            "v root2",
+            "      b.txt"
+        ],
+        "only the selected folder is rescanned"
+    );
+}
+
+#[gpui::test]
+async fn test_reload_without_a_selection_rescans_every_folder(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root1"), json!({ "a.txt": "" }))
+        .await;
+    fs.insert_tree(path!("/root2"), json!({ "b.txt": "" }))
+        .await;
+    let (_project, _workspace, panel, mut cx) = reload_test_panel(
+        &fs,
+        &[path!("/root1").as_ref(), path!("/root2").as_ref()],
+        cx,
+    )
+    .await;
+    let cx = &mut cx;
+
+    add_files_without_a_watcher_event(
+        &fs,
+        &[path!("/root1/missed1.txt"), path!("/root2/missed2.txt")],
+    )
+    .await;
+    panel.update_in(cx, |panel, window, cx| {
+        assert!(panel.selection.is_none());
+        panel.reload_selected_worktree(&ReloadWorktree, window, cx);
+    });
+    cx.executor().advance_clock(MIN_RELOAD_SPINNER);
+    cx.run_until_parked();
+
+    assert_eq!(
+        visible_entries_as_strings(&panel, 0..10, cx),
+        &[
+            "v root1",
+            "      a.txt",
+            "      missed1.txt",
+            "v root2",
+            "      b.txt",
+            "      missed2.txt"
+        ]
+    );
+}
+
+#[gpui::test]
+async fn test_reload_worktree_ignores_second_request_while_running(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root"), json!({ "a.txt": "" })).await;
+    let (project, _workspace, panel, mut cx) =
+        reload_test_panel(&fs, &[path!("/root").as_ref()], cx).await;
+    let cx = &mut cx;
+    let worktree_id = project.read_with(cx, |project, cx| {
+        project.worktrees(cx).next().unwrap().read(cx).id()
+    });
+    let running = |cx: &mut VisualTestContext| {
+        panel.read_with(cx, |panel, _| panel.reloading_worktrees.len())
+    };
+
+    panel.update(cx, |panel, cx| panel.reload_worktree(worktree_id, cx));
+    assert_eq!(running(cx), 1, "the spinner starts at once");
+
+    cx.executor().advance_clock(MIN_RELOAD_SPINNER / 2);
+    cx.run_until_parked();
+    panel.update(cx, |panel, cx| panel.reload_worktree(worktree_id, cx));
+    assert_eq!(running(cx), 1);
+
+    // The second request must not restart the minimum spinner time.
+    cx.executor().advance_clock(MIN_RELOAD_SPINNER / 2);
+    cx.run_until_parked();
+    assert_eq!(
+        running(cx),
+        0,
+        "the spinner clears once it has run its course"
+    );
+}
+
+#[gpui::test]
+async fn test_reload_failure_shows_notification(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root"), json!({ "a.txt": "" })).await;
+    let (project, workspace, panel, mut cx) =
+        reload_test_panel(&fs, &[path!("/root").as_ref()], cx).await;
+    let cx = &mut cx;
+    let worktree_id = project.read_with(cx, |project, cx| {
+        project.worktrees(cx).next().unwrap().read(cx).id()
+    });
+    project.update(cx, |project, _| project.mark_as_collab_for_testing());
+
+    panel.update(cx, |panel, cx| panel.reload_worktree(worktree_id, cx));
+    cx.executor().advance_clock(MIN_RELOAD_SPINNER);
+    cx.run_until_parked();
+
+    workspace.update(cx, |workspace, _| {
+        assert_eq!(workspace.notification_ids().len(), 1);
+    });
+    panel.read_with(cx, |panel, _| {
+        assert!(
+            panel.reloading_worktrees.is_empty(),
+            "a failed reload must not leave the spinner running"
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_reload_of_a_worktree_removed_mid_flight_stays_silent(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root"), json!({ "a.txt": "" })).await;
+    let (project, workspace, panel, mut cx) =
+        reload_test_panel(&fs, &[path!("/root").as_ref()], cx).await;
+    let cx = &mut cx;
+    let worktree_id = project.read_with(cx, |project, cx| {
+        project.worktrees(cx).next().unwrap().read(cx).id()
+    });
+    // A guest refusal is the one failure a local project can produce; what is under test is that
+    // a failure is not reported once its worktree is gone, whatever the failure was.
+    project.update(cx, |project, _| project.mark_as_collab_for_testing());
+
+    panel.update(cx, |panel, cx| panel.reload_worktree(worktree_id, cx));
+    project.update(cx, |project, cx| project.remove_worktree(worktree_id, cx));
+    cx.executor().advance_clock(MIN_RELOAD_SPINNER);
+    cx.run_until_parked();
+
+    workspace.update(cx, |workspace, _| {
+        assert!(
+            workspace.notification_ids().is_empty(),
+            "a reload that failed because its folder was removed has nothing left to tell the user"
+        );
+    });
+    panel.read_with(cx, |panel, _| assert!(panel.reloading_worktrees.is_empty()));
+}
+
+#[gpui::test]
+async fn test_reload_is_refused_for_guests_without_scanning(cx: &mut gpui::TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root"), json!({ "a.txt": "" })).await;
+    let (project, workspace, panel, mut cx) =
+        reload_test_panel(&fs, &[path!("/root").as_ref()], cx).await;
+    let cx = &mut cx;
+    let worktree_id = project.read_with(cx, |project, cx| {
+        project.worktrees(cx).next().unwrap().read(cx).id()
+    });
+    project.update(cx, |project, _| project.mark_as_collab_for_testing());
+
+    let read_dir_calls_before = fs.read_dir_call_count();
+    panel.update(cx, |panel, cx| panel.reload_worktree(worktree_id, cx));
+    cx.executor().advance_clock(MIN_RELOAD_SPINNER);
+    cx.run_until_parked();
+
+    assert_eq!(fs.read_dir_call_count(), read_dir_calls_before);
+    workspace.update(cx, |workspace, _| {
+        assert_eq!(workspace.notification_ids().len(), 1);
+    });
+}
+
+/// Presses the reload button of the only root row the way a pointer does: arrives over the row
+/// first, so a button revealed on hover is there to be pressed.
+fn click_reload_button(cx: &mut VisualTestContext) {
+    let button = cx
+        .debug_bounds("reload-worktree")
+        .expect("the root row draws a reload button");
+    cx.simulate_mouse_move(button.center(), None, gpui::Modifiers::default());
+    let button = cx
+        .debug_bounds("reload-worktree")
+        .expect("the button is still drawn while the pointer is over it");
+    cx.simulate_click(button.center(), gpui::Modifiers::default());
+}
+
+/// A panel in an open dock, which is what it takes for the window to draw it.
+async fn reload_test_panel_in_open_dock(
+    fs: &Arc<FakeFs>,
+    root: &Path,
+    cx: &mut TestAppContext,
+) -> (
+    Entity<Project>,
+    Entity<Workspace>,
+    Entity<ProjectPanel>,
+    VisualTestContext,
+) {
+    let (project, workspace, panel, mut cx) = reload_test_panel(fs, &[root], cx).await;
+    workspace.update_in(&mut cx, |workspace, window, cx| {
+        workspace.right_dock().update(cx, |dock, cx| {
+            dock.set_open(true, window, cx);
+        });
+    });
+    cx.run_until_parked();
+    (project, workspace, panel, cx)
+}
+
+#[gpui::test]
+async fn test_pressing_the_disabled_reload_button_leaves_the_root_expanded(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root"), json!({ "a.txt": "" })).await;
+    let (project, _workspace, panel, mut cx) =
+        reload_test_panel_in_open_dock(&fs, path!("/root").as_ref(), cx).await;
+    let cx = &mut cx;
+    project.update(cx, |project, _| project.mark_as_collab_for_testing());
+    panel.update(cx, |_, cx| cx.notify());
+    cx.run_until_parked();
+    let expanded = &["v root", "      a.txt"];
+    assert_eq!(visible_entries_as_strings(&panel, 0..10, cx), expanded);
+
+    click_reload_button(cx);
+
+    assert_eq!(
+        visible_entries_as_strings(&panel, 0..10, cx),
+        expanded,
+        "a press on the greyed-out button must not fall through to the row beneath it"
+    );
+}
+
+#[gpui::test]
+async fn test_pressing_the_reload_button_reloads_and_leaves_the_row_alone(
+    cx: &mut gpui::TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/root"), json!({ "a.txt": "" })).await;
+    let (_project, _workspace, panel, mut cx) =
+        reload_test_panel_in_open_dock(&fs, path!("/root").as_ref(), cx).await;
+    let cx = &mut cx;
+    add_files_without_a_watcher_event(&fs, &[path!("/root/missed.txt")]).await;
+    cx.run_until_parked();
+    assert_eq!(
+        visible_entries_as_strings(&panel, 0..10, cx),
+        &["v root", "      a.txt"],
+        "the watcher missed the file"
+    );
+
+    click_reload_button(cx);
+    assert_eq!(
+        panel.read_with(cx, |panel, _| panel.reloading_worktrees.len()),
+        1,
+        "the press starts a reload"
+    );
+    cx.executor().advance_clock(MIN_RELOAD_SPINNER);
+    cx.run_until_parked();
+
+    assert_eq!(
+        visible_entries_as_strings(&panel, 0..10, cx),
+        &["v root", "      a.txt", "      missed.txt"],
+        "the folder is rescanned, and neither folded nor selected by the press"
+    );
+    assert!(
+        !panel.read_with(cx, |panel, _| panel.mouse_down),
+        "the press must not leave the panel believing a mouse button is still down"
+    );
+}

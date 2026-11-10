@@ -595,6 +595,11 @@ impl RotatingServer {
         release
     }
 
+    /// The refresh token the server would accept next -- the one the keychain must hold.
+    fn live_refresh_token(&self) -> String {
+        self.live_refresh_token.lock().unwrap().clone()
+    }
+
     fn rotations(&self) -> usize {
         self.rotations.load(Ordering::SeqCst)
     }
@@ -834,9 +839,12 @@ async fn a_refresh_during_restore_survives_a_restart(cx: &mut TestAppContext) {
             "the first start refreshes a valid session and stays signed in"
         );
     });
+    // The plan read that follows the restore rotates the token again (this server's tokens
+    // expire at once). Whichever rotation came last, its token is the one that must be on disk.
     let (_, saved) = credentials.held().expect("the session is still saved");
     assert_eq!(
-        saved["refresh_token"], "rt-1",
+        saved["refresh_token"],
+        server.live_refresh_token().as_str(),
         "the rotated refresh token must be on disk before the process can exit"
     );
 
@@ -854,7 +862,7 @@ async fn a_refresh_during_restore_survives_a_restart(cx: &mut TestAppContext) {
         );
     });
     let (_, saved) = credentials.held().expect("the session is still saved");
-    assert_eq!(saved["refresh_token"], "rt-2");
+    assert_eq!(saved["refresh_token"], server.live_refresh_token().as_str());
 }
 
 /// Invariant 7, for the entry that does not remember who it belongs to.
@@ -876,7 +884,7 @@ async fn a_refresh_during_restore_of_a_legacy_entry_is_saved_with_its_owner(
     });
     let (username, saved) = credentials.held().expect("the session is still saved");
     assert_eq!(username, "1");
-    assert_eq!(saved["refresh_token"], "rt-1");
+    assert_eq!(saved["refresh_token"], server.live_refresh_token().as_str());
     assert_eq!(
         saved["user"]["id"], "1",
         "the entry now remembers its owner"
@@ -1664,24 +1672,35 @@ async fn a_signed_out_account_never_asks_for_its_plan(cx: &mut TestAppContext) {
     account.read_with(cx, |account: &Account, _| assert!(account.plan().is_none()));
 }
 
+/// The status bar names a paid plan from the first frame, so a restored session reads the plan
+/// once -- and only a restored one: a machine that never signed in still sends nothing.
 #[gpui::test]
-async fn restoring_a_session_does_not_ask_for_the_plan(cx: &mut TestAppContext) {
+async fn restoring_a_session_reads_the_plan_once(cx: &mut TestAppContext) {
     let server = RotatingServer::new("stored-refresh");
     let credentials = StubCredentials::holding("1", saved_session(true));
 
     let account = restored_account(cx, server.client(), &credentials);
     cx.run_until_parked();
-    cx.executor().advance_clock(Duration::from_secs(3_600));
-    cx.run_until_parked();
 
     account.read_with(cx, |account: &Account, _| {
         assert!(account.status().is_signed_in(), "the restore itself worked");
-        assert!(account.plan().is_none());
+        assert!(
+            account.plan().is_some(),
+            "the plan is known once the restore is done"
+        );
     });
     assert_eq!(
-        server.plan_requests(),
-        Vec::new(),
-        "starting the editor must not read the plan"
+        server.plan_requests().len(),
+        1,
+        "starting the editor reads the plan exactly once"
+    );
+
+    cx.executor().advance_clock(Duration::from_secs(3_600));
+    cx.run_until_parked();
+    assert_eq!(
+        server.plan_requests().len(),
+        1,
+        "and never again on its own"
     );
 }
 

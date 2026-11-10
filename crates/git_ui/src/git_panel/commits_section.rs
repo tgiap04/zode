@@ -233,13 +233,19 @@ impl GitPanel {
         });
         let sha = SharedString::from(commit.sha.to_string());
 
-        let (subject, author_email, timestamp) = match &data {
+        let (subject, subject_color, author_email, timestamp) = match &data {
             CommitDataState::Loaded(data) => (
                 data.subject.clone(),
+                Color::Default,
                 Some(data.author_email.clone()),
                 Some(data.commit_timestamp),
             ),
-            CommitDataState::Loading => (SharedString::from("Loading…"), None, None),
+            CommitDataState::Loading => {
+                (SharedString::from("Loading…"), Color::Default, None, None)
+            }
+            CommitDataState::Failed(_) => {
+                (SharedString::from("Unavailable"), Color::Muted, None, None)
+            }
         };
 
         let relative_time = timestamp.map(|timestamp| {
@@ -319,6 +325,7 @@ impl GitPanel {
                     .child(
                         Label::new(subject)
                             .size(LabelSize::Small)
+                            .color(subject_color)
                             .single_line()
                             .truncate(),
                     ),

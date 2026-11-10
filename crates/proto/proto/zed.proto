@@ -507,7 +507,15 @@ message Envelope {
     WritePrivateFile write_private_file = 464;
 
     EnsureDatabaseDriver ensure_database_driver = 465;
-    EnsureDatabaseDriverResponse ensure_database_driver_response = 466; // current max
+    EnsureDatabaseDriverResponse ensure_database_driver_response = 466;
+
+    RescanWorktree rescan_worktree = 467;
+    RescanWorktreeResponse rescan_worktree_response = 468;
+
+    GitGetGraphPage git_get_graph_page = 469;
+    GitGetGraphPageResponse git_get_graph_page_response = 470;
+    GitGetCommitData git_get_commit_data = 471;
+    GitGetCommitDataResponse git_get_commit_data_response = 472; // current max
   }
 
   reserved 87 to 88;

@@ -20,8 +20,9 @@ BIN := target/$(PROFILE_DIR)/$(PACKAGE)
 # the onboarding branch never runs, so a fresh reset looks like it did nothing.
 PROJECT ?= .
 
-# Trims several GB of debug info while keeping backtraces readable.
-export CARGO_PROFILE_DEV_DEBUG ?= line-tables-only
+# The dev profile's line-tables-only debug info lives in Cargo.toml, so every
+# cargo command shares one set of artifacts with `make build`. `make fast` trims
+# release-fast the same way, keeping backtraces readable.
 export CARGO_PROFILE_RELEASE_FAST_DEBUG ?= line-tables-only
 
 # Where zode stores things. These mirror the roots in crates/paths/src/paths.rs
@@ -80,7 +81,7 @@ THEMES_DIR := $(ZODE_CONFIG)/themes
 
 .DEFAULT_GOAL := help
 .PHONY: help build drivers dev fast run lint test clean trim theme-push theme-pull \
-	paths reset-config reset-all onboarding bundle
+	paths reset-config reset-all onboarding bundle prune size
 
 help: ## Show this help
 	@grep -hE '^[a-z][a-zA-Z_-]*:.*?## ' $(MAKEFILE_LIST) \
@@ -88,6 +89,7 @@ help: ## Show this help
 
 build: ## Compile the zode binary only, no drivers (PROFILE=dev, incremental) — `make drivers` after a database protocol change
 	$(CARGO) build -p $(PACKAGE) --bin $(PACKAGE) --profile $(PROFILE)
+	@./script/prune-stale-objects target/$(PROFILE_DIR)
 
 # Opt-in, never part of `build`: a driver beside the executable is used before
 # any downloaded one, so building them on every `build` left the download path
@@ -138,6 +140,17 @@ test: ## Run the workspace test suite
 
 clean: ## Remove the whole target directory
 	$(CARGO) clean
+
+size: ## Show how much disk target/ uses, in total and per part
+	@test -d target || { echo "target/ does not exist yet"; exit 0; }
+	@du -sh target | awk '{ printf "%-28s %s\n", "target/ (total)", $$1 }'
+	@for dir in target/*/ target/debug/deps target/debug/incremental target/debug/build; do \
+		test -d "$$dir" && du -sh "$$dir" | awk -v d="$${dir%/}" '{ printf "  %-26s %s\n", d, $$1 }'; \
+	done; true
+	@test -f $(BIN) && ls -lh $(BIN) | awk '{ printf "  %-26s %s\n", "$(BIN)", $$5 }' || true
+
+prune: ## Delete object files earlier incremental builds left in target/ (`build` does this itself)
+	./script/prune-stale-objects target/debug
 
 trim: ## Drop target/ only if it grew past 30GB
 	./script/clear-target-dir-if-larger-than 30

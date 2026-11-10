@@ -91,6 +91,7 @@ struct WgpuPipelines {
     poly_sprites: wgpu::RenderPipeline,
     #[allow(dead_code)]
     surfaces: wgpu::RenderPipeline,
+    fade: wgpu::RenderPipeline,
 }
 
 struct WgpuBindGroupLayouts {
@@ -156,9 +157,53 @@ pub struct WgpuRenderer {
     device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
     surface_configured: bool,
     needs_redraw: bool,
+    /// See [`WgpuRenderer::set_content_opacity`].
+    content_opacity: f32,
+}
+
+/// The blend constant that fades a frame to `opacity` for a surface composited
+/// with `alpha_mode`, or `None` when fading would not show: an opaque surface
+/// would only darken. A premultiplied surface scales every channel; a
+/// postmultiplied one only its alpha.
+fn fade_constant(opacity: f32, alpha_mode: wgpu::CompositeAlphaMode) -> Option<wgpu::Color> {
+    if opacity >= 1.0 {
+        return None;
+    }
+    let opacity = f64::from(opacity.max(0.0));
+    match alpha_mode {
+        wgpu::CompositeAlphaMode::PreMultiplied => Some(wgpu::Color {
+            r: opacity,
+            g: opacity,
+            b: opacity,
+            a: opacity,
+        }),
+        wgpu::CompositeAlphaMode::PostMultiplied | wgpu::CompositeAlphaMode::Inherit => {
+            Some(wgpu::Color {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+                a: opacity,
+            })
+        }
+        wgpu::CompositeAlphaMode::Opaque | wgpu::CompositeAlphaMode::Auto => None,
+    }
 }
 
 impl WgpuRenderer {
+    /// Fades everything the window draws to `opacity`, so whatever is behind
+    /// the window shows through every part of it evenly. Takes effect only on
+    /// a transparent surface; see `fade_constant`.
+    pub fn set_content_opacity(&mut self, opacity: f32) {
+        if self.content_opacity != opacity {
+            self.content_opacity = opacity;
+            self.needs_redraw = true;
+        }
+    }
+
+    pub fn content_opacity(&self) -> f32 {
+        self.content_opacity
+    }
+
     fn resources(&self) -> &WgpuResources {
         self.resources
             .as_ref()
@@ -485,6 +530,7 @@ impl WgpuRenderer {
             device_lost: context.device_lost_flag(),
             surface_configured: true,
             needs_redraw: false,
+            content_opacity: 1.0,
         })
     }
 
@@ -874,6 +920,8 @@ impl WgpuRenderer {
             &shader_module,
         );
 
+        let fade = Self::create_fade_pipeline(device, surface_format);
+
         WgpuPipelines {
             quads,
             shadows,
@@ -884,7 +932,59 @@ impl WgpuRenderer {
             subpixel_sprites,
             poly_sprites,
             surfaces,
+            fade,
         }
+    }
+
+    /// The pass that scales the finished frame by the blend constant. Its own
+    /// shader and no bind groups: it reads nothing, and only the blend state
+    /// does the work.
+    fn create_fade_pipeline(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("gpui_fade_shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("fade.wgsl"))),
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("fade_layout"),
+            bind_group_layouts: &[],
+            immediate_size: 0,
+        });
+        let scale_by_constant = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::Constant,
+            operation: wgpu::BlendOperation::Add,
+        };
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("fade"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs_fade"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_fade"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState {
+                        color: scale_by_constant,
+                        alpha: scale_by_constant,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        })
     }
 
     fn create_path_intermediate(
@@ -1316,6 +1416,28 @@ impl WgpuRenderer {
                 }
                 self.grow_instance_buffer();
                 continue;
+            }
+
+            if let Some(constant) =
+                fade_constant(self.content_opacity, self.surface_config.alpha_mode)
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("fade_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &frame_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    ..Default::default()
+                });
+                pass.set_pipeline(&self.resources().pipelines.fade);
+                pass.set_blend_constant(constant);
+                pass.draw(0..3, 0..1);
             }
 
             self.resources()
@@ -1892,5 +2014,66 @@ impl RenderingParameters {
             grayscale_enhanced_contrast,
             subpixel_enhanced_contrast,
         }
+    }
+}
+
+#[cfg(test)]
+mod fade_tests {
+    use super::fade_constant;
+
+    /// The shader is only compiled when a window first draws, on a user's
+    /// machine; this parses and validates it the way wgpu does.
+    #[test]
+    fn the_fade_shader_is_valid_wgsl() {
+        let module =
+            naga::front::wgsl::parse_str(include_str!("fade.wgsl")).expect("fade.wgsl parses");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        )
+        .validate(&module)
+        .expect("fade.wgsl validates");
+        for entry in ["vs_fade", "fs_fade"] {
+            assert!(
+                module.entry_points.iter().any(|point| point.name == entry),
+                "{entry} is the entry point the pipeline names"
+            );
+        }
+    }
+
+    #[test]
+    fn a_solid_window_is_not_faded() {
+        assert!(fade_constant(1.0, wgpu::CompositeAlphaMode::PreMultiplied).is_none());
+    }
+
+    #[test]
+    fn a_premultiplied_surface_scales_every_channel() {
+        let constant = fade_constant(0.6, wgpu::CompositeAlphaMode::PreMultiplied).expect("fades");
+        assert_eq!(
+            (constant.r, constant.g, constant.b, constant.a),
+            (
+                0.6000000238418579,
+                0.6000000238418579,
+                0.6000000238418579,
+                0.6000000238418579
+            )
+        );
+    }
+
+    /// Colour is not premultiplied there, so scaling it would darken the window.
+    #[test]
+    fn a_postmultiplied_surface_scales_only_alpha() {
+        let constant = fade_constant(0.5, wgpu::CompositeAlphaMode::PostMultiplied).expect("fades");
+        assert_eq!(
+            (constant.r, constant.g, constant.b, constant.a),
+            (1.0, 1.0, 1.0, 0.5)
+        );
+    }
+
+    /// An opaque surface has nothing behind it to show; fading would only
+    /// darken the window.
+    #[test]
+    fn an_opaque_surface_is_left_alone() {
+        assert!(fade_constant(0.5, wgpu::CompositeAlphaMode::Opaque).is_none());
     }
 }

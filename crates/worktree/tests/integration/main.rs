@@ -803,6 +803,271 @@ async fn test_subtree_rescan_reports_unchanged_descendants_as_updated(cx: &mut T
     });
 }
 
+async fn local_worktree_for_rescan(
+    fs: Arc<FakeFs>,
+    cx: &mut TestAppContext,
+) -> gpui::Entity<Worktree> {
+    let tree = Worktree::local(
+        Path::new(path!("/root")),
+        true,
+        fs,
+        Default::default(),
+        true,
+        WorktreeId::from_proto(0),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+    cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+    cx.run_until_parked();
+    tree
+}
+
+fn entry_snapshot(tree: &Worktree) -> Vec<(Arc<RelPath>, worktree::ProjectEntryId, bool)> {
+    tree.entries(true, 0)
+        .map(|entry| (entry.path.clone(), entry.id, entry.kind.is_unloaded()))
+        .collect()
+}
+
+#[gpui::test]
+async fn test_rescan_discovers_entries_and_repository_missed_by_watcher(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        path!("/root"),
+        json!({
+            "a.txt": "",
+            "existing_dir": {
+                "file.txt": "",
+            },
+        }),
+    )
+    .await;
+    let tree = local_worktree_for_rescan(fs.clone(), cx).await;
+
+    fs.pause_events();
+    fs.insert_tree(
+        path!("/root/new_repo"),
+        json!({
+            ".git": {},
+            "src": {
+                "main.rs": "",
+            },
+        }),
+    )
+    .await;
+    fs.insert_tree(
+        path!("/root/existing_dir/nested"),
+        json!({
+            "deep.txt": "",
+        }),
+    )
+    .await;
+    fs.clear_buffered_events();
+    fs.unpause_events_and_flush();
+    cx.run_until_parked();
+
+    tree.read_with(cx, |tree, _| {
+        assert!(tree.entry_for_path(rel_path("new_repo")).is_none());
+        assert!(
+            tree.entry_for_path(rel_path("existing_dir/nested"))
+                .is_none()
+        );
+        assert!(tree.as_local().unwrap().repositories().is_empty());
+    });
+
+    tree.update(cx, |tree, cx| tree.rescan(cx)).await.unwrap();
+    cx.run_until_parked();
+
+    tree.read_with(cx, |tree, _| {
+        assert!(
+            tree.entry_for_path(rel_path("new_repo/src/main.rs"))
+                .is_some()
+        );
+        assert!(
+            tree.entry_for_path(rel_path("existing_dir/nested/deep.txt"))
+                .is_some()
+        );
+        assert_eq!(
+            tree.as_local().unwrap().repositories(),
+            vec![Arc::from(Path::new(path!("/root/new_repo")))]
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_rescan_without_changes_keeps_entry_ids_and_repositories(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        path!("/root"),
+        json!({
+            ".git": {},
+            ".gitignore": "ignored_dir\n",
+            "ignored_dir": {
+                "inner": {
+                    "x.txt": "",
+                },
+                "y.txt": "",
+            },
+            "src": {
+                "lib.rs": "",
+            },
+        }),
+    )
+    .await;
+    let tree = local_worktree_for_rescan(fs.clone(), cx).await;
+
+    tree.read_with(cx, |tree, _| {
+        tree.as_local()
+            .unwrap()
+            .refresh_entries_for_paths(vec![rel_path("ignored_dir").into()])
+    })
+    .recv()
+    .await;
+    cx.run_until_parked();
+
+    let (entries_before, repositories_before) = tree.read_with(cx, |tree, _| {
+        assert!(tree.entry_for_path(rel_path("ignored_dir/y.txt")).is_some());
+        (
+            entry_snapshot(tree),
+            tree.as_local().unwrap().repositories(),
+        )
+    });
+
+    let changes = Arc::new(Mutex::new(Vec::new()));
+    tree.update(cx, |_, cx| {
+        let changes = changes.clone();
+        cx.subscribe(&tree, move |_, _, event, _| {
+            if let Event::UpdatedEntries(update) = event {
+                changes.lock().extend(
+                    update
+                        .iter()
+                        .map(|(path, _, change)| (path.clone(), *change)),
+                );
+            }
+        })
+        .detach();
+    });
+
+    tree.update(cx, |tree, cx| tree.rescan(cx)).await.unwrap();
+    cx.run_until_parked();
+
+    tree.read_with(cx, |tree, _| {
+        assert_eq!(entry_snapshot(tree), entries_before);
+        assert_eq!(tree.as_local().unwrap().repositories(), repositories_before);
+    });
+    assert!(
+        changes
+            .lock()
+            .iter()
+            .all(|(_, change)| !matches!(change, PathChange::Added | PathChange::Removed)),
+        "an unchanged tree must not report added or removed entries: {:?}",
+        changes.lock()
+    );
+}
+
+#[gpui::test]
+async fn test_concurrent_rescans_share_one_scan(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        path!("/root"),
+        json!({
+            "a.txt": "",
+            "dir": {
+                "b.txt": "",
+            },
+        }),
+    )
+    .await;
+    let tree = local_worktree_for_rescan(fs.clone(), cx).await;
+
+    let read_dir_calls_before = fs.read_dir_call_count();
+    let scan_id_before = tree.read_with(cx, |tree, _| tree.scan_id());
+    tree.update(cx, |tree, cx| tree.rescan(cx)).await.unwrap();
+    cx.run_until_parked();
+    let single_read_dir_calls = fs.read_dir_call_count() - read_dir_calls_before;
+    let single_scan_id_delta = tree.read_with(cx, |tree, _| tree.scan_id()) - scan_id_before;
+
+    fs.pause_events();
+    fs.insert_tree(
+        path!("/root/dir/new"),
+        json!({
+            "c.txt": "",
+        }),
+    )
+    .await;
+    fs.clear_buffered_events();
+    fs.unpause_events_and_flush();
+    cx.run_until_parked();
+
+    let read_dir_calls_before = fs.read_dir_call_count();
+    let scan_id_before = tree.read_with(cx, |tree, _| tree.scan_id());
+    let (partial_refresh, first_rescan, second_rescan) = tree.update(cx, |tree, cx| {
+        let partial_refresh = tree
+            .as_local()
+            .unwrap()
+            .refresh_entries_for_paths(vec![rel_path("a.txt").into()]);
+        (partial_refresh, tree.rescan(cx), tree.rescan(cx))
+    });
+    let mut partial_refresh = partial_refresh;
+    partial_refresh.recv().await;
+    first_rescan.await.unwrap();
+    second_rescan.await.unwrap();
+    cx.run_until_parked();
+
+    tree.read_with(cx, |tree, _| {
+        assert!(tree.entry_for_path(rel_path("dir/new/c.txt")).is_some());
+        // The merged request reloads `a.txt` (one scan id) and then runs one full rescan.
+        assert_eq!(tree.scan_id() - scan_id_before, single_scan_id_delta + 1);
+    });
+    assert_eq!(
+        fs.read_dir_call_count() - read_dir_calls_before,
+        single_read_dir_calls + 1,
+        "queued rescans must merge into a single full scan (one extra read for the new directory)"
+    );
+}
+
+#[gpui::test]
+async fn test_rescan_requested_during_a_rescan_resolves_without_fs_events(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        path!("/root"),
+        json!({
+            "one": { "a": { "x.txt": "" }, "b": { "y.txt": "" } },
+            "two": { "c": { "z.txt": "" }, "d": { "w.txt": "" } },
+            "three": { "e": { "v.txt": "" } },
+        }),
+    )
+    .await;
+    let tree = local_worktree_for_rescan(fs.clone(), cx).await;
+
+    let read_dir_calls_before = fs.read_dir_call_count();
+    let mut first_rescan = tree.update(cx, |tree, cx| tree.rescan(cx));
+    // Step the scanner until the first rescan is reading directories, so the second request
+    // is picked up by a scan worker while the first rescan is still running.
+    while fs.read_dir_call_count() == read_dir_calls_before {
+        assert!(
+            cx.executor().tick(),
+            "the first rescan never started reading directories"
+        );
+    }
+    let mut second_rescan = tree.update(cx, |tree, cx| tree.rescan(cx));
+    cx.run_until_parked();
+
+    assert!(
+        futures::FutureExt::now_or_never(&mut first_rescan).is_some(),
+        "the first rescan must resolve"
+    );
+    match futures::FutureExt::now_or_never(&mut second_rescan) {
+        Some(result) => result.unwrap(),
+        None => panic!("a rescan requested while another was running never resolved"),
+    }
+}
+
 #[gpui::test]
 async fn test_open_gitignored_files(cx: &mut TestAppContext) {
     init_test(cx);

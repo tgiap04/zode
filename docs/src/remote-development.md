@@ -129,6 +129,7 @@ In a WSL, SSH or dev container window, a project's tools run on the machine the 
 | Container and cluster tools (`docker`, `podman`, `kubectl`, `docker compose`), `gh`, `glab` and `git` | The copy found on the host's `PATH`. In WSL the Windows programs under `/mnt/<letter>` are not used.              |
 | `.env` sync and the vault                                                                             | Read and written through the host's files. See [.env files in remote windows](#env-files-in-remote-windows).      |
 | Database drivers                                                                                      | Downloaded, installed and started on the host. See [Database drivers on a host](#database-drivers-on-a-host).     |
+| [Commit graph](./git.md#commit-graph)                                                                 | Commits and commit details are read from the host's repository.                                                   |
 | [Agent usage](./agent-usage.md#remote-windows)                                                        | The usage of the account signed in on the host.                                                                   |
 
 If the host cannot be reached, the feature says so; it does not fall back to your local machine.
@@ -144,6 +145,14 @@ The database panel's drivers are per host. The first time you connect to an engi
 ### "Update the remote server…"
 
 Zode replaces the remote server on the host when its version differs, but a window can still be connected to an older server that predates a feature. Such a feature says so instead of doing nothing, for example "Update the remote server to use database drivers here" or "Update the remote server to sync this file", and the session history says "Remote server is out of date — reconnect, then refresh". Reconnecting the window makes Zode install the matching server (see [Initializing the remote server](#initializing-the-remote-server)).
+
+### "The remote server is older than this version of Zode"
+
+Reloading a project folder (the ↻ button or **Reload** in the Project Panel, see [Project Panel](./visual-customization.md#project-panel)) asks the remote server to rescan the folder on the host. An older server cannot, and answers "The remote server is older than this version of Zode. Reconnect to update it, then reload again." Reconnect the window, then reload.
+
+### The git graph in remote windows
+
+The Git Panel's Graph section, its commits section and the Git Graph tab work in remote windows; see [Commit Graph](./git.md#commit-graph) for the states the section can show. If the window is connected to a server that predates this, the graph says "The remote server is older than this version of Zode. Reconnect to update it to show the git graph." Reconnect the window to install the matching server. A graph that failed to load ("Could not load the graph: ...") is not retried on its own: reload the panel or reopen the Git Graph tab.
 
 ## Port forwarding
 

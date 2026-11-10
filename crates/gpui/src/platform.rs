@@ -729,6 +729,26 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn background_appearance(&self) -> WindowBackgroundAppearance;
     fn set_title(&mut self, title: &str);
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance);
+    /// Fades everything the window draws to `opacity` (0 to 1) as it is
+    /// composited, so whatever is behind the window -- the desktop, or the
+    /// system's blur of it -- shows through every part of it evenly. Fading
+    /// each surface instead cannot be even: surfaces are stacked, and every
+    /// layer adds to the ones under it. Platforms that cannot do this ignore it.
+    fn set_content_opacity(&self, _opacity: f32) {}
+    /// The opacity last set by [`Self::set_content_opacity`].
+    fn content_opacity(&self) -> f32 {
+        1.0
+    }
+    /// Whether [`Self::set_content_opacity`] gives vibrancy -- backgrounds
+    /// see-through evenly, text and icons solid -- and the window can draw a
+    /// backdrop image behind them. Where it does not, the opacity fades the
+    /// whole window, text included.
+    fn supports_vibrancy(&self) -> bool {
+        false
+    }
+    /// The image drawn behind the see-through backgrounds while vibrancy is on.
+    /// Ignored where [`Self::supports_vibrancy`] is false.
+    fn set_backdrop_image(&self, _image: Option<Arc<RenderImage>>) {}
     fn minimize(&self);
     fn zoom(&self);
     fn toggle_fullscreen(&self);
@@ -1750,6 +1770,10 @@ pub enum WindowBackgroundAppearance {
     ///
     /// Not always supported.
     Blurred,
+    /// The system's vibrancy material behind the window: blurred, and tinted
+    /// the way the system tints it (macOS `NSVisualEffectView`). Where there is
+    /// no such material, the same as [`Self::Blurred`].
+    Vibrancy,
     /// The Mica backdrop material, supported on Windows 11.
     MicaBackdrop,
     /// The Mica Alt backdrop material, supported on Windows 11.

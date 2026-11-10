@@ -1261,6 +1261,14 @@ impl PlatformWindow for WaylandWindow {
         state.app_id = Some(app_id.to_owned());
     }
 
+    fn set_content_opacity(&self, opacity: f32) {
+        self.borrow_mut().renderer.set_content_opacity(opacity);
+    }
+
+    fn content_opacity(&self) -> f32 {
+        self.borrow().renderer.content_opacity()
+    }
+
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         let mut state = self.borrow_mut();
         state.background_appearance = background_appearance;
@@ -1529,7 +1537,10 @@ fn update_window(mut state: RefMut<WaylandWindowState>) {
     }
 
     if let Some(ref blur_manager) = state.globals.blur_manager {
-        if state.background_appearance == WindowBackgroundAppearance::Blurred {
+        if matches!(
+            state.background_appearance,
+            WindowBackgroundAppearance::Blurred | WindowBackgroundAppearance::Vibrancy
+        ) {
             if state.blur.is_none() {
                 let blur = blur_manager.create(&state.surface, &state.globals.qh, ());
                 state.blur = Some(blur);

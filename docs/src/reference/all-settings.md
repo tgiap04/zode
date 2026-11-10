@@ -4681,7 +4681,7 @@ Run the {#action theme_selector::Toggle} action in the command palette to see a 
 - `show_user_picture`: Whether to show user picture in the titlebar
 - `show_user_menu`: Whether to show the user menu button in the titlebar (the one that displays your avatar by default and contains options like Settings, Keymap, Themes, etc.)
 - `show_sign_in`: Whether to show the sign in button in the titlebar
-- `show_menus`: Whether to show the menus in the titlebar
+- `show_menus`: Whether to show the menus on their own row above the titlebar. On Windows and Linux the menus are always shown in the titlebar
 - `button_layout`: The layout of window control buttons in the title bar (Linux only). Can be set to `"platform_default"` to follow the system setting, `"standard"` to use Zode's built-in layout, or a custom format like `"close:minimize,maximize"`
 
 ## Vim
@@ -5276,6 +5276,46 @@ Float values between `0.0` and `0.9`, where:
 ```json [settings]
 {
   "unnecessary_code_fade": 0.5
+}
+```
+
+## Window Opacity
+
+- Description: How opaque the window's backgrounds are. Every background fades evenly, so all of the window shows what is behind — the desktop, or the background image — to the same degree. On macOS text and icons stay solid (vibrancy); on Windows and Linux the whole window fades for now, text included.
+- Setting: `window_opacity`
+- Default: `1.0`
+
+**Options**
+
+Float values between `0.0` (see-through) and `1.0` (solid). With vibrancy or a background image on, the backgrounds keep 88% of this (as opaque as Tabby looks), so the glass shows even at `1.0`.
+
+## Window Vibrancy
+
+- Description: Shows what is behind the window through its backgrounds, blurred, while text and icons stay solid. Without a background image the desktop shows through the system's vibrancy material (on macOS the same material Tabby uses); with one, the image does, blurred.
+- Setting: `window_vibrancy`
+- Default: `false`
+
+**Options**
+
+`true` or `false`.
+
+## Window Background Image
+
+- Description: An image shown behind the window's backgrounds, covering all of the window.
+- Setting: `window_background_image`
+- Default: `""` (no image)
+
+**Options**
+
+The path of an image file on this machine; `~/` is expanded. The image is read from that path and never copied, so moving or deleting the file removes it from the window, and replacing it shows the new image.
+
+**Example**
+
+```json [settings]
+{
+  "window_opacity": 1.0,
+  "window_vibrancy": true,
+  "window_background_image": "~/Pictures/wallpaper.jpg"
 }
 ```
 

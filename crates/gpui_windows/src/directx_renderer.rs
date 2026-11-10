@@ -42,6 +42,9 @@ pub(crate) struct DirectXRenderer {
     globals: DirectXGlobalElements,
     pipelines: DirectXRenderPipelines,
     direct_composition: Option<DirectComposition>,
+    /// Kept so it can be applied again when the composition is rebuilt after
+    /// a lost device.
+    content_opacity: f32,
     font_info: &'static FontInfo,
 
     width: u32,
@@ -97,9 +100,9 @@ struct DirectXGlobalElements {
 }
 
 struct DirectComposition {
-    comp_device: IDCompositionDevice,
+    comp_device: IDCompositionDesktopDevice,
     comp_target: IDCompositionTarget,
-    comp_visual: IDCompositionVisual,
+    comp_visual: IDCompositionVisual2,
 }
 
 impl DirectXRendererDevices {
@@ -169,6 +172,7 @@ impl DirectXRenderer {
             globals,
             pipelines,
             direct_composition,
+            content_opacity: 1.0,
             font_info: Self::get_font_info(),
             width: 1,
             height: 1,
@@ -222,6 +226,19 @@ impl DirectXRenderer {
                 .Present(0, DXGI_PRESENT(0))
         };
         result.ok().context("Presenting swap chain failed")
+    }
+
+    /// Fades everything the window draws as it is composited. Does nothing
+    /// without DirectComposition, the fallback path that has no visual to fade.
+    pub(crate) fn set_content_opacity(&mut self, opacity: f32) {
+        self.content_opacity = opacity;
+        if let Some(composition) = &self.direct_composition {
+            composition.set_opacity(opacity).log_err();
+        }
+    }
+
+    pub(crate) fn content_opacity(&self) -> f32 {
+        self.content_opacity
     }
 
     pub(crate) fn handle_device_lost(&mut self, directx_devices: &DirectXDevices) -> Result<()> {
@@ -278,6 +295,9 @@ impl DirectXRenderer {
             let composition =
                 DirectComposition::new(devices.dxgi_device.as_ref().unwrap(), self.hwnd)?;
             composition.set_swap_chain(&resources.swap_chain)?;
+            if self.content_opacity < 1.0 {
+                composition.set_opacity(self.content_opacity).log_err();
+            }
             Some(composition)
         };
 
@@ -893,15 +913,16 @@ impl DirectXRenderPipelines {
 
 impl DirectComposition {
     pub fn new(dxgi_device: &IDXGIDevice, hwnd: HWND) -> Result<Self> {
-        let comp_device = get_comp_device(dxgi_device)?;
-        let comp_target = unsafe { comp_device.CreateTargetForHwnd(hwnd, true) }?;
-        let comp_visual = unsafe { comp_device.CreateVisual() }?;
-
+        let (comp_device, comp_target, comp_visual) = create_composition(dxgi_device, hwnd)?;
         Ok(Self {
             comp_device,
             comp_target,
             comp_visual,
         })
+    }
+
+    pub fn set_opacity(&self, opacity: f32) -> Result<()> {
+        set_composition_opacity(&self.comp_device, &self.comp_visual, opacity)
     }
 
     pub fn set_swap_chain(&self, swap_chain: &IDXGISwapChain1) -> Result<()> {
@@ -1166,8 +1187,41 @@ impl Drop for DirectXRenderer {
 }
 
 #[inline]
-fn get_comp_device(dxgi_device: &IDXGIDevice) -> Result<IDCompositionDevice> {
-    Ok(unsafe { DCompositionCreateDevice(dxgi_device)? })
+/// Builds the composition tree a window's swap chain is shown through.
+///
+/// The desktop device (DirectComposition 3) rather than the original one,
+/// because only its visuals can be faded: `IDCompositionVisual3::SetOpacity`,
+/// which `window_opacity` needs to fade the whole window evenly.
+fn create_composition(
+    dxgi_device: &IDXGIDevice,
+    hwnd: HWND,
+) -> Result<(
+    IDCompositionDesktopDevice,
+    IDCompositionTarget,
+    IDCompositionVisual2,
+)> {
+    unsafe {
+        let device: IDCompositionDesktopDevice = DCompositionCreateDevice3(dxgi_device)?;
+        let target = device.CreateTargetForHwnd(hwnd, true)?;
+        let visual = device.CreateVisual()?;
+        Ok((device, target, visual))
+    }
+}
+
+/// Fades the window's visual, and with it everything the window draws, as the
+/// desktop window manager composites it.
+fn set_composition_opacity(
+    device: &IDCompositionDesktopDevice,
+    visual: &IDCompositionVisual2,
+    opacity: f32,
+) -> Result<()> {
+    unsafe {
+        visual
+            .cast::<IDCompositionVisual3>()?
+            .SetOpacity2(opacity)?;
+        device.Commit()?;
+    }
+    Ok(())
 }
 
 fn create_swap_chain_for_composition(

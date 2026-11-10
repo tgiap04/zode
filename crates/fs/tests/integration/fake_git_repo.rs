@@ -1,7 +1,14 @@
 use fs::{FakeFs, Fs};
+use git::{
+    Oid,
+    repository::{GraphCommitData, InitialGraphCommitData, LogOrder, LogSource},
+};
 use gpui::{BackgroundExecutor, TestAppContext};
 use serde_json::json;
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use util::path;
 
 #[gpui::test]
@@ -193,4 +200,136 @@ async fn test_checkpoints(executor: BackgroundExecutor) {
         .unwrap();
     assert!(diff.contains("b"), "diff should mention changed file 'b'");
     assert!(diff.contains("c"), "diff should mention added file 'c'");
+}
+
+#[gpui::test]
+async fn test_fake_commit_data_reader_answers_configured_commits(executor: BackgroundExecutor) {
+    let fs = FakeFs::new(executor);
+    fs.insert_tree(
+        path!("/project"),
+        json!({
+            ".git": {},
+            "a.txt": "a",
+        }),
+    )
+    .await;
+    let dot_git = Path::new(path!("/project/.git"));
+
+    let root_sha = Oid::from_bytes(&[1; 20]).unwrap();
+    let child_sha = Oid::from_bytes(&[2; 20]).unwrap();
+    let unknown_sha = Oid::from_bytes(&[3; 20]).unwrap();
+    fs.set_graph_commit_details(
+        dot_git,
+        vec![
+            GraphCommitData {
+                sha: root_sha,
+                parents: Default::default(),
+                author_name: "Ada".into(),
+                author_email: "ada@example.com".into(),
+                commit_timestamp: 1_700_000_000,
+                subject: "Initial commit".into(),
+            },
+            GraphCommitData {
+                sha: child_sha,
+                parents: vec![root_sha].into(),
+                author_name: "Grace".into(),
+                author_email: "grace@example.com".into(),
+                commit_timestamp: 1_700_000_100,
+                subject: "Add feature".into(),
+            },
+        ],
+    );
+
+    let repository = fs.open_repo(dot_git, Some("git".as_ref())).unwrap();
+    let reader = repository.commit_data_reader();
+    assert!(
+        reader.is_ok(),
+        "the fake should hand out a commit data reader"
+    );
+    let reader = reader.unwrap();
+
+    let root = reader.read(root_sha).await.unwrap();
+    assert_eq!(root.sha, root_sha);
+    assert!(root.parents.is_empty());
+    assert_eq!(root.author_name.as_ref(), "Ada");
+    assert_eq!(root.author_email.as_ref(), "ada@example.com");
+    assert_eq!(root.commit_timestamp, 1_700_000_000);
+    assert_eq!(root.subject.as_ref(), "Initial commit");
+
+    let child = reader.read(child_sha).await.unwrap();
+    assert_eq!(child.sha, child_sha);
+    assert_eq!(child.parents.as_slice(), &[root_sha]);
+    assert_eq!(child.author_name.as_ref(), "Grace");
+    assert_eq!(child.author_email.as_ref(), "grace@example.com");
+    assert_eq!(child.commit_timestamp, 1_700_000_100);
+    assert_eq!(child.subject.as_ref(), "Add feature");
+
+    let error = reader.read(unknown_sha).await.unwrap_err();
+    assert!(
+        error.to_string().contains(&unknown_sha.to_string()),
+        "the error should name the missing commit, got: {error}"
+    );
+}
+
+/// A log that dies partway still printed the commits before the failure, so the fake streams the
+/// configured commits first and fails after them.
+#[gpui::test]
+async fn test_fake_graph_streams_its_commits_before_the_simulated_error(
+    executor: BackgroundExecutor,
+) {
+    let fs = FakeFs::new(executor);
+    fs.insert_tree(path!("/project"), json!({ ".git": {}, "a.txt": "a" }))
+        .await;
+    let dot_git = Path::new(path!("/project/.git"));
+    let commits = (1..=3u8)
+        .map(|byte| {
+            Arc::new(InitialGraphCommitData {
+                sha: Oid::from_bytes(&[byte; 20]).unwrap(),
+                parents: Default::default(),
+                ref_names: Vec::new(),
+            })
+        })
+        .collect::<Vec<_>>();
+    fs.set_graph_commits(dot_git, commits.clone());
+    fs.set_graph_error(dot_git, Some("fatal: early EOF".into()));
+
+    let repository = fs.open_repo(dot_git, Some("git".as_ref())).unwrap();
+    let (request_tx, request_rx) = smol::channel::unbounded();
+    let error = repository
+        .initial_graph_data(LogSource::All, LogOrder::default(), request_tx)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("early EOF"), "got: {error}");
+
+    let mut received = Vec::new();
+    while let Ok(chunk) = request_rx.try_recv() {
+        received.extend(chunk.iter().map(|commit| commit.sha));
+    }
+    assert_eq!(
+        received,
+        commits.iter().map(|commit| commit.sha).collect::<Vec<_>>(),
+        "the commits before the failure should have been streamed"
+    );
+    assert_eq!(fs.graph_fetch_count(dot_git), 1);
+}
+
+#[gpui::test]
+async fn test_fake_commit_data_reader_fails_while_an_error_is_simulated(
+    executor: BackgroundExecutor,
+) {
+    let fs = FakeFs::new(executor);
+    fs.insert_tree(path!("/project"), json!({ ".git": {}, "a.txt": "a" }))
+        .await;
+    let dot_git = Path::new(path!("/project/.git"));
+    let repository = fs.open_repo(dot_git, Some("git".as_ref())).unwrap();
+
+    fs.set_commit_data_error(dot_git, Some("cannot read objects".into()));
+    let error = repository.commit_data_reader().err();
+    assert!(
+        error.is_some_and(|error| error.to_string().contains("cannot read objects")),
+        "the simulated error should fail opening the reader"
+    );
+
+    fs.set_commit_data_error(dot_git, None);
+    assert!(repository.commit_data_reader().is_ok());
 }

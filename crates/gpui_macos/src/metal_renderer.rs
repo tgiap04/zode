@@ -133,6 +133,65 @@ pub(crate) struct MetalRenderer {
     path_intermediate_texture: Option<metal::Texture>,
     path_intermediate_msaa_texture: Option<metal::Texture>,
     path_sample_count: u32,
+    vibrancy_pipelines: VibrancyPipelines,
+    /// Below 1, backgrounds are see-through at this opacity while text, icons
+    /// and underlines stay solid. 1 is off.
+    vibrancy_opacity: f32,
+    backdrop: Option<Backdrop>,
+}
+
+/// The pipelines used while vibrancy is on. The same shaders as the ordinary
+/// set, with alpha blended to track foreground coverage instead of summing:
+/// a background clears the coverage beneath it, so stacked backgrounds end up
+/// exactly as see-through as one, and text, icons and underlines add theirs.
+struct VibrancyPipelines {
+    shadows: metal::RenderPipelineState,
+    quads: metal::RenderPipelineState,
+    path_sprites: metal::RenderPipelineState,
+    underlines: metal::RenderPipelineState,
+    monochrome_sprites: metal::RenderPipelineState,
+    polychrome_sprites: metal::RenderPipelineState,
+    surfaces: metal::RenderPipelineState,
+    /// alpha = opacity + (1 - opacity) * coverage.
+    coverage_to_alpha: metal::RenderPipelineState,
+    /// rgb *= alpha, giving the premultiplied pixel the compositor expects.
+    premultiply: metal::RenderPipelineState,
+    /// Draws the backdrop image behind what is there (destination over).
+    backdrop: metal::RenderPipelineState,
+}
+
+/// The image drawn behind the see-through backgrounds, uploaded once.
+struct Backdrop {
+    image: Arc<gpui::RenderImage>,
+    texture: metal::Texture,
+    size: Size<DevicePixels>,
+}
+
+/// How a pipeline blends alpha.
+#[derive(Clone, Copy)]
+enum AlphaBlend {
+    /// The ordinary set: alpha adds up.
+    Sum,
+    /// A background: it clears the foreground coverage beneath it.
+    ClearCoverage,
+    /// Text, icons, underlines: they add their coverage.
+    AddCoverage,
+}
+
+impl AlphaBlend {
+    fn factors(self) -> (metal::MTLBlendFactor, metal::MTLBlendFactor) {
+        match self {
+            Self::Sum => (metal::MTLBlendFactor::One, metal::MTLBlendFactor::One),
+            Self::ClearCoverage => (
+                metal::MTLBlendFactor::Zero,
+                metal::MTLBlendFactor::OneMinusSourceAlpha,
+            ),
+            Self::AddCoverage => (
+                metal::MTLBlendFactor::One,
+                metal::MTLBlendFactor::OneMinusSourceAlpha,
+            ),
+        }
+    }
 }
 
 #[repr(C)]
@@ -319,6 +378,8 @@ impl MetalRenderer {
             MTLPixelFormat::BGRA8Unorm,
         );
 
+        let vibrancy_pipelines = build_vibrancy_pipelines(&device, &library);
+
         let command_queue = device.new_command_queue();
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), is_apple_gpu));
         let core_video_texture_cache =
@@ -347,6 +408,9 @@ impl MetalRenderer {
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
             path_sample_count: PATH_SAMPLE_COUNT,
+            vibrancy_pipelines,
+            vibrancy_opacity: 1.0,
+            backdrop: None,
         }
     }
 
@@ -748,7 +812,13 @@ impl MetalRenderer {
     ) -> Result<metal::CommandBuffer> {
         let command_queue = self.command_queue.clone();
         let command_buffer = command_queue.new_command_buffer();
-        let alpha = if self.opaque { 1. } else { 0. };
+        // While vibrancy is on, alpha tracks foreground coverage, which starts
+        // at none.
+        let alpha = if self.opaque && !self.vibrancy_on() {
+            1.
+        } else {
+            0.
+        };
         let mut instance_offset = 0;
 
         let mut command_encoder = new_command_encoder_for_texture(
@@ -859,6 +929,9 @@ impl MetalRenderer {
             }
         }
 
+        if self.vibrancy_on() {
+            self.encode_vibrancy(command_encoder, viewport_size);
+        }
         command_encoder.end_encoding();
 
         if !self.is_unified_memory {
@@ -971,7 +1044,11 @@ impl MetalRenderer {
         }
         align_offset(instance_offset);
 
-        command_encoder.set_render_pipeline_state(&self.shadows_pipeline_state);
+        command_encoder.set_render_pipeline_state(if self.vibrancy_on() {
+            &self.vibrancy_pipelines.shadows
+        } else {
+            &self.shadows_pipeline_state
+        });
         command_encoder.set_vertex_buffer(
             ShadowInputIndex::Vertices as u64,
             Some(&self.unit_vertices),
@@ -1034,7 +1111,11 @@ impl MetalRenderer {
         }
         align_offset(instance_offset);
 
-        command_encoder.set_render_pipeline_state(&self.quads_pipeline_state);
+        command_encoder.set_render_pipeline_state(if self.vibrancy_on() {
+            &self.vibrancy_pipelines.quads
+        } else {
+            &self.quads_pipeline_state
+        });
         command_encoder.set_vertex_buffer(
             QuadInputIndex::Vertices as u64,
             Some(&self.unit_vertices),
@@ -1096,7 +1177,11 @@ impl MetalRenderer {
             return false;
         };
 
-        command_encoder.set_render_pipeline_state(&self.path_sprites_pipeline_state);
+        command_encoder.set_render_pipeline_state(if self.vibrancy_on() {
+            &self.vibrancy_pipelines.path_sprites
+        } else {
+            &self.path_sprites_pipeline_state
+        });
         command_encoder.set_vertex_buffer(
             SpriteInputIndex::Vertices as u64,
             Some(&self.unit_vertices),
@@ -1183,7 +1268,11 @@ impl MetalRenderer {
         }
         align_offset(instance_offset);
 
-        command_encoder.set_render_pipeline_state(&self.underlines_pipeline_state);
+        command_encoder.set_render_pipeline_state(if self.vibrancy_on() {
+            &self.vibrancy_pipelines.underlines
+        } else {
+            &self.underlines_pipeline_state
+        });
         command_encoder.set_vertex_buffer(
             UnderlineInputIndex::Vertices as u64,
             Some(&self.unit_vertices),
@@ -1261,7 +1350,11 @@ impl MetalRenderer {
             DevicePixels(texture.width() as i32),
             DevicePixels(texture.height() as i32),
         );
-        command_encoder.set_render_pipeline_state(&self.monochrome_sprites_pipeline_state);
+        command_encoder.set_render_pipeline_state(if self.vibrancy_on() {
+            &self.vibrancy_pipelines.monochrome_sprites
+        } else {
+            &self.monochrome_sprites_pipeline_state
+        });
         command_encoder.set_vertex_buffer(
             SpriteInputIndex::Vertices as u64,
             Some(&self.unit_vertices),
@@ -1326,7 +1419,11 @@ impl MetalRenderer {
             DevicePixels(texture.width() as i32),
             DevicePixels(texture.height() as i32),
         );
-        command_encoder.set_render_pipeline_state(&self.polychrome_sprites_pipeline_state);
+        command_encoder.set_render_pipeline_state(if self.vibrancy_on() {
+            &self.vibrancy_pipelines.polychrome_sprites
+        } else {
+            &self.polychrome_sprites_pipeline_state
+        });
         command_encoder.set_vertex_buffer(
             SpriteInputIndex::Vertices as u64,
             Some(&self.unit_vertices),
@@ -1389,7 +1486,11 @@ impl MetalRenderer {
         viewport_size: Size<DevicePixels>,
         command_encoder: &metal::RenderCommandEncoderRef,
     ) -> bool {
-        command_encoder.set_render_pipeline_state(&self.surfaces_pipeline_state);
+        command_encoder.set_render_pipeline_state(if self.vibrancy_on() {
+            &self.vibrancy_pipelines.surfaces
+        } else {
+            &self.surfaces_pipeline_state
+        });
         command_encoder.set_vertex_buffer(
             SurfaceInputIndex::Vertices as u64,
             Some(&self.unit_vertices),
@@ -1516,6 +1617,26 @@ fn build_pipeline_state(
     fragment_fn_name: &str,
     pixel_format: metal::MTLPixelFormat,
 ) -> metal::RenderPipelineState {
+    build_pipeline_state_with(
+        device,
+        library,
+        label,
+        vertex_fn_name,
+        fragment_fn_name,
+        pixel_format,
+        AlphaBlend::Sum,
+    )
+}
+
+fn build_pipeline_state_with(
+    device: &metal::DeviceRef,
+    library: &metal::LibraryRef,
+    label: &str,
+    vertex_fn_name: &str,
+    fragment_fn_name: &str,
+    pixel_format: metal::MTLPixelFormat,
+    alpha_blend: AlphaBlend,
+) -> metal::RenderPipelineState {
     let vertex_fn = library
         .get_function(vertex_fn_name, None)
         .expect("error locating vertex function");
@@ -1533,9 +1654,10 @@ fn build_pipeline_state(
     color_attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
     color_attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
     color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::SourceAlpha);
-    color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
-    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
+    let (source_alpha, destination_alpha) = alpha_blend.factors();
+    color_attachment.set_source_alpha_blend_factor(source_alpha);
+    color_attachment.set_destination_alpha_blend_factor(destination_alpha);
 
     device
         .new_render_pipeline_state(&descriptor)
@@ -1549,6 +1671,26 @@ fn build_path_sprite_pipeline_state(
     vertex_fn_name: &str,
     fragment_fn_name: &str,
     pixel_format: metal::MTLPixelFormat,
+) -> metal::RenderPipelineState {
+    build_path_sprite_pipeline_state_with(
+        device,
+        library,
+        label,
+        vertex_fn_name,
+        fragment_fn_name,
+        pixel_format,
+        AlphaBlend::Sum,
+    )
+}
+
+fn build_path_sprite_pipeline_state_with(
+    device: &metal::DeviceRef,
+    library: &metal::LibraryRef,
+    label: &str,
+    vertex_fn_name: &str,
+    fragment_fn_name: &str,
+    pixel_format: metal::MTLPixelFormat,
+    alpha_blend: AlphaBlend,
 ) -> metal::RenderPipelineState {
     let vertex_fn = library
         .get_function(vertex_fn_name, None)
@@ -1567,13 +1709,140 @@ fn build_path_sprite_pipeline_state(
     color_attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
     color_attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
     color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::One);
-    color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
-    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
+    let (source_alpha, destination_alpha) = alpha_blend.factors();
+    color_attachment.set_source_alpha_blend_factor(source_alpha);
+    color_attachment.set_destination_alpha_blend_factor(destination_alpha);
 
     device
         .new_render_pipeline_state(&descriptor)
         .expect("could not create render pipeline state")
+}
+
+/// A pipeline drawing one full-screen triangle with fixed-function blending:
+/// the vibrancy passes do their work in the blend unit, not the shader.
+#[allow(clippy::too_many_arguments)]
+fn build_fullscreen_pipeline_state(
+    device: &metal::DeviceRef,
+    library: &metal::LibraryRef,
+    label: &str,
+    fragment_fn_name: &str,
+    rgb: (metal::MTLBlendFactor, metal::MTLBlendFactor),
+    alpha: (metal::MTLBlendFactor, metal::MTLBlendFactor),
+    write_mask: metal::MTLColorWriteMask,
+) -> metal::RenderPipelineState {
+    let vertex_fn = library
+        .get_function("fullscreen_vertex", None)
+        .expect("error locating vertex function");
+    let fragment_fn = library
+        .get_function(fragment_fn_name, None)
+        .expect("error locating fragment function");
+
+    let descriptor = metal::RenderPipelineDescriptor::new();
+    descriptor.set_label(label);
+    descriptor.set_vertex_function(Some(vertex_fn.as_ref()));
+    descriptor.set_fragment_function(Some(fragment_fn.as_ref()));
+    let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
+    color_attachment.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+    color_attachment.set_write_mask(write_mask);
+    color_attachment.set_blending_enabled(true);
+    color_attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
+    color_attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
+    color_attachment.set_source_rgb_blend_factor(rgb.0);
+    color_attachment.set_destination_rgb_blend_factor(rgb.1);
+    color_attachment.set_source_alpha_blend_factor(alpha.0);
+    color_attachment.set_destination_alpha_blend_factor(alpha.1);
+
+    device
+        .new_render_pipeline_state(&descriptor)
+        .expect("could not create render pipeline state")
+}
+
+fn build_vibrancy_pipelines(
+    device: &metal::DeviceRef,
+    library: &metal::LibraryRef,
+) -> VibrancyPipelines {
+    use metal::MTLBlendFactor::*;
+    let format = MTLPixelFormat::BGRA8Unorm;
+    let pipeline = |label: &str, vertex: &str, fragment: &str, alpha: AlphaBlend| {
+        build_pipeline_state_with(device, library, label, vertex, fragment, format, alpha)
+    };
+    VibrancyPipelines {
+        shadows: pipeline(
+            "vibrancy_shadows",
+            "shadow_vertex",
+            "shadow_fragment",
+            AlphaBlend::ClearCoverage,
+        ),
+        quads: pipeline(
+            "vibrancy_quads",
+            "quad_vertex",
+            "quad_fragment",
+            AlphaBlend::ClearCoverage,
+        ),
+        path_sprites: build_path_sprite_pipeline_state_with(
+            device,
+            library,
+            "vibrancy_path_sprites",
+            "path_sprite_vertex",
+            "path_sprite_fragment",
+            format,
+            AlphaBlend::ClearCoverage,
+        ),
+        underlines: pipeline(
+            "vibrancy_underlines",
+            "underline_vertex",
+            "underline_fragment",
+            AlphaBlend::AddCoverage,
+        ),
+        monochrome_sprites: pipeline(
+            "vibrancy_monochrome_sprites",
+            "monochrome_sprite_vertex",
+            "monochrome_sprite_fragment",
+            AlphaBlend::AddCoverage,
+        ),
+        polychrome_sprites: pipeline(
+            "vibrancy_polychrome_sprites",
+            "polychrome_sprite_vertex",
+            "polychrome_sprite_fragment",
+            AlphaBlend::AddCoverage,
+        ),
+        surfaces: pipeline(
+            "vibrancy_surfaces",
+            "surface_vertex",
+            "surface_fragment",
+            AlphaBlend::ClearCoverage,
+        ),
+        coverage_to_alpha: build_fullscreen_pipeline_state(
+            device,
+            library,
+            "vibrancy_coverage_to_alpha",
+            "vibrancy_coverage_fragment",
+            (Zero, One),
+            (One, BlendAlpha),
+            metal::MTLColorWriteMask::Alpha,
+        ),
+        premultiply: build_fullscreen_pipeline_state(
+            device,
+            library,
+            "vibrancy_premultiply",
+            "vibrancy_coverage_fragment",
+            (Zero, DestinationAlpha),
+            (Zero, One),
+            metal::MTLColorWriteMask::Red
+                | metal::MTLColorWriteMask::Green
+                | metal::MTLColorWriteMask::Blue,
+        ),
+        backdrop: build_fullscreen_pipeline_state(
+            device,
+            library,
+            "vibrancy_backdrop",
+            "vibrancy_backdrop_fragment",
+            (OneMinusDestinationAlpha, One),
+            (OneMinusDestinationAlpha, One),
+            metal::MTLColorWriteMask::all(),
+        ),
+    }
 }
 
 fn build_path_rasterization_pipeline_state(
@@ -1679,6 +1948,116 @@ pub struct SurfaceBounds {
     pub content_mask: ContentMask<ScaledPixels>,
 }
 
+impl MetalRenderer {
+    /// Vibrancy: backgrounds see-through at `opacity`, text, icons and
+    /// underlines solid. 1 turns it off.
+    pub fn set_vibrancy_opacity(&mut self, opacity: f32) {
+        self.vibrancy_opacity = opacity.clamp(0.0, 1.0);
+    }
+
+    /// The image drawn behind the see-through backgrounds while vibrancy is on.
+    /// Uploaded once; setting the same image again does nothing.
+    pub fn set_backdrop_image(&mut self, image: Option<Arc<gpui::RenderImage>>) {
+        let Some(image) = image else {
+            self.backdrop = None;
+            return;
+        };
+        if self
+            .backdrop
+            .as_ref()
+            .is_some_and(|backdrop| Arc::ptr_eq(&backdrop.image, &image))
+        {
+            return;
+        }
+        let (Some(bytes), size) = (image.as_bytes(0), image.size(0)) else {
+            self.backdrop = None;
+            return;
+        };
+        if size.width.0 <= 0 || size.height.0 <= 0 {
+            self.backdrop = None;
+            return;
+        }
+        let descriptor = metal::TextureDescriptor::new();
+        descriptor.set_width(size.width.0 as u64);
+        descriptor.set_height(size.height.0 as u64);
+        descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+        descriptor.set_usage(metal::MTLTextureUsage::ShaderRead);
+        let texture = self.device.new_texture(&descriptor);
+        texture.replace_region(
+            metal::MTLRegion {
+                origin: metal::MTLOrigin { x: 0, y: 0, z: 0 },
+                size: metal::MTLSize {
+                    width: size.width.0 as u64,
+                    height: size.height.0 as u64,
+                    depth: 1,
+                },
+            },
+            0,
+            bytes.as_ptr() as *const c_void,
+            size.width.0 as u64 * 4,
+        );
+        self.backdrop = Some(Backdrop {
+            image,
+            texture,
+            size,
+        });
+    }
+
+    fn vibrancy_on(&self) -> bool {
+        self.vibrancy_opacity < 1.0
+    }
+
+    /// Turns the coverage alpha into the final pixel: backgrounds at the
+    /// vibrancy opacity, foreground solid, premultiplied -- then the backdrop
+    /// image, if any, behind it all.
+    fn encode_vibrancy(
+        &self,
+        command_encoder: &metal::RenderCommandEncoderRef,
+        viewport_size: Size<DevicePixels>,
+    ) {
+        let opacity = self.vibrancy_opacity;
+        let pipelines = &self.vibrancy_pipelines;
+
+        command_encoder.set_render_pipeline_state(&pipelines.coverage_to_alpha);
+        command_encoder.set_blend_color(0., 0., 0., 1. - opacity);
+        command_encoder.set_fragment_bytes(
+            0,
+            mem::size_of::<f32>() as u64,
+            &opacity as *const f32 as *const c_void,
+        );
+        command_encoder.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 3);
+
+        command_encoder.set_render_pipeline_state(&pipelines.premultiply);
+        command_encoder.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 3);
+
+        if let Some(backdrop) = &self.backdrop {
+            let uv_rect = cover_uv_rect(backdrop.size, viewport_size);
+            command_encoder.set_render_pipeline_state(&pipelines.backdrop);
+            command_encoder.set_fragment_bytes(
+                0,
+                mem::size_of_val(&uv_rect) as u64,
+                uv_rect.as_ptr() as *const c_void,
+            );
+            command_encoder.set_fragment_texture(0, Some(&backdrop.texture));
+            command_encoder.draw_primitives(metal::MTLPrimitiveType::Triangle, 0, 3);
+        }
+    }
+}
+
+/// The part of an image that covers a viewport without stretching, as
+/// `[x, y, width, height]` in texture space: the longer side is cropped evenly.
+fn cover_uv_rect(image: Size<DevicePixels>, viewport: Size<DevicePixels>) -> [f32; 4] {
+    let image_ratio = image.width.0 as f32 / image.height.0.max(1) as f32;
+    let viewport_ratio = viewport.width.0 as f32 / viewport.height.0.max(1) as f32;
+    if image_ratio > viewport_ratio {
+        let width = viewport_ratio / image_ratio;
+        [(1. - width) / 2., 0., width, 1.]
+    } else {
+        let height = image_ratio / viewport_ratio;
+        [0., (1. - height) / 2., 1., height]
+    }
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub struct MetalHeadlessRenderer {
     renderer: MetalRenderer,
@@ -1705,5 +2084,137 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
 
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.renderer.sprite_atlas().clone()
+    }
+}
+
+#[cfg(test)]
+mod vibrancy_tests {
+    use super::*;
+    use gpui::{BorderStyle, Corners, Edges, Hsla, RenderImage};
+
+    const SIZE: i32 = 64;
+
+    fn renderer() -> MetalRenderer {
+        MetalRenderer::new_headless(Arc::new(Mutex::new(InstanceBufferPool::default())))
+    }
+
+    fn full() -> Bounds<ScaledPixels> {
+        Bounds {
+            origin: point(ScaledPixels(0.), ScaledPixels(0.)),
+            size: size(ScaledPixels(SIZE as f32), ScaledPixels(SIZE as f32)),
+        }
+    }
+
+    fn quad(color: Hsla) -> Quad {
+        Quad {
+            order: 0,
+            border_style: BorderStyle::default(),
+            bounds: full(),
+            content_mask: ContentMask { bounds: full() },
+            background: color.into(),
+            border_color: Hsla::transparent_black(),
+            corner_radii: Corners::default(),
+            border_widths: Edges::default(),
+        }
+    }
+
+    fn render(renderer: &mut MetalRenderer, scene: &mut Scene) -> image::RgbaImage {
+        scene.finish();
+        renderer
+            .render_scene_to_image(scene, size(DevicePixels(SIZE), DevicePixels(SIZE)))
+            .expect("renders")
+    }
+
+    fn alpha(image: &image::RgbaImage, x: u32, y: u32) -> u8 {
+        image.get_pixel(x, y).0[3]
+    }
+
+    fn near(actual: u8, expected: u8) -> bool {
+        actual.abs_diff(expected) <= 2
+    }
+
+    /// The defect vibrancy exists for: stacked surfaces must not compound. Two
+    /// solid backgrounds on top of each other are as see-through as one.
+    #[test]
+    fn stacked_backgrounds_are_as_see_through_as_one() {
+        let mut renderer = renderer();
+        renderer.set_vibrancy_opacity(0.5);
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad(gpui::blue()));
+        scene.insert_primitive(quad(gpui::green()));
+        let image = render(&mut renderer, &mut scene);
+        let a = alpha(&image, 32, 32);
+        assert!(near(a, 128), "background alpha {a}, wanted 128");
+        let rgb = image.get_pixel(32, 32).0;
+        let green: gpui::Rgba = gpui::green().into();
+        let expected = (green.g * 255. * 0.5).round() as u8;
+        assert!(
+            near(rgb[1], expected) && near(rgb[2], 0),
+            "the top surface's colour, premultiplied by the opacity: {rgb:?}, wanted green {expected}"
+        );
+    }
+
+    /// Text-like foreground stays solid over a see-through background.
+    #[test]
+    fn foreground_stays_solid() {
+        let mut renderer = renderer();
+        renderer.set_vibrancy_opacity(0.5);
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad(gpui::blue()));
+        scene.insert_primitive(Underline {
+            order: 0,
+            pad: 0,
+            bounds: Bounds {
+                origin: point(ScaledPixels(0.), ScaledPixels(20.)),
+                size: size(ScaledPixels(SIZE as f32), ScaledPixels(8.)),
+            },
+            content_mask: ContentMask { bounds: full() },
+            color: gpui::white(),
+            thickness: ScaledPixels(8.),
+            wavy: 0,
+        });
+        let image = render(&mut renderer, &mut scene);
+        assert!(
+            near(alpha(&image, 32, 24), 255),
+            "underline alpha {}",
+            alpha(&image, 32, 24)
+        );
+        assert!(
+            near(alpha(&image, 32, 50), 128),
+            "background alpha {}",
+            alpha(&image, 32, 50)
+        );
+    }
+
+    /// The image shows behind the see-through backgrounds, and the result is
+    /// solid: nothing of the desktop shows through an image.
+    #[test]
+    fn the_backdrop_image_shows_behind_the_backgrounds() {
+        let mut renderer = renderer();
+        renderer.set_vibrancy_opacity(0.5);
+        // BGRA: pure red.
+        let red = image::RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 255, 255]));
+        renderer.set_backdrop_image(Some(Arc::new(RenderImage::new(vec![image::Frame::new(
+            red,
+        )]))));
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad(gpui::blue()));
+        let image = render(&mut renderer, &mut scene);
+        let [r, g, b, a] = image.get_pixel(32, 32).0;
+        assert!(near(a, 255), "solid where an image is behind: {a}");
+        assert!(
+            near(r, 128) && near(b, 128) && near(g, 0),
+            "half background, half image: {:?}",
+            (r, g, b)
+        );
+    }
+
+    #[test]
+    fn without_vibrancy_nothing_changes() {
+        let mut renderer = renderer();
+        let mut scene = Scene::default();
+        scene.insert_primitive(quad(gpui::blue()));
+        let image = render(&mut renderer, &mut scene);
+        assert!(near(alpha(&image, 32, 32), 255));
     }
 }

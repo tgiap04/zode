@@ -1972,6 +1972,158 @@ async fn test_remote_git_diffs_when_recv_update_repository_delay(
 }
 
 #[gpui::test]
+async fn test_remote_rescan_worktree_picks_up_new_repository(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(
+        path!("/code"),
+        json!({
+            "project1": {
+                "README.md": "# project 1",
+            },
+        }),
+    )
+    .await;
+
+    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
+    let (worktree, _) = project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/code/project1"), true, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
+    let repository_paths = |cx: &mut TestAppContext| {
+        project.read_with(cx, |project, cx| {
+            project
+                .repositories(cx)
+                .values()
+                .map(|repository| repository.read(cx).work_directory_abs_path.to_path_buf())
+                .collect::<Vec<_>>()
+        })
+    };
+
+    // A repository cloned inside the folder without the server's watcher reporting it.
+    fs.pause_events();
+    fs.insert_tree(
+        path!("/code/project1/new_repo"),
+        json!({
+            ".git": {},
+            "src": {
+                "main.rs": "fn main() {}",
+            },
+        }),
+    )
+    .await;
+    fs.clear_buffered_events();
+    fs.unpause_events_and_flush();
+    cx.run_until_parked();
+    worktree.read_with(cx, |worktree, _| {
+        assert!(worktree.entry_for_path(rel_path("new_repo")).is_none());
+    });
+    assert!(repository_paths(cx).is_empty());
+
+    project
+        .update(cx, |project, cx| project.rescan_worktree(worktree_id, cx))
+        .await
+        .unwrap();
+    worktree.read_with(cx, |worktree, _| {
+        assert!(
+            worktree
+                .entry_for_path(rel_path("new_repo/src/main.rs"))
+                .is_some(),
+            "the rescan must be in the client's snapshot when the request resolves"
+        );
+    });
+
+    cx.run_until_parked();
+    assert_eq!(
+        repository_paths(cx),
+        vec![PathBuf::from(path!("/code/project1/new_repo"))]
+    );
+}
+
+#[gpui::test]
+async fn test_remote_disconnect_drops_the_rescan_in_flight(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(path!("/code"), json!({ "project1": { "a.txt": "a" } }))
+        .await;
+    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
+    let (worktree, _) = project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/code/project1"), true, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    let worktree_id = worktree.read_with(cx, |worktree, _| worktree.id());
+
+    // Not driven: stands for a rescan whose snapshot will never arrive.
+    let _stuck_rescan = project.update(cx, |project, cx| project.rescan_worktree(worktree_id, cx));
+    assert!(project.read_with(cx, |project, _| {
+        project.has_worktree_rescan_in_flight(worktree_id)
+    }));
+
+    let client = project.read_with(cx, |project, _| project.remote_client().unwrap());
+    client.update(cx, |client, cx| client.force_server_not_running(cx));
+
+    // Checked before anything has run, so nothing but the disconnect can have removed the entry.
+    assert!(
+        !project.read_with(cx, |project, _| project
+            .has_worktree_rescan_in_flight(worktree_id)),
+        "a later reload must not join a rescan that can no longer finish"
+    );
+
+    // The disconnect tears the transport down, so a rescan started now cannot finish either:
+    // "the later reload settles" cannot be asserted, with or without the fix.
+    let _later_reload = project.update(cx, |project, cx| project.rescan_worktree(worktree_id, cx));
+    assert!(
+        project.read_with(cx, |project, _| project
+            .has_worktree_rescan_in_flight(worktree_id)),
+        "the later reload starts a rescan of its own"
+    );
+}
+
+#[gpui::test]
+async fn test_remote_rescan_unknown_worktree_errors(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(path!("/code"), json!({ "project1": { "a.txt": "a" } }))
+        .await;
+    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
+    project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/code/project1"), true, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+
+    let client = project.read_with(cx, |project, cx| {
+        project.remote_client().unwrap().read(cx).proto_client()
+    });
+    let response = client.request(proto::RescanWorktree {
+        project_id: proto::REMOTE_SERVER_PROJECT_ID,
+        worktree_id: 999_999,
+    });
+    let response = cx.spawn(async move |_| response.await);
+    cx.run_until_parked();
+    let error = response.await.unwrap_err();
+    assert!(
+        format!("{error:#}").contains("no worktree with id"),
+        "unexpected error: {error:#}"
+    );
+}
+
+#[gpui::test]
 async fn test_remote_git_branches(cx: &mut TestAppContext, server_cx: &mut TestAppContext) {
     let fs = FakeFs::new(server_cx.executor());
     fs.insert_tree(

@@ -185,7 +185,7 @@ impl Render for TitleBar {
                             self.application_menu.clone().filter(|_| !show_menus),
                             |title_bar, menu| {
                                 render_project_items &=
-                                    !menu.update(cx, |menu, cx| menu.all_menus_shown(cx));
+                                    !menu.update(cx, |menu, cx| menu.hides_project_items(cx));
                                 title_bar.child(menu)
                             },
                         )
@@ -279,13 +279,13 @@ impl TitleBar {
         let application_menu = match platform_style {
             PlatformStyle::Mac => {
                 if option_env!("ZED_USE_CROSS_PLATFORM_MENU").is_some() {
-                    Some(cx.new(|cx| ApplicationMenu::new(window, cx)))
+                    Some(cx.new(|cx| ApplicationMenu::new(false, window, cx)))
                 } else {
                     None
                 }
             }
             PlatformStyle::Linux | PlatformStyle::Windows => {
-                Some(cx.new(|cx| ApplicationMenu::new(window, cx)))
+                Some(cx.new(|cx| ApplicationMenu::new(true, window, cx)))
             }
         };
 

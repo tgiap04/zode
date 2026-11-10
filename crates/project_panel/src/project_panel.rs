@@ -93,6 +93,9 @@ const PROJECT_PANEL_KEY: &str = "ProjectPanel";
 /// guides. One const rather than two literals: a name that drifted would leave
 /// them hidden for good, and nothing would say so.
 const PANEL_GROUP: &str = "project-panel";
+/// Long enough to be seen: a rescan of a small folder finishes in a frame, and an icon that spins
+/// for one frame reads as a click that did nothing.
+const MIN_RELOAD_SPINNER: Duration = Duration::from_millis(500);
 const NEW_ENTRY_ID: ProjectEntryId = ProjectEntryId::MAX;
 
 struct VisibleEntriesForWorktree {
@@ -174,6 +177,7 @@ pub struct ProjectPanel {
     last_reported_update: Instant,
     update_visible_entries_task: UpdateVisibleEntriesTask,
     undo_manager: UndoManager,
+    reloading_worktrees: HashMap<WorktreeId, Task<()>>,
     state: State,
 }
 
@@ -368,6 +372,8 @@ actions!(
         RevealInFileManager,
         /// Removes the selected folder from the project.
         RemoveFromProject,
+        /// Rescans the project folder containing the selection from disk, or every project folder when nothing is selected.
+        ReloadWorktree,
         /// Cuts the selected file or directory.
         Cut,
         /// Pastes the previously cut or copied item.
@@ -972,6 +978,7 @@ impl ProjectPanel {
                 },
                 update_visible_entries_task: Default::default(),
                 undo_manager: UndoManager::new(workspace.weak_handle(), weak_project_panel, &cx),
+                reloading_worktrees: HashMap::default(),
             };
             this.update_visible_entries(None, false, false, window, cx);
 
@@ -1362,6 +1369,15 @@ impl ProjectPanel {
                                             });
                                         },
                                     ),
+                                )
+                            })
+                            .when(is_root, |menu| {
+                                // Under "Collapse All" when it is there, else a group of its own.
+                                let menu = if is_dir { menu } else { menu.separator() };
+                                menu.action_disabled_when(
+                                    is_collab,
+                                    "Reload",
+                                    Box::new(ReloadWorktree),
                                 )
                             })
                     }
@@ -3624,6 +3640,64 @@ impl ProjectPanel {
         }
     }
 
+    fn reload_selected_worktree(
+        &mut self,
+        _: &ReloadWorktree,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let worktree_ids = match self.selection {
+            Some(selection) => vec![selection.worktree_id],
+            None => self
+                .project
+                .read(cx)
+                .visible_worktrees(cx)
+                .map(|worktree| worktree.read(cx).id())
+                .collect(),
+        };
+        for worktree_id in worktree_ids {
+            self.reload_worktree(worktree_id, cx);
+        }
+    }
+
+    fn reload_worktree(&mut self, worktree_id: WorktreeId, cx: &mut Context<Self>) {
+        if self.reloading_worktrees.contains_key(&worktree_id) {
+            return;
+        }
+        let rescan = self
+            .project
+            .update(cx, |project, cx| project.rescan_worktree(worktree_id, cx));
+        let shown_for_at_least = cx.background_executor().timer(MIN_RELOAD_SPINNER);
+        let workspace = self.workspace.clone();
+        let task = cx.spawn(async move |this, cx| {
+            let (result, ()) = futures::join!(rescan, shown_for_at_least);
+            // A remote worktree removed mid-reload fails its rescan with an entity-released error
+            // that says nothing the user could act on.
+            let worktree_removed = result.is_err()
+                && this
+                    .read_with(cx, |this, cx| {
+                        this.project
+                            .read(cx)
+                            .worktree_for_id(worktree_id, cx)
+                            .is_none()
+                    })
+                    .unwrap_or(false);
+            if worktree_removed {
+                result.warn_on_err();
+            } else {
+                result.notify_workspace_async_err(workspace, cx);
+            }
+            // Last, because removing the entry drops this very task.
+            this.update(cx, |this, cx| {
+                this.reloading_worktrees.remove(&worktree_id);
+                cx.notify();
+            })
+            .log_err();
+        });
+        self.reloading_worktrees.insert(worktree_id, task);
+        cx.notify();
+    }
+
     fn file_abs_paths_to_diff(&self, cx: &Context<Self>) -> Option<(PathBuf, PathBuf)> {
         let mut selections_abs_path = self
             .marked_entries
@@ -5459,6 +5533,9 @@ impl ProjectPanel {
 
         let depth = details.depth;
         let worktree_id = details.worktree_id;
+        let show_reload = details.path.is_empty() && !is_sticky;
+        let is_reloading = self.reloading_worktrees.contains_key(&worktree_id);
+        let is_collab = self.project.read(cx).is_via_collab();
         let dragged_selection = DraggedSelection {
             active_selection: SelectedEntry {
                 worktree_id: selection.worktree_id,
@@ -5891,7 +5968,8 @@ impl ProjectPanel {
                     .when(
                         canonical_path.is_some()
                             || diagnostic_count.is_some()
-                            || git_indicator.is_some(),
+                            || git_indicator.is_some()
+                            || show_reload,
                         |this| {
                             let symlink_element = canonical_path.map(|path| {
                                 div()
@@ -5915,6 +5993,45 @@ impl ProjectPanel {
                                     .gap_1()
                                     .flex_none()
                                     .pr_3()
+                                    .when(show_reload, |this| {
+                                        let button = IconButton::new(
+                                            ("reload-worktree", entry_id.to_usize()),
+                                            IconName::RotateCw,
+                                        )
+                                        .icon_size(IconSize::Small)
+                                        .icon_color(Color::Muted)
+                                        .size(ButtonSize::None)
+                                        .loading(is_reloading)
+                                        .disabled(is_collab)
+                                        .tooltip(Tooltip::text(if is_collab {
+                                            "Reload is not available to guests"
+                                        } else if is_reloading {
+                                            "Reloading…"
+                                        } else {
+                                            "Reload from Disk"
+                                        }))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.reload_worktree(worktree_id, cx);
+                                        }));
+                                        // A spinner that vanishes the moment the pointer leaves
+                                        // would hide the one thing the click is waiting on.
+                                        let button = if is_reloading {
+                                            button.into_any_element()
+                                        } else {
+                                            button.visible_on_hover(GROUP_NAME).into_any_element()
+                                        };
+                                        // A disabled button takes no mouse handlers of its own,
+                                        // so without this its press lands on the row and folds
+                                        // the folder it was meant to refresh.
+                                        this.child(
+                                            div()
+                                                .debug_selector(|| "reload-worktree".into())
+                                                .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                                    cx.stop_propagation()
+                                                })
+                                                .child(button),
+                                        )
+                                    })
                                     .when_some(diagnostic_count, |this, count| {
                                         // FR3 (LSP hibernate/wake phase): a
                                         // stale count is left over from
@@ -6862,6 +6979,7 @@ impl Render for ProjectPanel {
                 .on_action(cx.listener(Self::unfold_directory))
                 .on_action(cx.listener(Self::fold_directory))
                 .on_action(cx.listener(Self::remove_from_project))
+                .on_action(cx.listener(Self::reload_selected_worktree))
                 .on_action(cx.listener(Self::compare_marked_files))
                 .when(cx.has_flag::<ProjectPanelUndoRedoFeatureFlag>(), |el| {
                     el.on_action(cx.listener(Self::undo))

@@ -11,7 +11,7 @@ use std::time::SystemTime;
 
 use agent_sessions::SubagentSummary;
 use gpui::{AnyElement, ClickEvent, Hsla};
-use ui::{AgentTypingMark, Disclosure, Indicator, Tooltip, prelude::*};
+use ui::{AgentTypingMark, Chip, Disclosure, Indicator, Tooltip, prelude::*};
 
 use crate::branch_panel::panel::BranchPanel;
 use crate::branch_panel::tree::{AgentActivity, AgentEntry, RowKey};
@@ -165,6 +165,7 @@ impl BranchPanel {
         let label = entry.label(cx);
         let tooltip = label.clone();
         let age = entry.updated_at().map(compact_age);
+        let badges = session_badges(matches!(entry, AgentEntry::Open { .. }), activity);
         let agent = entry.agent().clone();
         // Built before the entry is moved into the handlers below, and drawn
         // under the row rather than inside it: the session's own line is one
@@ -240,6 +241,11 @@ impl BranchPanel {
                     },
                 ),
             ))
+            .children(
+                badges
+                    .into_iter()
+                    .map(|badge| render_session_badge(badge, cx).into_any_element()),
+            )
             .when_some(age, |this, age| {
                 this.child(
                     Label::new(age)
@@ -433,6 +439,52 @@ impl BranchPanel {
 ///
 /// `time_format::TimestampFormat::Relative` says "3 hours ago", which is right
 /// in a list with room for it and wrong at the end of a row that already
+/// What a session's row is tagged with, the way the agent history tags one.
+///
+/// Per session and not per checkout: a checkout holds many sessions, and only
+/// some of them are open or running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SessionBadge {
+    /// It has a tab open in this window.
+    Open,
+    /// Its CLI is alive -- answering, or waiting for the next prompt.
+    Running,
+}
+
+impl SessionBadge {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Open => "Open",
+            Self::Running => "Running",
+        }
+    }
+}
+
+/// The badges for a session, in the order they are drawn. Open and Running are
+/// asked separately because they differ: a tab stays open after its CLI exits.
+pub(crate) fn session_badges(open_tab: bool, activity: AgentActivity) -> Vec<SessionBadge> {
+    let running = activity != AgentActivity::Gone;
+    [
+        (open_tab, SessionBadge::Open),
+        (running, SessionBadge::Running),
+    ]
+    .into_iter()
+    .filter_map(|(shown, badge)| shown.then_some(badge))
+    .collect()
+}
+
+fn render_session_badge(badge: SessionBadge, cx: &App) -> impl IntoElement {
+    let color = match badge {
+        SessionBadge::Open => Color::Accent,
+        SessionBadge::Running => Color::Success,
+    };
+    Chip::new(badge.label())
+        .label_size(LabelSize::XSmall)
+        .label_color(color)
+        .bg_color(gpui::transparent_black())
+        .border_color(color.color(cx))
+}
+
 /// carries a session title. Deliberately coarse: nobody reads this to the
 /// minute, and the exact time is in the tooltip of the row it belongs to.
 pub(crate) fn compact_age(at: SystemTime) -> String {
@@ -454,7 +506,32 @@ pub(crate) fn compact_age(at: SystemTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::compact_age;
+    use super::{SessionBadge, compact_age, session_badges};
+    use crate::branch_panel::tree::AgentActivity;
+
+    /// A checkout holds many sessions, and only some are open or running. The
+    /// two are separate facts: a tab can stay open after its CLI has exited,
+    /// and a past session is neither.
+    #[test]
+    fn a_session_is_tagged_open_and_running_independently() {
+        assert!(
+            session_badges(false, AgentActivity::Gone).is_empty(),
+            "a past session says nothing"
+        );
+        assert_eq!(
+            session_badges(true, AgentActivity::Gone),
+            vec![SessionBadge::Open],
+            "a tab whose CLI exited is open, not running"
+        );
+        assert_eq!(
+            session_badges(true, AgentActivity::Ready),
+            vec![SessionBadge::Open, SessionBadge::Running]
+        );
+        assert_eq!(
+            session_badges(true, AgentActivity::Responding),
+            vec![SessionBadge::Open, SessionBadge::Running]
+        );
+    }
     use std::time::{Duration, SystemTime};
 
     fn ago(secs: u64) -> String {

@@ -81,6 +81,7 @@ impl RenderOnce for SettingsInputField {
                 let initial_text = self.initial_text.clone();
                 let placeholder = self.placeholder;
                 let mut confirm = self.confirm.clone();
+                let shown = first_render_initial_text.clone();
 
                 move |window, cx| {
                     let mut editor = Editor::single_line(window, cx);
@@ -98,8 +99,16 @@ impl RenderOnce for SettingsInputField {
                             &editor_focus_handle,
                             window,
                             move |editor, _, window, cx| {
-                                let text = Some(editor.text(cx));
-                                confirm(text, window, cx);
+                                let text = editor.text(cx);
+                                // Leaving a field without changing it is not
+                                // an edit: clicking it on the way to a button
+                                // beside it used to write its old text -- or
+                                // an empty one -- back over the setting.
+                                let unchanged = shown.read(cx).as_deref().unwrap_or("") == text;
+                                if unchanged {
+                                    return;
+                                }
+                                confirm(Some(text), window, cx);
                             },
                         )
                         .detach();
@@ -117,6 +126,7 @@ impl RenderOnce for SettingsInputField {
                 let initial_text = self.initial_text.clone();
                 let placeholder = self.placeholder;
                 let mut confirm = self.confirm.clone();
+                let shown = first_render_initial_text.clone();
 
                 move |window, cx| {
                     let mut editor = Editor::single_line(window, cx);
@@ -134,8 +144,16 @@ impl RenderOnce for SettingsInputField {
                             &editor_focus_handle,
                             window,
                             move |editor, _, window, cx| {
-                                let text = Some(editor.text(cx));
-                                confirm(text, window, cx);
+                                let text = editor.text(cx);
+                                // Leaving a field without changing it is not
+                                // an edit: clicking it on the way to a button
+                                // beside it used to write its old text -- or
+                                // an empty one -- back over the setting.
+                                let unchanged = shown.read(cx).as_deref().unwrap_or("") == text;
+                                if unchanged {
+                                    return;
+                                }
+                                confirm(Some(text), window, cx);
                             },
                         )
                         .detach();
@@ -154,22 +172,23 @@ impl RenderOnce for SettingsInputField {
         // re-renders but use_keyed_state returns the cached editor with stale text.
         // Reconcile with the expected initial_text when the editor is not focused,
         // so we don't clobber what the user is actively typing.
-        if let Some(initial_text) = &self.initial_text
-            && let Some(first_initial) = first_render_initial_text.read(cx)
+        // Both ways, empty included: a field that started empty, like a
+        // background image not chosen yet, has to show the path a picker
+        // writes for it.
+        if self.initial_text != *first_render_initial_text.read(cx)
+            && !editor.read(cx).is_focused(window)
         {
-            if initial_text != first_initial && !editor.read(cx).is_focused(window) {
-                *first_render_initial_text.as_mut(cx) = self.initial_text.clone();
-                let weak_editor = editor.downgrade();
-                let initial_text = initial_text.clone();
+            *first_render_initial_text.as_mut(cx) = self.initial_text.clone();
+            let weak_editor = editor.downgrade();
+            let text = self.initial_text.clone().unwrap_or_default();
 
-                window.defer(cx, move |window, cx| {
-                    weak_editor
-                        .update(cx, |editor, cx| {
-                            editor.set_text(initial_text, window, cx);
-                        })
-                        .ok();
-                });
-            }
+            window.defer(cx, move |window, cx| {
+                weak_editor
+                    .update(cx, |editor, cx| {
+                        editor.set_text(text, window, cx);
+                    })
+                    .ok();
+            });
         }
 
         let weak_editor = editor.downgrade();
@@ -279,5 +298,129 @@ impl RenderOnce for SettingsInputField {
                     }
                 })
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use gpui::{Context, Entity, Render, TestAppContext, VisualTestContext};
+    use settings::SettingsStore;
+
+    use super::*;
+
+    struct Field {
+        initial: Option<String>,
+        confirmed: Rc<RefCell<Vec<Option<String>>>>,
+        /// Something else to focus, the way a click on a neighbouring control
+        /// takes focus from the field.
+        elsewhere: gpui::FocusHandle,
+    }
+
+    impl Render for Field {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let confirmed = self.confirmed.clone();
+            v_flex()
+                .size_full()
+                .child(
+                    div()
+                        .id("elsewhere")
+                        .debug_selector(|| "elsewhere".into())
+                        .track_focus(&self.elsewhere)
+                        .size_16(),
+                )
+                .child(
+                    div().debug_selector(|| "field".into()).w_64().child(
+                        SettingsInputField::new()
+                            .tab_index(0)
+                            .when_some(self.initial.clone(), |field, text| {
+                                field.with_initial_text(text)
+                            })
+                            .on_confirm(move |text, _window, _cx| {
+                                confirmed.borrow_mut().push(text)
+                            }),
+                    ),
+                )
+        }
+    }
+
+    fn field(
+        cx: &mut TestAppContext,
+    ) -> (
+        Entity<Field>,
+        Rc<RefCell<Vec<Option<String>>>>,
+        &mut VisualTestContext,
+    ) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+            editor::init(cx);
+        });
+        let confirmed = Rc::new(RefCell::new(Vec::new()));
+        let (view, cx) = cx.add_window_view({
+            let confirmed = confirmed.clone();
+            move |_, cx| Field {
+                initial: None,
+                confirmed,
+                elsewhere: cx.focus_handle(),
+            }
+        });
+        // Focus changes are only reported in an active window.
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        (view, confirmed, cx)
+    }
+
+    fn focus_and_blur(view: &Entity<Field>, typed: &str, cx: &mut VisualTestContext) {
+        let bounds = cx.debug_bounds("field").expect("the field is drawn");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            cx.update(|window, cx| window.focused(cx).is_some()),
+            "clicking the field focuses its editor"
+        );
+        if !typed.is_empty() {
+            cx.simulate_input(typed);
+        }
+        let elsewhere = view.read_with(cx, |field, _| field.elsewhere.clone());
+        cx.update(|window, cx| elsewhere.focus(window, cx));
+        cx.run_until_parked();
+    }
+
+    /// The background image picker writes the path and the page redraws with
+    /// it. A field that started empty used to keep showing nothing, so the
+    /// next blur wrote the empty text back over the chosen path.
+    #[gpui::test]
+    async fn a_value_set_elsewhere_reaches_a_field_that_started_empty(cx: &mut TestAppContext) {
+        let (view, confirmed, cx) = field(cx);
+
+        view.update(cx, |field, cx| {
+            field.initial = Some("/a.png".into());
+            cx.notify();
+        });
+        cx.run_until_parked();
+
+        focus_and_blur(&view, "x", cx);
+        assert_eq!(
+            confirmed.borrow().last().cloned(),
+            Some(Some("/a.pngx".to_string())),
+            "the field shows the new value, so typing extends it"
+        );
+    }
+
+    /// Focusing a field and leaving it without typing must not write anything:
+    /// clicking a field on the way to a button beside it used to blank the
+    /// setting.
+    #[gpui::test]
+    async fn leaving_an_untouched_field_writes_nothing(cx: &mut TestAppContext) {
+        let (view, confirmed, cx) = field(cx);
+        focus_and_blur(&view, "", cx);
+        assert!(
+            confirmed.borrow().is_empty(),
+            "wrote {:?}",
+            confirmed.borrow()
+        );
     }
 }

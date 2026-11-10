@@ -99,7 +99,8 @@ pub struct TitleBarSettingsContent {
     ///
     /// Default: true
     pub show_project_items: Option<bool>,
-    /// Whether to show the menus in the title bar.
+    /// Whether to show the menus on their own row above the title bar.
+    /// On Windows and Linux the menus are always shown in the title bar itself.
     ///
     /// Default: false
     pub show_menus: Option<bool>,

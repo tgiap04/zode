@@ -183,6 +183,17 @@ TBD: Centered layout related settings
 
   "unnecessary_code_fade": 0.3, // How much to fade out unused code.
 
+  // See-through window. Backgrounds fade evenly to `window_opacity` (on macOS
+  // text and icons stay solid); what shows through is the background image
+  // if one is set, otherwise the desktop. `window_vibrancy` blurs what shows
+  // through (the desktop through the system's material, or the image) and,
+  // like an image, fades the backgrounds to 88% of `window_opacity`, as in
+  // Tabby. The image is read from its path and never copied: deleting the file
+  // removes it. Settings > Appearance > Window has a file picker for it.
+  "window_opacity": 1.0,
+  "window_vibrancy": false,
+  "window_background_image": "",
+
   // Hide the values of in variables from visual display in private files
   "redact_private_values": false,
 
@@ -465,6 +476,8 @@ Hiding **Keep Display Awake** this way turns both of its switches off, `keep_dis
 Project panel can be shown/hidden with {#action project_panel::ToggleFocus} ({#kb project_panel::ToggleFocus}) or with {#action pane::RevealInProjectPanel} ({#kb pane::RevealInProjectPanel}).
 
 The Project Panel always docks on the right side of the window, opposite the project rail; there is no setting to move it.
+
+If a project folder looks out of date, for example a new file or a freshly created Git repository is missing, reload it. Hover a folder's root row and click the ↻ button (it spins while reloading), or right-click the root row and choose **Reload**. The {#action project_panel::ReloadWorktree} action rescans the project folder containing the selection, or every project folder when nothing is selected. The rescan runs on the machine that owns the folder, which is the remote host for WSL and SSH projects. Guests of a shared project cannot reload.
 
 ```json [settings]
   // Project Panel Settings

@@ -137,6 +137,28 @@ impl CommitDataReader {
             .await
             .map_err(|_| anyhow!("commit data reader task dropped response"))?
     }
+
+    /// A reader that answers from the given commits instead of running git.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_commits(
+        commits: HashMap<Oid, GraphCommitData>,
+        executor: BackgroundExecutor,
+    ) -> Self {
+        let (request_tx, request_rx) = smol::channel::unbounded::<CommitDataRequest>();
+        let task = executor.spawn(async move {
+            while let Ok(request) = request_rx.recv().await {
+                let result = commits
+                    .get(&request.sha)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("commit {} not found", request.sha));
+                request.response_tx.send(result).ok();
+            }
+        });
+        Self {
+            request_tx,
+            _task: task,
+        }
+    }
 }
 
 fn parse_cat_file_commit(sha: Oid, content: &str) -> Option<GraphCommitData> {
@@ -733,13 +755,21 @@ pub enum LogSource {
 }
 
 impl LogSource {
-    fn get_arg(&self) -> Result<&str> {
+    /// The arguments that pick the commits to walk, which have to come after every option of the
+    /// command. A remote client chooses the branch, and one starting with a dash would be read as
+    /// an option such as `--output=<file>`, so it is refused rather than escaped with
+    /// `--end-of-options`, which git only understands from 2.24. A sha is its hex name and never
+    /// starts with a dash.
+    fn revision_args(&self) -> Result<Vec<String>> {
         match self {
-            LogSource::All => Ok("--all"),
-            LogSource::Branch(branch) => Ok(branch.as_str()),
-            LogSource::Sha(oid) => {
-                str::from_utf8(oid.as_bytes()).context("Failed to build str from sha")
+            LogSource::All => Ok(vec!["--all".to_string()]),
+            LogSource::Branch(branch) => {
+                if branch.starts_with('-') {
+                    bail!("refusing a branch name that reads as an option: {branch}");
+                }
+                Ok(vec![branch.to_string()])
             }
+            LogSource::Sha(oid) => Ok(vec![oid.to_string()]),
         }
     }
 }
@@ -3120,12 +3150,13 @@ impl GitRepository for RealGitRepository {
         async move {
             let git = git_binary?;
 
-            let mut command = git.build_command(&[
-                "log",
-                GRAPH_COMMIT_FORMAT,
-                log_order.as_arg(),
-                log_source.get_arg()?,
-            ]);
+            let mut args = vec![
+                "log".to_string(),
+                GRAPH_COMMIT_FORMAT.to_string(),
+                log_order.as_arg().to_string(),
+            ];
+            args.extend(log_source.revision_args()?);
+            let mut command = git.build_command(&args);
             command.stdout(Stdio::piped());
             command.stderr(Stdio::piped());
 
@@ -3196,16 +3227,19 @@ impl GitRepository for RealGitRepository {
         async move {
             let git = git_binary?;
 
-            let mut args = vec!["log", SEARCH_COMMIT_FORMAT, log_source.get_arg()?];
-
-            args.push("--fixed-strings");
+            let mut args = vec![
+                "log".to_string(),
+                SEARCH_COMMIT_FORMAT.to_string(),
+                "--fixed-strings".to_string(),
+            ];
 
             if !search_args.case_sensitive {
-                args.push("--regexp-ignore-case");
+                args.push("--regexp-ignore-case".to_string());
             }
 
-            args.push("--grep");
-            args.push(search_args.query.as_str());
+            args.push("--grep".to_string());
+            args.push(search_args.query.to_string());
+            args.extend(log_source.revision_args()?);
 
             let mut command = git.build_command(&args);
             command.stdout(Stdio::piped());
@@ -3953,6 +3987,150 @@ mod tests {
             std::env::set_var("GIT_CONFIG_GLOBAL", "");
             std::env::set_var("GIT_CONFIG_SYSTEM", "");
         }
+    }
+
+    /// Twenty bytes that spell a `git log` option, so the sha built from them is one a remote
+    /// client can send and that becomes an option if its raw bytes reach the command line.
+    const OPTION_SHAPED_SHA_BYTES: &[u8; 20] = b"--output=pwned_sha_1";
+
+    #[test]
+    fn test_log_source_sha_is_its_hex_name() {
+        let oid = Oid::from_bytes(OPTION_SHAPED_SHA_BYTES).unwrap();
+        let hex = oid.to_string();
+        assert_eq!(hex.len(), 40);
+        assert_eq!(
+            LogSource::Sha(oid).revision_args().unwrap(),
+            vec![hex],
+            "the sha must reach git as its 40-character hex name"
+        );
+        assert!(
+            LogSource::Branch("--output=x".into())
+                .revision_args()
+                .is_err(),
+            "a branch that reads as an option must be refused"
+        );
+        assert_eq!(
+            LogSource::Branch("main".into()).revision_args().unwrap(),
+            vec!["main".to_string()]
+        );
+        assert_eq!(
+            LogSource::All.revision_args().unwrap(),
+            vec!["--all".to_string()]
+        );
+    }
+
+    async fn repository_with_one_commit(
+        cx: &mut TestAppContext,
+    ) -> (tempfile::TempDir, RealGitRepository, Oid) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+
+        let repo_dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(repo_dir.path()).unwrap();
+        smol::fs::write(repo_dir.path().join("file"), "content")
+            .await
+            .unwrap();
+        let repo = RealGitRepository::new(
+            &repo_dir.path().join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+        repo.stage_paths(vec![repo_path("file")], Arc::new(HashMap::default()))
+            .await
+            .unwrap();
+        repo.commit(
+            "Initial commit".into(),
+            None,
+            CommitOptions::default(),
+            AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {}),
+            Arc::new(checkpoint_author_envs()),
+        )
+        .await
+        .unwrap();
+        let head = Oid::from_str(&repo.head_sha().await.unwrap()).unwrap();
+        (repo_dir, repo, head)
+    }
+
+    async fn graph_shas(repo: &RealGitRepository, log_source: LogSource) -> Result<Vec<Oid>> {
+        let (request_tx, request_rx) = smol::channel::unbounded();
+        let result = repo
+            .initial_graph_data(log_source, LogOrder::default(), request_tx)
+            .await;
+        let mut shas = Vec::new();
+        while let Ok(commits) = request_rx.try_recv() {
+            shas.extend(commits.iter().map(|commit| commit.sha));
+        }
+        result.map(|()| shas)
+    }
+
+    #[gpui::test]
+    async fn test_graph_of_a_sha_walks_that_commit(cx: &mut TestAppContext) {
+        let (_repo_dir, repo, head) = repository_with_one_commit(cx).await;
+        assert_eq!(
+            graph_shas(&repo, LogSource::Sha(head)).await.unwrap(),
+            vec![head]
+        );
+        assert_eq!(
+            graph_shas(&repo, LogSource::Branch("HEAD".into()))
+                .await
+                .unwrap(),
+            vec![head]
+        );
+        assert_eq!(graph_shas(&repo, LogSource::All).await.unwrap(), vec![head]);
+    }
+
+    /// The log source of a graph or search request can come from a remote client, so neither a
+    /// sha nor a branch may ever reach `git log` as an option — `--output=` alone writes a file.
+    #[gpui::test]
+    async fn test_log_source_never_reaches_git_as_an_option(cx: &mut TestAppContext) {
+        let (repo_dir, repo, _head) = repository_with_one_commit(cx).await;
+
+        let sha = Oid::from_bytes(OPTION_SHAPED_SHA_BYTES).unwrap();
+        graph_shas(&repo, LogSource::Sha(sha)).await.ok();
+        graph_shas(&repo, LogSource::Branch("--output=pwned_branch".into()))
+            .await
+            .ok();
+        let (request_tx, _request_rx) = smol::channel::unbounded();
+        repo.search_commits(
+            LogSource::Branch("--output=pwned_search".into()),
+            SearchCommitArgs {
+                query: "Initial".into(),
+                case_sensitive: false,
+            },
+            request_tx,
+        )
+        .await
+        .ok();
+
+        for written in ["pwned_sha_1", "pwned_branch", "pwned_search"] {
+            assert!(
+                !repo_dir.path().join(written).exists(),
+                "git read the log source as `--output={written}` and wrote that file"
+            );
+        }
+    }
+
+    #[gpui::test]
+    async fn test_search_commits_finds_a_match_on_a_branch(cx: &mut TestAppContext) {
+        let (_repo_dir, repo, head) = repository_with_one_commit(cx).await;
+        let (request_tx, request_rx) = smol::channel::unbounded();
+        repo.search_commits(
+            LogSource::Branch("HEAD".into()),
+            SearchCommitArgs {
+                query: "initial".into(),
+                case_sensitive: false,
+            },
+            request_tx,
+        )
+        .await
+        .unwrap();
+        let mut found = Vec::new();
+        while let Ok(sha) = request_rx.try_recv() {
+            found.push(sha);
+        }
+        assert_eq!(found, vec![head]);
     }
 
     #[gpui::test]

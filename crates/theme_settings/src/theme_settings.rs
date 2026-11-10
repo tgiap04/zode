@@ -7,6 +7,7 @@
 
 mod schema;
 mod settings;
+mod window_effects;
 
 use std::sync::Arc;
 
@@ -26,6 +27,7 @@ pub use crate::schema::{
     ThemeColorsContent, ThemeContent, ThemeFamilyContent, ThemeStyleContent,
     WindowBackgroundContent, status_colors_refinement, syntax_overrides, theme_colors_refinement,
 };
+pub use crate::settings::GLASS_OPACITY;
 use crate::settings::adjust_buffer_font_size;
 pub use crate::settings::{
     BufferLineHeight, FontFamilyName, IconThemeName, IconThemeSelection, ThemeAppearanceMode,
@@ -34,6 +36,7 @@ pub use crate::settings::{
     reset_buffer_font_size, reset_ui_font_size, set_icon_theme, set_mode, set_theme, setup_ui_font,
 };
 pub use theme::UiDensity;
+pub use window_effects::{WindowEffects, apply_window_effects};
 
 struct ThemeSettingsProviderImpl;
 
@@ -89,6 +92,9 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
         settings.experimental_theme_overrides.clone(),
         settings.theme_overrides.clone(),
     );
+    // The window's opacity, blur and image are applied to the theme too, so
+    // changing one has to rebuild it like changing the theme does.
+    let mut prev_window_effects = settings.window_effects();
 
     cx.observe_global::<SettingsStore>(move |cx| {
         let settings = ThemeSettings::get_global(cx);
@@ -101,6 +107,7 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
             settings.experimental_theme_overrides.clone(),
             settings.theme_overrides.clone(),
         );
+        let window_effects = settings.window_effects();
 
         if buffer_font_size_settings != prev_buffer_font_size_settings {
             prev_buffer_font_size_settings = buffer_font_size_settings;
@@ -112,9 +119,13 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
             reset_ui_font_size(cx);
         }
 
-        if theme_name != prev_theme_name || theme_overrides != prev_theme_overrides {
+        if theme_name != prev_theme_name
+            || theme_overrides != prev_theme_overrides
+            || window_effects != prev_window_effects
+        {
             prev_theme_name = theme_name;
             prev_theme_overrides = theme_overrides;
+            prev_window_effects = window_effects;
             reload_theme(cx);
         }
 
@@ -446,6 +457,117 @@ mod tests {
         let settings_store = SettingsStore::test(cx);
         cx.set_global(settings_store);
         init(LoadThemes::JustBase, cx);
+    }
+
+    /// The reported defect: changing the window's opacity or vibrancy in settings
+    /// did nothing until the theme itself was changed, because the theme was
+    /// only rebuilt when its name or overrides moved.
+    #[gpui::test]
+    fn changing_the_window_settings_rebuilds_the_active_theme(cx: &mut gpui::TestAppContext) {
+        use theme::ActiveTheme as _;
+
+        cx.update(|cx| init_settings(cx));
+        let solid = cx.update(|cx| cx.theme().colors().editor_background.a);
+
+        cx.update(|cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.theme.window_opacity = Some(::settings::WindowOpacity(0.4));
+                    settings.theme.window_vibrancy = Some(true);
+                });
+            });
+        });
+
+        cx.update(|cx| {
+            let theme = cx.theme();
+            assert_eq!(
+                theme.window_background_appearance(),
+                gpui::WindowBackgroundAppearance::Vibrancy,
+                "the window lets the blurred desktop through as soon as the setting changes"
+            );
+            assert_eq!(
+                theme.colors().editor_background.a,
+                solid,
+                "surfaces keep their colour: the window fades as a whole"
+            );
+            assert_eq!(
+                ThemeSettings::get_global(cx).background_opacity(),
+                0.4 * crate::GLASS_OPACITY,
+                "vibrancy fades the backgrounds the opacity left"
+            );
+        });
+    }
+
+    /// The reported case: opacity left at 1 with a blur (or an image) on showed
+    /// nothing at all. Turning vibrancy or an image on makes the glass show at
+    /// Tabby's opacity.
+    #[gpui::test]
+    fn vibrancy_or_an_image_shows_glass_even_at_full_opacity(cx: &mut gpui::TestAppContext) {
+        use theme::ActiveTheme as _;
+
+        cx.update(|cx| init_settings(cx));
+        let set = |vibrancy: bool, image: &str, cx: &mut gpui::TestAppContext| {
+            let image = ::settings::WindowBackgroundImagePath(image.to_string());
+            cx.update(|cx| {
+                SettingsStore::update_global(cx, |store, cx| {
+                    store.update_user_settings(cx, |settings| {
+                        settings.theme.window_opacity = Some(::settings::WindowOpacity(1.0));
+                        settings.theme.window_vibrancy = Some(vibrancy);
+                        settings.theme.window_background_image = Some(image.clone());
+                    });
+                });
+            });
+        };
+
+        set(true, "", cx);
+        cx.update(|cx| {
+            assert_eq!(
+                ThemeSettings::get_global(cx).background_opacity(),
+                crate::GLASS_OPACITY
+            );
+            assert_eq!(
+                cx.theme().window_background_appearance(),
+                gpui::WindowBackgroundAppearance::Vibrancy
+            );
+        });
+
+        set(false, "/pictures/wall.png", cx);
+        cx.update(|cx| {
+            assert_eq!(
+                ThemeSettings::get_global(cx).background_opacity(),
+                crate::GLASS_OPACITY
+            );
+        });
+
+        set(false, "", cx);
+        cx.update(|cx| {
+            assert_eq!(
+                ThemeSettings::get_global(cx).background_opacity(),
+                1.0,
+                "with neither, the window stays solid"
+            );
+        });
+    }
+
+    /// The settings UI draws an item only when the default settings give it a
+    /// value; a `null` default left the image picker as a "NO DEFAULT" chip.
+    #[gpui::test]
+    fn the_window_settings_have_defaults(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            init_settings(cx);
+            let defaults = cx.global::<SettingsStore>().raw_default_settings();
+            assert!(defaults.theme.window_opacity.is_some());
+            assert!(defaults.theme.window_vibrancy.is_some());
+            assert!(
+                defaults.theme.window_background_image.is_some(),
+                "an empty path, not null, so the picker has a value to show"
+            );
+            assert_eq!(
+                ThemeSettings::get_global(cx).window_background_image,
+                None,
+                "an empty path means no image"
+            );
+        });
     }
 
     /// Every bundled family ships its own blue accent, so this walks the real files

@@ -11,8 +11,8 @@ use git::{
     repository::{
         AskPassDelegate, Branch, CommitDataReader, CommitDetails, CommitOptions,
         CreateWorktreeTarget, FetchOptions, GRAPH_CHUNK_SIZE, GitRepository,
-        GitRepositoryCheckpoint, InitialGraphCommitData, LogOrder, LogSource, PushOptions, RefEdit,
-        Remote, RepoPath, ResetMode, SearchCommitArgs, Worktree,
+        GitRepositoryCheckpoint, GraphCommitData, InitialGraphCommitData, LogOrder, LogSource,
+        PushOptions, RefEdit, Remote, RepoPath, ResetMode, SearchCommitArgs, Worktree,
     },
     stash::GitStash,
     status::{
@@ -64,11 +64,17 @@ pub struct FakeGitRepositoryState {
     pub remotes: HashMap<String, String>,
     pub simulated_index_write_error_message: Option<String>,
     pub simulated_create_worktree_error: Option<String>,
+    /// Fails the graph's log after it has streamed `graph_commits`, as a log that dies partway does.
     pub simulated_graph_error: Option<String>,
+    /// Fails opening a commit data reader, as a repository git cannot read does.
+    pub simulated_commit_data_error: Option<String>,
+    /// How many graph logs have been started.
+    pub graph_fetch_count: usize,
     /// Makes a scoped diff never finish, as a repository on a stalled disk would.
     pub simulated_scoped_diff_hangs: bool,
     pub refs: HashMap<String, String>,
     pub graph_commits: Vec<Arc<InitialGraphCommitData>>,
+    pub graph_commit_details: HashMap<Oid, GraphCommitData>,
     pub stash_entries: GitStash,
 }
 
@@ -85,12 +91,15 @@ impl FakeGitRepositoryState {
             simulated_index_write_error_message: Default::default(),
             simulated_create_worktree_error: Default::default(),
             simulated_graph_error: None,
+            simulated_commit_data_error: None,
+            graph_fetch_count: 0,
             simulated_scoped_diff_hangs: false,
             refs: HashMap::from_iter([("HEAD".into(), "abc".into())]),
             merge_base_contents: Default::default(),
             oids: Default::default(),
             remotes: HashMap::default(),
             graph_commits: Vec::new(),
+            graph_commit_details: HashMap::default(),
             commit_history: Vec::new(),
             stash_entries: Default::default(),
         }
@@ -1489,18 +1498,18 @@ impl GitRepository for FakeGitRepository {
         async move {
             let (graph_commits, simulated_error) =
                 fs.with_git_state(&dot_git_path, false, |state| {
+                    state.graph_fetch_count += 1;
                     (
                         state.graph_commits.clone(),
                         state.simulated_graph_error.clone(),
                     )
                 })?;
 
-            if let Some(error) = simulated_error {
-                anyhow::bail!("{}", error);
-            }
-
             for chunk in graph_commits.chunks(GRAPH_CHUNK_SIZE) {
                 request_tx.send(chunk.to_vec()).await.ok();
+            }
+            if let Some(error) = simulated_error {
+                anyhow::bail!("{}", error);
             }
             Ok(())
         }
@@ -1517,7 +1526,20 @@ impl GitRepository for FakeGitRepository {
     }
 
     fn commit_data_reader(&self) -> Result<CommitDataReader> {
-        anyhow::bail!("commit_data_reader not supported for FakeGitRepository")
+        let (details, simulated_error) =
+            self.fs.with_git_state(&self.dot_git_path, false, |state| {
+                (
+                    state.graph_commit_details.clone(),
+                    state.simulated_commit_data_error.clone(),
+                )
+            })?;
+        if let Some(error) = simulated_error {
+            anyhow::bail!("{}", error);
+        }
+        Ok(CommitDataReader::from_commits(
+            details,
+            self.executor.clone(),
+        ))
     }
 
     fn update_ref(&self, ref_name: String, commit: String) -> BoxFuture<'_, Result<()>> {
