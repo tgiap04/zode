@@ -34,6 +34,12 @@ fi
 
 export CC=${CC:-$(command -v clang)}
 export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static"
+# SQLite turns on large-file support by defining _FILE_OFFSET_BITS=64, and the
+# glibc headers clang compiles it against then rename open, pread, stat and
+# the rest to open64, pread64, stat64 -- names musl 1.2.4 and later no longer
+# have, so the link fails as soon as anything in the server queries SQLite.
+# Off_t is 64 bits on every target here, so turning it off loses nothing.
+export LIBSQLITE3_FLAGS="${LIBSQLITE3_FLAGS:-} -DSQLITE_DISABLE_LFS"
 
 # A build of its own, never alongside the app's packages: feature unification
 # with them would decide which libraries the server links.
