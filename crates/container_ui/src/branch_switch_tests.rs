@@ -147,11 +147,19 @@ impl Harness {
             .update(cx, |panel, _| panel.confirmation_prep.take());
         prep.expect("choosing starts reading the checkout").await;
         cx.run_until_parked();
-        self.workspace
-            .read_with(cx, |workspace, cx| {
-                workspace.active_modal::<ConfirmBranchSwitch>(cx)
-            })
-            .expect("the confirmation is open")
+        let confirmation = self.workspace.read_with(cx, |workspace, cx| {
+            workspace.active_modal::<ConfirmBranchSwitch>(cx)
+        });
+        // A read that fails opens the error dialog instead; its words are the
+        // only clue to a failure seen once on a loaded CI runner and never here.
+        confirmation.unwrap_or_else(|| {
+            let shown = self.error_modal(cx).map(|error| {
+                error.read_with(cx, |error, _| {
+                    format!("{}: {}", error.title(), error.message())
+                })
+            });
+            panic!("the confirmation is not open; the error dialog says {shown:?}")
+        })
     }
 
     async fn confirm(&self, modal: &Entity<ConfirmBranchSwitch>, cx: &mut VisualTestContext) {
