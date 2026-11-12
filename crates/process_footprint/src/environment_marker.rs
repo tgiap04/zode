@@ -55,6 +55,7 @@ mod tests {
 
     /// A `sleep` copied out of the system directories: macOS will not show
     /// the environment of a binary it ships, which is not what is under test.
+    #[cfg(unix)]
     #[allow(
         clippy::disallowed_methods,
         reason = "a synchronous test with no executor for the spawn to block"
