@@ -753,6 +753,25 @@ pub fn prompt_for_open_path_and_open(
         let Some(paths) = paths.await.log_err().flatten() else {
             return;
         };
+        // A folder picked under `\\wsl.localhost\<distro>` would otherwise open as a
+        // local folder, leaving terminals, language servers and git on Windows.
+        #[cfg(target_os = "windows")]
+        if let Some((distro_name, linux_paths)) = util::paths::WslPath::from_paths(&paths) {
+            this.update_in(cx, |_, window, cx| {
+                window.dispatch_action(
+                    Box::new(remote::OpenWslPath {
+                        distro: remote::WslConnectionOptions {
+                            distro_name,
+                            user: None,
+                        },
+                        paths: linux_paths.into_iter().map(PathBuf::from).collect(),
+                    }),
+                    cx,
+                );
+            })
+            .log_err();
+            return;
+        }
         if !create_new_window {
             if let Some(handle) = multi_workspace_handle {
                 if let Some(task) = handle
