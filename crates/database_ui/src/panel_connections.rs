@@ -40,7 +40,38 @@ impl Outcome {
     }
 }
 
+/// Whether a refusal for want of a password asks for one. Not for a
+/// connection opened on its own: the project's databases open together, and a
+/// prompt for each at once is a wall nobody asked for. Clicking one asks.
+pub(crate) fn after_refusal(unattended: bool) -> bool {
+    !unattended
+}
+
 impl DatabasePanel {
+    /// Opens a connection nobody clicked: a project's own, as it opens.
+    pub(crate) fn connect_unattended(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(node) = self.connections.get_mut(index) else {
+            return;
+        };
+        if !matches!(node.state, NodeState::Idle) {
+            return;
+        }
+        node.unattended = true;
+        self.toggle_connection(index, window, cx);
+        // An open that never started -- a driver not installed -- must not
+        // leave the flag for the click that follows.
+        if let Some(node) = self.connections.get_mut(index)
+            && !matches!(node.state, NodeState::Connecting)
+        {
+            node.unattended = false;
+        }
+    }
+
     /// The drivers of the machine this panel's project lives on, `None` once
     /// its workspace is gone. Never this machine's in place of a remote host's.
     pub(crate) fn drivers(&mut self, cx: &mut App) -> Option<DriverHost> {
@@ -150,17 +181,28 @@ impl DatabasePanel {
                     let Some(node) = this.connections.get_mut(index) else {
                         return;
                     };
+                    let unattended = std::mem::take(&mut node.unattended);
                     match opened {
                         Ok((session, remember)) => {
                             node.collapse_schema_level = false;
                             node.state = NodeState::Connected(Arc::new(session));
-                            node.expanded = true;
+                            // A dozen databases opened at once, each spread
+                            // open, would bury the tree.
+                            node.expanded = !unattended;
                             Outcome::Connected(remember)
                         }
-                        Err(error) => {
-                            node.state = NodeState::Failed(format!("{error:#}").into());
-                            Outcome::for_error(&error)
-                        }
+                        Err(error) => match Outcome::for_error(&error) {
+                            Outcome::NeedsPassword if !after_refusal(unattended) => {
+                                node.state = NodeState::Failed(
+                                    "Needs a password: click to enter it.".into(),
+                                );
+                                Outcome::Failed
+                            }
+                            outcome => {
+                                node.state = NodeState::Failed(format!("{error:#}").into());
+                                outcome
+                            }
+                        },
                     }
                 };
                 // Outside the borrow above: both of these need the panel, and

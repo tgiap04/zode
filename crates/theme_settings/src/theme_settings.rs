@@ -500,7 +500,7 @@ mod tests {
 
     /// The reported case: opacity left at 1 with a blur (or an image) on showed
     /// nothing at all. Turning vibrancy or an image on makes the glass show at
-    /// Tabby's opacity.
+    /// [`crate::GLASS_OPACITY`].
     #[gpui::test]
     fn vibrancy_or_an_image_shows_glass_even_at_full_opacity(cx: &mut gpui::TestAppContext) {
         use theme::ActiveTheme as _;

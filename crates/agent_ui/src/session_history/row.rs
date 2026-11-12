@@ -368,6 +368,8 @@ fn render_menu(
     // the pointer off the row. Without the exception the trigger would vanish
     // out from under the menu it just opened.
     let menu_open = menu_handle.is_deployed();
+    let can_skip_prompts =
+        crate::agent_view::agent_can_skip_prompts(session.agent.builtin_agent_id());
     PopoverMenu::new(("agent-history-menu", ix))
         .with_handle(menu_handle)
         .menu(move |window, cx| {
@@ -415,6 +417,17 @@ fn render_menu(
                             panel.resume(session, Fork::Continue, window, cx)
                         },
                     );
+                    if can_skip_prompts {
+                        menu = add(
+                            menu,
+                            "Resume Without Permission Prompts",
+                            IconName::PlayFilled,
+                            controls.resume,
+                            |panel, session, window, cx| {
+                                panel.resume_without_prompts(session, window, cx)
+                            },
+                        );
+                    }
                     menu = add(
                         menu,
                         "Continue in New Session…",

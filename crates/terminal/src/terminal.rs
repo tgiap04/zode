@@ -368,6 +368,15 @@ const DEFAULT_SCROLL_HISTORY_LINES: usize = 10_000;
 /// Public because a caller's "quiet" threshold has to sit below it: a count
 /// saturates here, so a threshold above it could never read as busy.
 pub const PTY_OUTPUT_HISTORY: usize = 16;
+
+/// How long after a scroll is sent to the pty its output is taken as the
+/// program's answer to that scroll rather than as work of its own.
+///
+/// A TUI in mouse mode or on the alternate screen repaints for every wheel
+/// tick it is sent, so a few seconds of scrolling writes as often as an agent
+/// streaming a reply and lit the tab's busy mark. The repaint follows the
+/// scroll within milliseconds; the margin covers a slow remote round trip.
+const SCROLL_REPAINT_WINDOW: Duration = Duration::from_millis(300);
 pub const MAX_SCROLL_HISTORY_LINES: usize = 100_000;
 
 pub struct TerminalBuilder {
@@ -490,6 +499,7 @@ impl TerminalBuilder {
             is_remote_terminal: options.is_remote_terminal,
             last_mouse_move_time: Instant::now(),
             recent_pty_output: VecDeque::new(),
+            last_scroll_sent_to_pty: None,
             last_hyperlink_search_position: None,
             mouse_down_hyperlink: None,
             #[cfg(windows)]
@@ -733,6 +743,7 @@ impl TerminalBuilder {
                 is_remote_terminal,
                 last_mouse_move_time: Instant::now(),
                 recent_pty_output: VecDeque::new(),
+                last_scroll_sent_to_pty: None,
                 last_hyperlink_search_position: None,
                 mouse_down_hyperlink: None,
                 #[cfg(windows)]
@@ -1042,6 +1053,8 @@ pub struct Terminal {
     /// test can move the executor's clock without moving the wall clock, so
     /// the write-rate window can actually be proven to expire.
     recent_pty_output: VecDeque<Instant>,
+    /// When a scroll was last forwarded to the pty. See [`SCROLL_REPAINT_WINDOW`].
+    last_scroll_sent_to_pty: Option<Instant>,
     last_hyperlink_search_position: Option<Point<Pixels>>,
     mouse_down_hyperlink: Option<(String, bool, Match)>,
     #[cfg(windows)]
@@ -2452,6 +2465,7 @@ impl Terminal {
 
                 if let Some(scrolls) = scroll_report(point, scroll_lines, e, self.last_content.mode)
                 {
+                    self.note_scroll_sent_to_pty();
                     for scroll in scrolls {
                         self.write_to_pty(scroll);
                     }
@@ -2462,6 +2476,7 @@ impl Terminal {
                 .contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
                 && !e.shift
             {
+                self.note_scroll_sent_to_pty();
                 self.write_to_pty(alt_scroll(scroll_lines));
             } else {
                 let scroll = AlacScroll::Delta(scroll_lines);
@@ -2634,12 +2649,22 @@ impl Terminal {
         }
     }
 
+    fn note_scroll_sent_to_pty(&mut self) {
+        self.last_scroll_sent_to_pty = Some(self.background_executor.now());
+    }
+
     fn record_pty_output(&mut self) {
+        let now = self.background_executor.now();
+        if self
+            .last_scroll_sent_to_pty
+            .is_some_and(|sent| now.saturating_duration_since(sent) < SCROLL_REPAINT_WINDOW)
+        {
+            return;
+        }
         if self.recent_pty_output.len() == PTY_OUTPUT_HISTORY {
             self.recent_pty_output.pop_front();
         }
-        self.recent_pty_output
-            .push_back(self.background_executor.now());
+        self.recent_pty_output.push_back(now);
     }
 
     /// How many separate writes the pty has made within `window`.
@@ -4688,6 +4713,33 @@ mod tests {
                     terminal.pty_writes_within(Duration::from_secs(1)),
                     0,
                     "advancing the executor's clock must expire the window"
+                );
+            });
+        }
+        /// Scrolling a TUI makes it repaint once per wheel tick, as fast as
+        /// an agent streams a reply. Those repaints answer the scroll and must
+        /// not read as the program working.
+        #[gpui::test]
+        async fn repaints_answering_a_scroll_do_not_count(cx: &mut TestAppContext) {
+            let terminal = terminal(cx);
+            terminal.update(cx, |terminal, _| {
+                terminal.note_scroll_sent_to_pty();
+                for _ in 0..10 {
+                    terminal.record_pty_output();
+                }
+                assert_eq!(
+                    terminal.pty_writes_within(Duration::from_secs(1)),
+                    0,
+                    "output right after a scroll is the scroll's repaint"
+                );
+            });
+            cx.executor().advance_clock(SCROLL_REPAINT_WINDOW);
+            terminal.update(cx, |terminal, _| {
+                terminal.record_pty_output();
+                assert_eq!(
+                    terminal.pty_writes_within(Duration::from_secs(1)),
+                    1,
+                    "once scrolling stops, the program's own output counts again"
                 );
             });
         }

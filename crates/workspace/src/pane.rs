@@ -22,7 +22,7 @@ use gpui::{
     ClipboardItem, Context, Div, DragMoveEvent, Entity, EntityId, EventEmitter, ExternalPaths,
     FocusHandle, FocusOutEvent, Focusable, KeyContext, MouseButton, NavigationDirection, Pixels,
     Point, PromptLevel, Render, ScrollHandle, Subscription, Task, WeakEntity, WeakFocusHandle,
-    Window, actions, anchored, bounce, deferred, ease_in_out, prelude::*,
+    Window, actions, anchored, deferred, ease_in_out, prelude::*,
 };
 use itertools::Itertools;
 use language::{Capability, DiagnosticSeverity};
@@ -4989,7 +4989,7 @@ pub fn tab_details(items: &[Box<dyn ItemHandle>], _window: &Window, cx: &App) ->
     })
 }
 
-/// How long the busy bar takes to cross its tab and come back.
+/// How long the busy bar's segment takes to cross its tab, left to right.
 ///
 /// Slow enough to read as one deliberate sweep rather than a flicker, quick
 /// enough that a glance at the tab strip lands on something moving.
@@ -5020,6 +5020,9 @@ fn render_tab_busy_bar(item_id: EntityId, cx: &App) -> impl IntoElement + use<> 
         .right_0()
         .h(px(2.))
         .rounded_full()
+        // The segment starts and ends each sweep past the track's edges, so it
+        // slides in and out instead of popping into view.
+        .overflow_hidden()
         // A track, faint enough not to read as a second border: without one the
         // segment at either end of its sweep looks like a stray mark rather
         // than something travelling a known distance.
@@ -5036,11 +5039,13 @@ fn render_tab_busy_bar(item_id: EntityId, cx: &App) -> impl IntoElement + use<> 
                     ("tab-busy-bar", item_id),
                     Animation::new(BUSY_BAR_SWEEP)
                         .repeat()
-                        // `bounce` runs the easing forwards then backwards, so
-                        // one period is a there-and-back. A plain repeat would
-                        // snap the segment from the right edge to the left.
-                        .with_easing(bounce(ease_in_out)),
-                    |segment, delta| segment.left(relative(delta * (1. - BUSY_BAR_SEGMENT))),
+                        .with_easing(ease_in_out),
+                    // From just off the left edge to just off the right one: the
+                    // segment is hidden at both ends, so restarting the sweep from
+                    // the left does not show as a jump.
+                    |segment, delta| {
+                        segment.left(relative(delta * (1. + BUSY_BAR_SEGMENT) - BUSY_BAR_SEGMENT))
+                    },
                 ),
         )
 }

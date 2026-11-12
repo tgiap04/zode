@@ -1410,6 +1410,27 @@ impl WslPath {
             None
         }
     }
+
+    /// Returns the distro and the Linux paths when every path lives in the same
+    /// WSL distro. One WSL connection serves one distro, so paths from several
+    /// distros, or WSL paths mixed with Windows paths, yield `None`.
+    pub fn from_paths<P: AsRef<Path>>(
+        paths: impl IntoIterator<Item = P>,
+    ) -> Option<(String, Vec<std::ffi::OsString>)> {
+        let mut distro: Option<String> = None;
+        let mut linux_paths = Vec::new();
+        for path in paths {
+            let wsl_path = Self::from_path(path)?;
+            match &distro {
+                // Windows share names are case-insensitive.
+                Some(distro) if !distro.eq_ignore_ascii_case(&wsl_path.distro) => return None,
+                Some(_) => {}
+                None => distro = Some(wsl_path.distro),
+            }
+            linux_paths.push(wsl_path.path);
+        }
+        Some((distro?, linux_paths))
+    }
 }
 
 pub trait UrlExt {
@@ -3246,6 +3267,45 @@ mod tests {
 
         let path = r"\\windows.localhost\Distro\foo";
         assert_eq!(WslPath::from_path(&path), None);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn test_wsl_paths_share_one_distro() {
+        use super::WslPath;
+
+        assert_eq!(WslPath::from_paths(Vec::<&str>::new()), None);
+
+        assert_eq!(
+            WslPath::from_paths([
+                r"\\wsl.localhost\Ubuntu\home\user\project",
+                r"\\?\UNC\wsl$\ubuntu\home\user\notes.md",
+            ]),
+            Some((
+                "Ubuntu".to_owned(),
+                vec!["/home/user/project".into(), "/home/user/notes.md".into()]
+            ))
+        );
+
+        assert_eq!(
+            WslPath::from_paths([r"\\wsl.localhost\Ubuntu\a", r"\\wsl.localhost\Debian\b"]),
+            None
+        );
+
+        assert_eq!(
+            WslPath::from_paths([r"\\wsl.localhost\Ubuntu\a", r"C:\Users\user\b"]),
+            None
+        );
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_wsl_paths_are_never_detected_off_windows() {
+        use super::WslPath;
+        assert_eq!(
+            WslPath::from_paths([r"\\wsl.localhost\Ubuntu\home\user"]),
+            None
+        );
     }
 
     #[test]

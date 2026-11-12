@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use util::ResultExt as _;
 use workspace::notifications::NotificationId;
+use zed_actions::agent::PermissionPrompts;
 
 /// Whether the directory a session ran in is still there.
 ///
@@ -128,6 +129,26 @@ pub fn resume_session(
     window: &mut Window,
     cx: &mut App,
 ) {
+    resume_session_with_prompts(
+        workspace,
+        session,
+        fork,
+        PermissionPrompts::AsConfigured,
+        window,
+        cx,
+    );
+}
+
+/// [`resume_session`], with the permission prompts the resumed agent runs
+/// with. `SkipOnce` is for this tab only, exactly as for a new session.
+pub fn resume_session_with_prompts(
+    workspace: &Entity<workspace::Workspace>,
+    session: &SessionSummary,
+    fork: Fork,
+    prompts: PermissionPrompts,
+    window: &mut Window,
+    cx: &mut App,
+) {
     // A collaboration guest's sessions are on a collaborator's machine, which
     // nothing here can ask; a tab opened anyway would start fresh while
     // looking resumed.
@@ -174,7 +195,9 @@ pub fn resume_session(
             }
             workspace
                 .update_in(cx, |workspace, window, cx| {
-                    AgentView::open_tracked(workspace, agent, origin, window, cx);
+                    AgentView::open_tracked_with_prompts(
+                        workspace, agent, origin, prompts, window, cx,
+                    );
                 })
                 .log_err();
         })
@@ -220,10 +243,8 @@ fn show_message(
 /// What a confirmation adds when sessions it is about to take are running in
 /// open tabs.
 ///
-/// A delete does not stop the agent writing. It may keep appending to a
-/// transcript after it has been moved, or write it again, and the tab reading it
-/// then goes quiet or the row comes back. Nothing here refuses: the person may
-/// well mean it, and closing the tab is theirs to decide.
+/// Said because the delete closes those tabs: a tab left open would go on
+/// writing to a transcript that has been moved, and the row would come back.
 pub(crate) fn running_in_tabs_note(running: usize, total: usize) -> Option<String> {
     let which = match (running, total) {
         (0, _) => return None,
@@ -232,9 +253,7 @@ pub(crate) fn running_in_tabs_note(running: usize, total: usize) -> Option<Strin
         (running, _) => format!("{running} of these sessions are running in open tabs."),
     };
     Some(format!(
-        "{which} The agent may keep writing to a transcript after it is moved, so a tab \
-         can stop reporting finished turns and the session can come back in this list. \
-         Close the tab first to avoid both."
+        "{which} It will be closed before the session is deleted."
     ))
 }
 
@@ -256,6 +275,23 @@ pub(crate) fn running_in_tabs<'a>(
             ))
         })
         .count()
+}
+
+/// Closes the tabs that have any of `sessions` open, once a delete is confirmed.
+pub(crate) fn close_session_tabs<'a>(
+    sessions: impl IntoIterator<Item = (AgentKind, &'a Arc<str>)>,
+    cx: &mut App,
+) {
+    let sessions = sessions
+        .into_iter()
+        .map(|(agent, id)| {
+            (
+                project::AgentId::new(agent.builtin_agent_id()),
+                gpui::SharedString::from(id.to_string()),
+            )
+        })
+        .collect();
+    crate::agent_tabs::close_tabs(&sessions, cx);
 }
 
 /// `detail` with the note about open tabs added when there is one.
@@ -361,10 +397,12 @@ fn delete_via_trash(
 
     let store = crate::SessionStore::global(cx);
     let id = session.id.clone();
+    let agent = session.agent;
     cx.spawn(async move |cx| {
         if prompt.await.ok() != Some(0) {
             return;
         }
+        cx.update(|cx| close_session_tabs([(agent, &id)], cx));
         let mut every_path_gone = true;
         for path in paths {
             if !path.exists() {
@@ -443,6 +481,8 @@ fn delete_via_command(
             if prompt.await.ok() != Some(0) {
                 return;
             }
+            cx.update(|_, cx| close_session_tabs([(agent, &id)], cx))
+                .log_err();
             let executor = cx.background_executor().clone();
             let outcome =
                 run_command_delete(&provider, &agent_store, &executor, agent, &id, &command, cx)
@@ -575,6 +615,8 @@ pub(crate) fn delete_on_remote_host(
             if prompt.await.ok() != Some(0) {
                 return;
             }
+            cx.update(|_, cx| close_session_tabs([(agent, &id)], cx))
+                .log_err();
             let outcome = match cx.update(|_, cx| delete(agent, id.clone(), cx)) {
                 Ok(deleting) => deleting.await,
                 Err(error) => Err(error),
@@ -1269,6 +1311,27 @@ impl AgentHistoryPanel {
         resume_session(&workspace, session, fork, window, cx);
     }
 
+    /// Continue a session with its agent running without permission prompts,
+    /// for this tab only.
+    pub(crate) fn resume_without_prompts(
+        &mut self,
+        session: &SessionSummary,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace().upgrade() else {
+            return;
+        };
+        resume_session_with_prompts(
+            &workspace,
+            session,
+            Fork::Continue,
+            PermissionPrompts::SkipOnce,
+            window,
+            cx,
+        );
+    }
+
     pub(crate) fn copy_resume_command(&self, session: &SessionSummary, cx: &mut App) {
         let Some(provider) = self.provider_for(session) else {
             return;
@@ -1467,6 +1530,9 @@ impl AgentHistoryPanel {
             if prompt.await.ok() != Some(0) {
                 return;
             }
+            cx.update(|cx| {
+                close_session_tabs(targets.iter().map(|target| (target.agent, &target.id)), cx)
+            });
             let deletion = this.update(cx, |this, cx| {
                 this.deleting = true;
                 cx.notify();

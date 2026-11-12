@@ -1598,6 +1598,8 @@ fn push_team_node(
             fetched,
             shared_password: password.map(|password| zeroize::Zeroizing::new(password.into())),
         }),
+        from_project: false,
+        unattended: false,
     });
 }
 
@@ -2054,5 +2056,100 @@ async fn clicking_a_row_opens_its_detail_and_clicking_again_closes_it(cx: &mut T
     assert!(
         cx.debug_bounds("database-row-detail").is_none(),
         "clicking the shown row again closes the detail"
+    );
+}
+
+/// Opening a folder whose `.idea/` names data sources lists them in the
+/// panel's "Project" group, with the user the IDE signs in as.
+#[gpui::test]
+async fn a_projects_own_data_sources_are_listed_when_it_opens(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(
+        "/proxy",
+        serde_json::json!({
+            ".idea": {
+                "dataSources.xml": r#"<project version="4">
+  <component name="DataSourceManagerImpl">
+    <data-source source="LOCAL" name="auth" uuid="a1">
+      <jdbc-url>jdbc:postgresql://127.0.0.1:15441/auth</jdbc-url>
+    </data-source>
+    <data-source source="LOCAL" name="company" uuid="c1">
+      <jdbc-url>jdbc:postgresql://127.0.0.1:15442/company</jdbc-url>
+    </data-source>
+  </component>
+</project>"#,
+                "dataSources.local.xml": r#"<project version="4">
+  <component name="dataSourceStorageLocal">
+    <data-source name="auth" uuid="a1"><user-name>auth</user-name></data-source>
+  </component>
+</project>"#,
+            },
+        }),
+    )
+    .await;
+    let project = Project::test(fs, ["/proxy".as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let panel = workspace.update_in(cx, |workspace, window, cx| {
+        let handle = cx.weak_entity();
+        let languages = workspace.project().read(cx).languages().clone();
+        let panel = cx.new(|cx| DatabasePanel::standalone(handle, languages, window, cx));
+        workspace.add_item_to_active_pane(Box::new(panel.clone()), None, true, window, cx);
+        panel
+    });
+    cx.run_until_parked();
+
+    panel.read_with(cx, |panel, _| {
+        let listed: Vec<(String, String, bool)> = panel
+            .connections
+            .iter()
+            .map(|node| {
+                (
+                    node.config.name.clone(),
+                    node.config.url.clone(),
+                    node.from_project,
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                (
+                    "auth".to_string(),
+                    "postgresql://auth@127.0.0.1:15441/auth".to_string(),
+                    true
+                ),
+                (
+                    "company".to_string(),
+                    "postgresql://127.0.0.1:15442/company".to_string(),
+                    true
+                ),
+            ]
+        );
+        assert!(
+            panel
+                .rows()
+                .iter()
+                .any(|row| matches!(row, crate::connection_tree::Row::ProjectHeader)),
+            "the project's connections sit under their own header"
+        );
+    });
+}
+
+/// A project connection that opens on its own and is refused for want of a
+/// password waits for a click rather than raising a prompt for every database
+/// at once.
+#[test]
+fn an_unattended_connection_refused_for_a_password_does_not_prompt() {
+    use crate::panel_connections::after_refusal;
+    assert!(
+        after_refusal(false),
+        "a click that is refused asks for the password"
+    );
+    assert!(
+        !after_refusal(true),
+        "a connection opened on its own waits for a click"
     );
 }

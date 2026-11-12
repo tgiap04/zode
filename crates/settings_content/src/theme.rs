@@ -165,8 +165,8 @@ pub struct ThemeSettingsContent {
     /// behind -- the desktop, or the background image -- to the same degree.
     /// On macOS text and icons stay solid (vibrancy); elsewhere, for now, the
     /// whole window fades, text included. With vibrancy or a background image
-    /// the backgrounds are faded further, to 88% of this, as opaque as
-    /// Tabby's vibrancy looks, so the glass always shows.
+    /// the backgrounds are faded further, to 90% of this, so the glass always
+    /// shows.
     ///
     /// Default: 1.0
     #[schemars(range(min = 0.0, max = 1.0))]

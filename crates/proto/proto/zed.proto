@@ -515,7 +515,10 @@ message Envelope {
     GitGetGraphPage git_get_graph_page = 469;
     GitGetGraphPageResponse git_get_graph_page_response = 470;
     GitGetCommitData git_get_commit_data = 471;
-    GitGetCommitDataResponse git_get_commit_data_response = 472; // current max
+    GitGetCommitDataResponse git_get_commit_data_response = 472;
+
+    GetProjectFootprint get_project_footprint = 473;
+    GetProjectFootprintResponse get_project_footprint_response = 474; // current max
   }
 
   reserved 87 to 88;

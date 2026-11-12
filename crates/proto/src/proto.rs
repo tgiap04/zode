@@ -400,6 +400,8 @@ messages!(
     (KillKernel, Background),
     (GetRemoteProfilingData, Background),
     (GetRemoteProfilingDataResponse, Background),
+    (GetProjectFootprint, Background),
+    (GetProjectFootprintResponse, Background),
 );
 
 request_messages!(
@@ -624,6 +626,7 @@ request_messages!(
     (SpawnKernel, SpawnKernelResponse),
     (KillKernel, Ack),
     (GetRemoteProfilingData, GetRemoteProfilingDataResponse),
+    (GetProjectFootprint, GetProjectFootprintResponse),
 );
 
 lsp_messages!(
@@ -836,7 +839,8 @@ entity_messages!(
     FindSearchCandidatesChunk,
     FindSearchCandidatesCancelled,
     DownloadFileByPath,
-    GetRemoteProfilingData
+    GetRemoteProfilingData,
+    GetProjectFootprint
 );
 
 entity_messages!(

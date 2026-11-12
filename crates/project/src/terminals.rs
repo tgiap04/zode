@@ -26,10 +26,24 @@ use util::{
 
 use crate::{Project, ProjectPath};
 
-#[derive(Default)]
 pub struct Terminals {
     pub(crate) local_handles: Vec<WeakEntity<terminal::Terminal>>,
     remote: RemoteTerminals,
+    /// Set in a remote project's terminals as `process_footprint::MARKER_VARIABLE`,
+    /// so the server can find their processes when asked what the project
+    /// costs. Random, not derived from anything, so one project's processes
+    /// are never credited to another sharing the host.
+    footprint_marker: Arc<str>,
+}
+
+impl Default for Terminals {
+    fn default() -> Self {
+        Self {
+            local_handles: Vec::new(),
+            remote: RemoteTerminals::default(),
+            footprint_marker: uuid::Uuid::new_v4().to_string().into(),
+        }
+    }
 }
 
 /// Terminals whose process runs on the remote server, by the id this side
@@ -162,9 +176,16 @@ impl Project {
             .map(|p| self.active_toolchain(p, LanguageName::new_static("Python"), cx))
             .collect::<Vec<_>>();
         let lang_registry = self.languages.clone();
+        let footprint_marker = self.footprint_marker_for(remote_client.as_ref());
         cx.spawn(async move |project, cx| {
             let mut env = env_task.await.unwrap_or_default();
             env.extend(settings.env);
+            if let Some(marker) = &footprint_marker {
+                env.insert(
+                    process_footprint::MARKER_VARIABLE.to_string(),
+                    marker.to_string(),
+                );
+            }
 
             let activation_script = maybe!(async {
                 for toolchain in toolchains {
@@ -460,10 +481,17 @@ impl Project {
             self.resolve_directory_environment(&env_shell, path.clone(), remote_client.clone(), cx);
 
         let lang_registry = self.languages.clone();
+        let footprint_marker = self.footprint_marker_for(remote_client.as_ref());
         cx.spawn(async move |project, cx| {
             let shell_kind = ShellKind::new(&shell, path_style.is_windows());
             let mut env = env_task.await.unwrap_or_default();
             env.extend(settings.env);
+            if let Some(marker) = &footprint_marker {
+                env.insert(
+                    process_footprint::MARKER_VARIABLE.to_string(),
+                    marker.to_string(),
+                );
+            }
 
             let activation_script = maybe!(async {
                 for toolchain in toolchains {
@@ -660,9 +688,16 @@ impl Project {
             cx,
         );
 
+        let footprint_marker = self.footprint_marker_for(remote_client.as_ref());
         cx.spawn(async move |project, cx| {
             let mut env = env_task.await.unwrap_or_default();
             env.extend(settings.env);
+            if let Some(marker) = &footprint_marker {
+                env.insert(
+                    process_footprint::MARKER_VARIABLE.to_string(),
+                    marker.to_string(),
+                );
+            }
 
             project.update(cx, move |_, cx| {
                 match remote_client {
@@ -695,6 +730,39 @@ impl Project {
                 })
             })?
         })
+    }
+
+    pub fn footprint_marker(&self) -> &str {
+        &self.terminals.footprint_marker
+    }
+
+    /// What this project's processes cost on its remote host, asked of the
+    /// server there. `None` for a project with no remote host.
+    pub fn request_remote_footprint(
+        &self,
+        cx: &App,
+    ) -> Option<Task<Result<process_footprint::ProjectFootprint>>> {
+        let client = self.remote_client.as_ref()?.read(cx).proto_client();
+        let request = client.request(proto::GetProjectFootprint {
+            project_id: proto::REMOTE_SERVER_PROJECT_ID,
+            terminal_marker: self.terminals.footprint_marker.to_string(),
+        });
+        Some(cx.background_spawn(async move {
+            let response = request.await?;
+            Ok(process_footprint::ProjectFootprint {
+                memory_bytes: response.memory_bytes,
+                cpu_percent: response.cpu_percent,
+            })
+        }))
+    }
+
+    /// The marker a terminal started through `remote_client` carries; a local
+    /// terminal carries none, since the client measures it directly.
+    fn footprint_marker_for(
+        &self,
+        remote_client: Option<&Entity<RemoteClient>>,
+    ) -> Option<Arc<str>> {
+        remote_client.map(|_| self.terminals.footprint_marker.clone())
     }
 
     pub fn local_terminal_handles(&self) -> &Vec<WeakEntity<terminal::Terminal>> {

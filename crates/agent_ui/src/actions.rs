@@ -15,5 +15,8 @@ actions!(
     [
         /// Renames the agent tab, so two sessions of one agent can be told apart.
         RenameAgent,
+        /// Restarts the agent tab's session without permission prompts, resuming
+        /// the same conversation. For this tab only; nothing is written down.
+        RestartAgentWithoutPrompts,
     ]
 );

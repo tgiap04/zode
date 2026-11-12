@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use gpui::{App, Entity, EntityId, SharedString, WeakEntity, Window};
+use gpui::{App, Entity, EntityId, SharedString, Task, WeakEntity, Window};
 use project::{Project, ProjectGroupKey, path_suffix};
 use ui::{ContextMenu, IconName};
 use util::disambiguate::compute_disambiguation_details;
@@ -87,6 +87,40 @@ pub(crate) fn footprints_render_the_same(current: &Footprints, next: &Footprints
     rendered_lines(current) == rendered_lines(next)
 }
 
+/// Puts each remote project's own measurement in place of the local pass's.
+/// `None` is a server that could not answer, which reads "not measured".
+pub(crate) fn overlay_remote(
+    footprints: &mut Footprints,
+    remote: Vec<(EntityId, Option<ProjectFootprint>)>,
+) {
+    for (key, measured) in remote {
+        if let Some((_, _, footprint)) = footprints.0.iter_mut().find(|(row, _, _)| *row == key) {
+            *footprint = measured.unwrap_or_default();
+        }
+    }
+}
+
+/// One request per remote project, asking its server what the project's
+/// processes there cost. Those processes are invisible from here: what this
+/// machine sees of them is the `wsl.exe` or `ssh` that started them.
+pub(crate) fn remote_footprint_requests(
+    multi_workspace: Option<&WeakEntity<MultiWorkspace>>,
+    cx: &App,
+) -> Vec<(EntityId, Task<anyhow::Result<ProjectFootprint>>)> {
+    let Some(multi_workspace) = multi_workspace.and_then(|weak| weak.upgrade()) else {
+        return Vec::new();
+    };
+    multi_workspace
+        .read(cx)
+        .workspaces()
+        .filter_map(|workspace| {
+            let project = workspace.read(cx).project();
+            let request = project.read(cx).request_remote_footprint(cx)?;
+            Some((project.entity_id(), request))
+        })
+        .collect()
+}
+
 /// Foreground half of a tick: every tracked project's root PIDs and display
 /// label. No syscalls -- `child_process_root_pids` only reads
 /// already-maintained entity state, so this is safe to call every tick.
@@ -141,12 +175,18 @@ pub(crate) fn collect_roots(
         .map(|(project, key)| FootprintRoots {
             key: project.entity_id(),
             label: key.display_name(&path_detail_map),
-            roots: project
-                .read(cx)
-                .child_process_root_pids(cx)
-                .into_iter()
-                .map(|pid| pid.as_u32())
-                .collect(),
+            // A remote project's local processes are only the bridges into its
+            // host; its server measures the real ones.
+            roots: if project.read(cx).remote_client().is_some() {
+                Vec::new()
+            } else {
+                project
+                    .read(cx)
+                    .child_process_root_pids(cx)
+                    .into_iter()
+                    .map(|pid| pid.as_u32())
+                    .collect()
+            },
         })
         .collect()
 }

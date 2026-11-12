@@ -12,6 +12,8 @@ pub(crate) const INDENT_STEP: Pixels = px(16.);
 /// Flat rather than nested because the list is virtualised: `uniform_list` asks
 /// for row `n`, and a nested model would have to walk the tree to answer that.
 pub(crate) enum Row {
+    /// Above the connections the project's own `.idea/` names.
+    ProjectHeader,
     /// "Team · Acme", above the connections the team shares.
     TeamHeader {
         name: SharedString,
@@ -56,7 +58,11 @@ impl DatabasePanel {
             .iter()
             .position(|node| node.team.is_some())
             .unwrap_or(self.connections.len());
+        let first_project = self.connections.iter().position(|node| node.from_project);
         for (index, node) in self.connections.iter().enumerate() {
+            if Some(index) == first_project {
+                rows.push(Row::ProjectHeader);
+            }
             if index == first_team {
                 self.push_team_header(&mut rows);
             }
@@ -154,6 +160,33 @@ impl DatabasePanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match row {
+            Row::ProjectHeader => tree_row(("database-project-header", position), 0)
+                .selectable(false)
+                .child(
+                    row_content()
+                        .child(
+                            Icon::new(IconName::Folder)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .child(
+                            Label::new("Project")
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .truncate(),
+                        ),
+                )
+                .end_slot(
+                    IconButton::new("database-project-reload", IconName::RotateCw)
+                        .icon_size(IconSize::Small)
+                        .tooltip(|_window, cx| {
+                            Tooltip::simple("Read this project's .idea data sources again", cx)
+                        })
+                        .on_click(cx.listener(|this, _event, window, cx| {
+                            this.load_project_connections(window, cx)
+                        })),
+                )
+                .into_any_element(),
             Row::TeamHeader { name } => tree_row(("database-team-header", position), 0)
                 .selectable(false)
                 .child(

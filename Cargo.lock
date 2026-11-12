@@ -3374,7 +3374,9 @@ dependencies = [
  "paths",
  "project",
  "remote",
+ "roxmltree",
  "rpc",
+ "serde_json",
  "settings",
  "tempfile",
  "theme",
@@ -11634,6 +11636,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "process_footprint"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "libc",
+ "sysinfo 0.37.2",
+]
+
+[[package]]
 name = "procfs-core"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11707,6 +11718,7 @@ dependencies = [
  "postage",
  "prettier",
  "pretty_assertions",
+ "process_footprint",
  "project",
  "rand 0.9.3",
  "regex",
@@ -11735,6 +11747,7 @@ dependencies = [
  "unindent",
  "url",
  "util",
+ "uuid",
  "watch",
  "wax",
  "which 6.0.3",
@@ -11772,12 +11785,12 @@ dependencies = [
 name = "project_footprint"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "gpui",
- "libc",
  "log",
+ "process_footprint",
  "project",
  "settings",
- "sysinfo 0.37.2",
  "ui",
  "util",
  "workspace",
@@ -12864,6 +12877,7 @@ dependencies = [
  "parking_lot",
  "paths",
  "pretty_assertions",
+ "process_footprint",
  "project",
  "proto",
  "rayon",
@@ -20182,7 +20196,7 @@ dependencies = [
 
 [[package]]
 name = "zode"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "activity_indicator",
  "agent_notify",
