@@ -1,6 +1,6 @@
-use crate::RenameAgent;
 use crate::agent_attention::AgentAttention;
 use crate::agent_tabs;
+use crate::{RenameAgent, RestartAgentWithoutPrompts};
 use crate::{agent_icon, agent_working_color};
 use agent_sessions::{AgentCommand, AgentKind, Fork};
 use editor::Editor;
@@ -657,6 +657,25 @@ impl AgentView {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
+        Self::open_tracked_with_prompts(
+            workspace,
+            agent,
+            origin,
+            PermissionPrompts::AsConfigured,
+            window,
+            cx,
+        );
+    }
+
+    /// [`Self::open_tracked`], with the permission prompts the launch asks for.
+    pub fn open_tracked_with_prompts(
+        workspace: &mut Workspace,
+        agent: &str,
+        origin: SessionOrigin,
+        prompts: PermissionPrompts,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
         let agent_id = AgentId::new(agent.to_string());
         // Claimed here, before the tab is deferred, and not by the deferred
         // closure: a second request for the same session can land before that
@@ -691,7 +710,7 @@ impl AgentView {
                             project,
                             weak_workspace,
                             origin,
-                            PermissionPrompts::AsConfigured,
+                            prompts,
                             window,
                             cx,
                         )
@@ -2362,6 +2381,48 @@ impl AgentView {
     pub(crate) fn runs_without_prompts(&self) -> bool {
         self.bypassed
     }
+
+    /// Whether this tab can be switched to running without prompts.
+    ///
+    /// Only a tracked session: a restart resumes the session by its id, and a
+    /// tab without one -- untracked, or a fork that has not been given its own
+    /// -- would come back as a different conversation.
+    pub fn offers_restart_without_prompts(&self) -> bool {
+        !self.bypassed && self.session_id().is_some() && agent_can_skip_prompts(self.agent.as_ref())
+    }
+
+    /// Asks the next start of this tab to skip the prompts, the way the rail's
+    /// one-off launch does: for this tab only, and never written down, so a tab
+    /// restored after a restart asks whatever its checkout asks. Whether the
+    /// flag is actually passed is still `resolve_bypass`'s call.
+    fn request_skipping_prompts(&mut self) -> bool {
+        if !self.offers_restart_without_prompts() {
+            return false;
+        }
+        self.requested_prompts = PermissionPrompts::SkipOnce;
+        true
+    }
+
+    /// Restarts the agent on the same session, without permission prompts.
+    ///
+    /// A CLI's permission mode is fixed for the life of its process, so the
+    /// running one is replaced by one resuming the same conversation.
+    pub fn restart_without_prompts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.request_skipping_prompts() {
+            return;
+        }
+        self.restart(window, cx);
+        cx.emit(AgentViewEvent::UpdateTab);
+    }
+}
+
+const RESTART_WITHOUT_PROMPTS_LABEL: &str = "Restart Without Permission Prompts";
+
+/// Whether this editor knows the flag that runs `agent` without permission
+/// prompts. Anything offering to skip them checks this first, since for an
+/// agent without one the only outcome would be a refusal.
+pub fn agent_can_skip_prompts(agent: &str) -> bool {
+    builtin_agent(agent).is_some_and(|builtin| builtin.bypass_flag.is_some())
 }
 
 /// The extra arguments this launch should carry, or the reason it must not
@@ -2583,6 +2644,14 @@ impl workspace::item::Item for AgentView {
                         .ok();
                 }
             })
+            .on_action({
+                let handle = handle.clone();
+                move |_: &RestartAgentWithoutPrompts, window, cx| {
+                    handle
+                        .update(cx, |this, cx| this.restart_without_prompts(window, cx))
+                        .ok();
+                }
+            })
             // First, in the place `tab_icon` has given up while this is drawn:
             // the glyph that says which agent and the mark that says it is
             // working occupy one slot, so the label never shifts.
@@ -2658,7 +2727,15 @@ impl workspace::item::Item for AgentView {
         _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Vec<(SharedString, Box<dyn gpui::Action>)> {
-        vec![("Rename".into(), Box::new(RenameAgent))]
+        let mut actions: Vec<(SharedString, Box<dyn gpui::Action>)> =
+            vec![("Rename".into(), Box::new(RenameAgent))];
+        if self.offers_restart_without_prompts() {
+            actions.push((
+                RESTART_WITHOUT_PROMPTS_LABEL.into(),
+                Box::new(RestartAgentWithoutPrompts),
+            ));
+        }
+        actions
     }
 
     /// The vendor's glyph — except while the agent is answering, when
@@ -2901,6 +2978,11 @@ impl Render for AgentView {
             .on_action(cx.listener(|this: &mut Self, _: &RenameAgent, window, cx| {
                 this.start_renaming(window, cx);
             }))
+            .on_action(cx.listener(
+                |this: &mut Self, _: &RestartAgentWithoutPrompts, window, cx| {
+                    this.restart_without_prompts(window, cx);
+                },
+            ))
             // No header row any more: it existed only to hold the mode switch, and
             // an empty bar with a bottom border is a line across the top of a
             // terminal for no reason.
@@ -3117,6 +3199,88 @@ mod tests {
         });
         view.update(cx, |view, _| view.bypassed = true);
         view.read_with(cx, |view, _| assert!(view.runs_without_prompts()));
+    }
+
+    async fn tab_with_origin(
+        origin: SessionOrigin,
+        cx: &mut TestAppContext,
+    ) -> (Entity<AgentView>, &mut gpui::VisualTestContext) {
+        let (workspace, project, cx) = workspace_with_agents(cx).await;
+        let view = workspace.update_in(cx, |workspace, _window, cx| {
+            let handle = workspace.weak_handle();
+            cx.new(|cx| {
+                AgentView::test_new(
+                    AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                    AgentViewMode::Terminal,
+                    project.clone(),
+                    handle,
+                    origin,
+                    cx,
+                )
+            })
+        });
+        (view, cx)
+    }
+
+    fn offers_restart_without_prompts_in_menu(
+        view: &Entity<AgentView>,
+        cx: &mut gpui::VisualTestContext,
+    ) -> bool {
+        use workspace::item::Item as _;
+        view.update_in(cx, |view, window, cx| {
+            view.tab_extra_context_menu_actions(window, cx)
+                .iter()
+                .any(|(label, _)| label.as_ref() == RESTART_WITHOUT_PROMPTS_LABEL)
+        })
+    }
+
+    /// A running session can be switched to no prompts, and the switch resumes
+    /// the same conversation: the request is recorded on the tab, so the start
+    /// that follows passes the bypass flag alongside the session it resumes.
+    #[gpui::test]
+    async fn a_tracked_session_can_be_restarted_without_prompts(cx: &mut TestAppContext) {
+        let origin = SessionOrigin::new(SessionIntent::Tracked("0b1c".into()), None);
+        let (view, cx) = tab_with_origin(origin, cx).await;
+
+        assert!(offers_restart_without_prompts_in_menu(&view, cx));
+        let requested = view.update(cx, |view, _| view.request_skipping_prompts());
+        assert!(requested);
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.requested_prompts, PermissionPrompts::SkipOnce);
+            assert_eq!(view.session_id(), Some("0b1c"), "the same session resumes");
+        });
+    }
+
+    /// An untracked tab has no id to resume, so a restart would throw away the
+    /// conversation on screen. Not offered, and refused if asked anyway.
+    #[gpui::test]
+    async fn an_untracked_session_is_not_restarted_without_prompts(cx: &mut TestAppContext) {
+        let (view, cx) = tab_with_origin(SessionOrigin::default(), cx).await;
+
+        assert!(!offers_restart_without_prompts_in_menu(&view, cx));
+        let requested = view.update(cx, |view, _| view.request_skipping_prompts());
+        assert!(!requested);
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.requested_prompts, PermissionPrompts::AsConfigured);
+        });
+    }
+
+    /// A tab already running without prompts has nothing to switch to.
+    #[gpui::test]
+    async fn a_session_already_without_prompts_is_not_offered_the_switch(cx: &mut TestAppContext) {
+        let origin = SessionOrigin::new(SessionIntent::Tracked("0b1c".into()), None);
+        let (view, cx) = tab_with_origin(origin, cx).await;
+        view.update(cx, |view, _| view.bypassed = true);
+
+        assert!(!offers_restart_without_prompts_in_menu(&view, cx));
+    }
+
+    /// Only agents this editor knows a bypass flag for are offered the switch;
+    /// for any other the one outcome would be `resolve_bypass`'s refusal.
+    #[test]
+    fn only_an_agent_with_a_bypass_flag_can_skip_prompts() {
+        assert!(agent_can_skip_prompts(project::CLAUDE_CODE_AGENT_ID));
+        assert!(!agent_can_skip_prompts("some-agent-nobody-mapped"));
     }
 
     /// **Holds the condition, not the render site.** `tab_content` is never

@@ -13,7 +13,7 @@ use ui::IconName;
 
 use crate::footprint_popover::{
     CPU_ICON, MEMORY_ICON, footprints_render_the_same, is_discovery_tick, merge_known_pids,
-    render_project_line, wants_polling,
+    overlay_remote, render_project_line, wants_polling,
 };
 use crate::{FootprintRoots, Footprints, ProjectFootprint};
 
@@ -151,4 +151,32 @@ fn a_project_with_nothing_remembered_keeps_its_own_roots(cx: &mut TestAppContext
 fn memory_and_cpu_have_glyphs_of_their_own() {
     assert_ne!(MEMORY_ICON, CPU_ICON);
     assert_ne!(MEMORY_ICON, IconName::Database);
+}
+
+/// A remote project's row is what its server measured: the server's answer
+/// replaces whatever the local pass found, and a server that could not answer
+/// leaves the row "not measured" rather than at the few megabytes of `wsl.exe`.
+#[gpui::test]
+fn a_remote_project_shows_what_its_server_measured(cx: &mut TestAppContext) {
+    let local = project_id(cx);
+    let answered = project_id(cx);
+    let silent = project_id(cx);
+    let measured = |memory_bytes| ProjectFootprint {
+        memory_bytes: Some(memory_bytes),
+        cpu_percent: Some(1.0),
+    };
+    let mut footprints = Footprints(vec![
+        (local, "local".into(), measured(100)),
+        (answered, "wsl".into(), measured(5)),
+        (silent, "ssh".into(), measured(5)),
+    ]);
+
+    overlay_remote(
+        &mut footprints,
+        vec![(answered, Some(measured(4_000))), (silent, None)],
+    );
+
+    assert_eq!(footprints.0[0].2, measured(100), "a local row is untouched");
+    assert_eq!(footprints.0[1].2, measured(4_000));
+    assert_eq!(footprints.0[2].2, ProjectFootprint::default());
 }

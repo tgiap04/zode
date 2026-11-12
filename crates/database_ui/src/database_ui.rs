@@ -20,6 +20,7 @@ mod panel_credentials;
 mod panel_layout;
 mod panel_queries;
 mod password_prompt;
+mod project_connections;
 mod query;
 mod render;
 mod result_grid;

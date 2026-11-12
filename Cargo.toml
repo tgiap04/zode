@@ -128,6 +128,7 @@ members = [
     "crates/prettier",
     "crates/project",
     "crates/project_benchmarks",
+    "crates/process_footprint",
     "crates/project_footprint",
     "crates/project_panel",
     "crates/project_symbols",
@@ -367,6 +368,7 @@ prettier = { path = "crates/prettier" }
 settings_profile_selector = { path = "crates/settings_profile_selector" }
 project = { path = "crates/project" }
 project_footprint = { path = "crates/project_footprint" }
+process_footprint = { path = "crates/process_footprint" }
 project_panel = { path = "crates/project_panel" }
 project_symbols = { path = "crates/project_symbols" }
 prompt_store = { path = "crates/prompt_store" }
@@ -673,6 +675,7 @@ reqwest = { git = "https://github.com/zed-industries/reqwest.git", rev = "c15662
     "socks",
     "stream",
 ], package = "zed-reqwest", version = "0.12.15-zed" }
+roxmltree = "0.20"
 rsa = "0.9.6"
 runtimelib = { version = "1.4.0", default-features = false, features = [
     "async-dispatcher-runtime", "aws-lc-rs"

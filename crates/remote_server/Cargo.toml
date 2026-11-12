@@ -56,6 +56,7 @@ net.workspace = true
 node_runtime.workspace = true
 parking_lot.workspace = true
 paths.workspace = true
+process_footprint.workspace = true
 project.workspace = true
 proto.workspace = true
 release_channel.workspace = true

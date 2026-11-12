@@ -13,8 +13,8 @@ use http_client::HttpClient;
 use language::{Buffer, BufferEvent, LanguageRegistry, proto::serialize_operation};
 use node_runtime::NodeRuntime;
 use project::{
-    LspStore, LspStoreEvent, ManifestTree, PrettierStore, ProjectEnvironment, ProjectPath,
-    ToolchainStore, WorktreeId,
+    LanguageServerState, LspStore, LspStoreEvent, ManifestTree, PrettierStore, ProjectEnvironment,
+    ProjectPath, ToolchainStore, WorktreeId,
     agent_server_store::AgentServerStore,
     agent_session_host::{AgentSessionHost, AgentSessionService},
     buffer_store::{BufferStore, BufferStoreEvent},
@@ -49,6 +49,7 @@ use sysinfo::{ProcessRefreshKind, RefreshKind, System, UpdateKind};
 use util::{ResultExt, paths::PathStyle, rel_path::RelPath};
 use worktree::Worktree;
 
+use crate::footprint_meters::FootprintMeters;
 use crate::headless_terminals::HeadlessTerminals;
 use database::install::{DriverEndpoint, DriverInstaller, store};
 
@@ -248,6 +249,7 @@ pub struct HeadlessProject {
     pub kernels: HashMap<String, Child>,
     pub(crate) terminals: HeadlessTerminals,
     pub(crate) database_drivers: Arc<HostDatabaseDrivers>,
+    pub(crate) footprint_meters: Arc<parking_lot::Mutex<FootprintMeters>>,
 }
 
 pub struct HeadlessAppState {
@@ -468,6 +470,7 @@ impl HeadlessProject {
         session.add_request_handler(cx.weak_entity(), Self::handle_ping);
         session.add_request_handler(cx.weak_entity(), Self::handle_get_processes);
         session.add_request_handler(cx.weak_entity(), Self::handle_get_remote_profiling_data);
+        session.add_request_handler(cx.weak_entity(), Self::handle_get_project_footprint);
 
         session.add_entity_request_handler(Self::handle_add_worktree);
         session.add_entity_request_handler(Self::handle_rescan_worktree);
@@ -546,6 +549,7 @@ impl HeadlessProject {
                 database::install::store::root().to_path_buf(),
                 http_client,
             )),
+            footprint_meters: Arc::default(),
         }
     }
 
@@ -1465,6 +1469,44 @@ impl HeadlessProject {
         processes.sort_by_key(|p| p.name.clone());
 
         Ok(proto::GetProcessesResponse { processes })
+    }
+
+    async fn handle_get_project_footprint(
+        this: Entity<Self>,
+        envelope: TypedEnvelope<proto::GetProjectFootprint>,
+        cx: AsyncApp,
+    ) -> Result<proto::GetProjectFootprintResponse> {
+        let (language_server_pids, meters) = this.read_with(&cx, |this, cx| {
+            let language_server_pids = this
+                .lsp_store
+                .read(cx)
+                .as_local()
+                .map(|local| {
+                    local
+                        .language_servers
+                        .values()
+                        .filter_map(|state| match state {
+                            LanguageServerState::Running { server, .. } => server.process_id(),
+                            LanguageServerState::Starting { .. } => None,
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (language_server_pids, this.footprint_meters.clone())
+        });
+        let marker = envelope.payload.terminal_marker;
+        // The executor's clock rather than the wall's, so a test can carry the
+        // meter past its discovery cadence without waiting it out.
+        let now = cx.background_executor().now();
+        let footprint = cx
+            .background_spawn(
+                async move { meters.lock().measure(&marker, language_server_pids, now) },
+            )
+            .await;
+        Ok(proto::GetProjectFootprintResponse {
+            memory_bytes: footprint.memory_bytes,
+            cpu_percent: footprint.cpu_percent,
+        })
     }
 
     async fn handle_get_remote_profiling_data(

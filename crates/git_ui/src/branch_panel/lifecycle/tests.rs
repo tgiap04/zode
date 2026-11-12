@@ -2217,6 +2217,58 @@ mod single_delete {
         (panel, store, session, real_log, cx)
     }
 
+    /// A row with a tab open on it can be deleted too, and the tab is closed
+    /// with the session rather than left writing to a moved transcript.
+    #[gpui::test]
+    async fn deleting_an_open_row_closes_its_tab(cx: &mut TestAppContext) {
+        use gpui::AppContext as _;
+        let (panel, _store, _session, _log, cx) = panel_listing_one_session(cx, "open").await;
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace still alive");
+        let view = workspace.update_in(cx, |workspace, window, cx| {
+            let project = workspace.project().clone();
+            let weak_workspace = workspace.weak_handle();
+            let view = cx.new(|cx| {
+                agent_ui::AgentView::test_new(
+                    project::AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                    zed_actions::agent::AgentViewMode::Terminal,
+                    project,
+                    weak_workspace,
+                    agent_ui::SessionOrigin::new(
+                        agent_ui::SessionIntent::Tracked("open".into()),
+                        None,
+                    ),
+                    cx,
+                )
+            });
+            workspace.add_item_to_active_pane(Box::new(view.clone()), None, true, window, cx);
+            view
+        });
+        cx.run_until_parked();
+        let entry = AgentEntry::Open {
+            label: "Claude Code".into(),
+            agent: project::CLAUDE_CODE_AGENT_ID.into(),
+            view: view.downgrade(),
+        };
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.delete_agent_session(&entry, window, cx)
+        });
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt(), "an open row's delete must confirm");
+        cx.simulate_prompt_answer("Move to Trash");
+        cx.run_until_parked();
+
+        let still_open = workspace.read_with(cx, |workspace, cx| {
+            workspace
+                .items(cx)
+                .any(|item| item.item_id() == view.entity_id())
+        });
+        assert!(!still_open, "the deleted session's tab must be closed");
+    }
+
     /// A finished session is listed under the name it was given in a tab, and
     /// naming it redraws the list without waiting for a sweep.
     #[gpui::test]

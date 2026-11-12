@@ -63,6 +63,21 @@ message AskPassResponse {
   string response = 1;
 }
 
+// What the processes of a project hosted here cost, measured on this host:
+// the server's own descendants plus every process whose environment carries
+// `terminal_marker` in `ZODE_FOOTPRINT_MARKER`.
+message GetProjectFootprint {
+  uint64 project_id = 1;
+  string terminal_marker = 2;
+}
+
+// Unset fields mean "not measured", never zero: a CPU reading needs two
+// samples, and a project with no processes found has nothing to report.
+message GetProjectFootprintResponse {
+  optional uint64 memory_bytes = 1;
+  optional float cpu_percent = 2;
+}
+
 message GetRemoteProfilingData {
   uint64 project_id = 1;
   bool foreground_only = 2;

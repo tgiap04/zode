@@ -175,7 +175,29 @@ impl OpenRequest {
             }
         }
 
+        this.connect_wsl_paths_through_wsl();
         Ok(this)
+    }
+
+    /// Opening `\\wsl.localhost\<distro>\...` as a local folder reads files over the
+    /// share while terminals, language servers and git still run on Windows, so such
+    /// paths are opened through a WSL connection instead.
+    fn connect_wsl_paths_through_wsl(&mut self) {
+        if self.remote_connection.is_some() || !self.diff_paths.is_empty() {
+            return;
+        }
+        let Some((distro_name, linux_paths)) = util::paths::WslPath::from_paths(&self.open_paths)
+        else {
+            return;
+        };
+        self.remote_connection = Some(RemoteConnectionOptions::Wsl(WslConnectionOptions {
+            distro_name,
+            user: None,
+        }));
+        self.open_paths = linux_paths
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
     }
 
     fn parse_file_path(&mut self, file: &str) {
@@ -457,6 +479,24 @@ pub async fn handle_cli_connection(
                         };
                     });
                     return;
+                }
+
+                if wsl.is_none() {
+                    let mut wsl_request = OpenRequest {
+                        open_paths: paths.clone(),
+                        diff_paths: diff_paths.clone(),
+                        dev_container,
+                        ..Default::default()
+                    };
+                    wsl_request.connect_wsl_paths_through_wsl();
+                    if wsl_request.remote_connection.is_some() {
+                        cx.update(|cx| {
+                            cx.activate(true);
+                            handle_open_request(wsl_request, app_state.clone(), cx);
+                        });
+                        responses.send(CliResponse::Exit { status: 0 }).log_err();
+                        return;
+                    }
                 }
 
                 if open_behavior == cli::OpenBehavior::Default {
@@ -956,6 +996,48 @@ mod tests {
             })
         );
         assert_eq!(request.open_paths, vec!["/"]);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[gpui::test]
+    fn test_parse_wsl_share_path_connects_to_wsl(cx: &mut TestAppContext) {
+        let _app_state = init_test(cx);
+        let request = cx.update(|cx| {
+            OpenRequest::parse(
+                RawOpenRequest {
+                    urls: vec![r"file://\\?\UNC\wsl.localhost\Ubuntu\home\user\project".into()],
+                    ..Default::default()
+                },
+                cx,
+            )
+            .unwrap()
+        });
+        assert_eq!(
+            request.remote_connection.unwrap(),
+            RemoteConnectionOptions::Wsl(WslConnectionOptions {
+                distro_name: "Ubuntu".into(),
+                user: None,
+            })
+        );
+        assert_eq!(request.open_paths, vec!["/home/user/project"]);
+    }
+
+    #[gpui::test]
+    fn test_parse_local_path_stays_local(cx: &mut TestAppContext) {
+        let _app_state = init_test(cx);
+        let local_path = path!("/home/user/project");
+        let request = cx.update(|cx| {
+            OpenRequest::parse(
+                RawOpenRequest {
+                    urls: vec![format!("file://{local_path}")],
+                    ..Default::default()
+                },
+                cx,
+            )
+            .unwrap()
+        });
+        assert!(request.remote_connection.is_none());
+        assert_eq!(request.open_paths, vec![local_path]);
     }
 
     #[gpui::test]
