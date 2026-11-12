@@ -2124,6 +2124,69 @@ async fn test_remote_rescan_unknown_worktree_errors(
 }
 
 #[gpui::test]
+async fn test_remote_repository_snapshot_lists_branches(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(
+        path!("/code"),
+        json!({
+            "project1": {
+                ".git": {},
+                "README.md": "# project 1",
+            },
+        }),
+    )
+    .await;
+    fs.insert_branches(
+        Path::new(path!("/code/project1/.git")),
+        &["main", "dev", "feature-1"],
+    );
+
+    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
+    project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/code/project1"), true, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+
+    let repository = project.update(cx, |project, cx| project.active_repository(cx).unwrap());
+    let listed_branches = |cx: &mut TestAppContext| {
+        repository.read_with(cx, |repository, _| {
+            repository
+                .snapshot()
+                .branch_list
+                .iter()
+                .map(|branch| branch.name().to_string())
+                .collect::<HashSet<_>>()
+        })
+    };
+    let expected = ["main", "dev", "feature-1"]
+        .map(ToString::to_string)
+        .into_iter()
+        .collect::<HashSet<_>>();
+    assert_eq!(listed_branches(cx), expected);
+
+    cx.update(|cx| {
+        repository.update(cx, |repository, _| {
+            repository.create_branch("created-on-the-server".to_string(), None)
+        })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    cx.run_until_parked();
+
+    assert!(
+        listed_branches(cx).contains("created-on-the-server"),
+        "a branch created through the connection should reach the client's list"
+    );
+}
+
+#[gpui::test]
 async fn test_remote_git_branches(cx: &mut TestAppContext, server_cx: &mut TestAppContext) {
     let fs = FakeFs::new(server_cx.executor());
     fs.insert_tree(

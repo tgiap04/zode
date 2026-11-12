@@ -4137,6 +4137,7 @@ impl RepositorySnapshot {
                 .iter()
                 .map(worktree_to_proto)
                 .collect(),
+            branch_list: self.branch_list.iter().map(branch_to_proto).collect(),
         }
     }
 
@@ -4218,6 +4219,7 @@ impl RepositorySnapshot {
                 .iter()
                 .map(worktree_to_proto)
                 .collect(),
+            branch_list: self.branch_list.iter().map(branch_to_proto).collect(),
         }
     }
 
@@ -7290,6 +7292,14 @@ impl Repository {
             cx.emit(RepositoryEvent::GitWorktreeListChanged);
         }
         self.snapshot.linked_worktrees = new_linked_worktrees;
+        // A server older than this field sends no list, which reads as empty --
+        // the same as before the field existed.
+        let new_branch_list: Arc<[Branch]> =
+            update.branch_list.iter().map(proto_to_branch).collect();
+        if *self.snapshot.branch_list != *new_branch_list {
+            cx.emit(RepositoryEvent::BranchListChanged);
+        }
+        self.snapshot.branch_list = new_branch_list;
         self.snapshot.remote_upstream_url = update.remote_upstream_url;
         self.snapshot.remote_origin_url = update.remote_origin_url;
 
