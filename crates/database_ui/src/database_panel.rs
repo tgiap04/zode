@@ -46,6 +46,56 @@ pub(crate) struct ConnectionNode {
     pub(crate) collapse_schema_level: bool,
     /// Set for a connection shared by the team. Never written to settings.
     pub(crate) team: Option<crate::team_connections::TeamOrigin>,
+    /// Set for a connection the project's own `.idea/` names. Never written to
+    /// settings either.
+    pub(crate) from_project: bool,
+    /// Opened on its own rather than by a click, so a refusal for want of a
+    /// password waits for one instead of raising a prompt.
+    pub(crate) unattended: bool,
+}
+
+impl ConnectionNode {
+    /// Whether this is one of the user's own connections, kept in settings.
+    pub(crate) fn is_personal(&self) -> bool {
+        self.team.is_none() && !self.from_project
+    }
+
+    pub(crate) fn origin(&self) -> NodeOrigin {
+        if self.team.is_some() {
+            NodeOrigin::Team
+        } else if self.from_project {
+            NodeOrigin::Project
+        } else {
+            NodeOrigin::Personal
+        }
+    }
+
+    pub(crate) fn idle(config: ConnectionConfig) -> Self {
+        Self {
+            config,
+            state: NodeState::Idle,
+            expanded: false,
+            schemas: Vec::new(),
+            collapse_schema_level: false,
+            team: None,
+            from_project: false,
+            unattended: false,
+        }
+    }
+}
+
+/// See [`DatabasePanel::remember_places`].
+pub(crate) struct Places {
+    active: Option<(String, NodeOrigin)>,
+    open_table: Option<(String, NodeOrigin)>,
+}
+
+/// Where a node came from, which tells two nodes of the same name apart.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NodeOrigin {
+    Personal,
+    Project,
+    Team,
 }
 
 /// The table whose columns are showing, if any.
@@ -187,6 +237,14 @@ impl DatabasePanel {
         };
         panel.reload_connections(cx);
         panel.watch_team(cx);
+        // Not read here: the panel is built while its workspace is being
+        // updated, and reading the project's files needs the workspace.
+        panel.tasks.push(cx.spawn_in(window, async move |this, cx| {
+            this.update_in(cx, |this, window, cx| {
+                this.load_project_connections(window, cx)
+            })
+            .ok();
+        }));
         panel
     }
 
@@ -284,11 +342,7 @@ impl DatabasePanel {
         // node shifts every place after it. Remembered by name across the
         // rebuild, or they would point at a different database than the one
         // the user opened.
-        let active_key = self.active.and_then(|index| self.node_key(index));
-        let open_key = self
-            .open_table
-            .as_ref()
-            .and_then(|open| self.node_key(open.connection));
+        let places = self.remember_places();
 
         let mut existing = std::mem::take(&mut self.connections);
         self.connections = wanted
@@ -296,7 +350,7 @@ impl DatabasePanel {
             .map(|config| {
                 match existing
                     .iter()
-                    .position(|node| node.team.is_none() && node.config.name == config.name)
+                    .position(|node| node.is_personal() && node.config.name == config.name)
                 {
                     // Same name, same url: leave the open session alone.
                     Some(index) if existing[index].config.url == config.url => {
@@ -306,22 +360,38 @@ impl DatabasePanel {
                     }
                     // The url moved, so whatever is open is open to the wrong
                     // database. Dropping the node drops the session with it.
-                    _ => ConnectionNode {
-                        config,
-                        state: NodeState::Idle,
-                        expanded: false,
-                        schemas: Vec::new(),
-                        collapse_schema_level: false,
-                        team: None,
-                    },
+                    _ => ConnectionNode::idle(config),
                 }
             })
             .collect();
-        // Team connections come from the team, not from settings, and stay
-        // after the personal ones.
+        // Project and team connections come from elsewhere, not from settings,
+        // and stay after the personal ones in the order they already had.
         self.connections
-            .extend(existing.into_iter().filter(|node| node.team.is_some()));
+            .extend(existing.into_iter().filter(|node| !node.is_personal()));
+        self.restore_places(places);
+        cx.notify();
+    }
 
+    /// Where the active connection and the open table are, by name: a rebuild
+    /// of the list moves both, and a place remembered by position would point
+    /// at a different database than the one the user opened.
+    pub(crate) fn remember_places(&self) -> Places {
+        Places {
+            active: self.active.and_then(|index| self.node_key(index)),
+            open_table: self
+                .open_table
+                .as_ref()
+                .and_then(|open| self.node_key(open.connection)),
+        }
+    }
+
+    /// Puts the active connection and the open table back where their
+    /// databases now are, or clears them when the database is gone.
+    pub(crate) fn restore_places(&mut self, places: Places) {
+        let Places {
+            active: active_key,
+            open_table: open_key,
+        } = places;
         if let Some(key) = active_key {
             self.active = self.index_of_key(&key);
             if self.active.is_none() {
@@ -338,21 +408,20 @@ impl DatabasePanel {
                 None => self.open_table = None,
             }
         }
-        cx.notify();
     }
 
     /// What identifies a node across a rebuild: its name, and whether it came
     /// from the team, since a team connection may share a personal one's name.
-    fn node_key(&self, index: usize) -> Option<(String, bool)> {
+    pub(crate) fn node_key(&self, index: usize) -> Option<(String, NodeOrigin)> {
         self.connections
             .get(index)
-            .map(|node| (node.config.name.clone(), node.team.is_some()))
+            .map(|node| (node.config.name.clone(), node.origin()))
     }
 
-    fn index_of_key(&self, (name, team): &(String, bool)) -> Option<usize> {
+    pub(crate) fn index_of_key(&self, (name, origin): &(String, NodeOrigin)) -> Option<usize> {
         self.connections
             .iter()
-            .position(|node| node.config.name == *name && node.team.is_some() == *team)
+            .position(|node| node.config.name == *name && node.origin() == *origin)
     }
 
     /// Pins or unpins a connection for this project, and writes it down.
@@ -380,7 +449,7 @@ impl DatabasePanel {
         let Some(node) = self
             .connections
             .get(index)
-            .filter(|node| node.team.is_none())
+            .filter(|node| node.is_personal())
         else {
             return;
         };
@@ -413,7 +482,7 @@ impl DatabasePanel {
         let Some(index) = self
             .connections
             .iter()
-            .position(|node| node.team.is_none() && node.config.name == name)
+            .position(|node| node.is_personal() && node.config.name == name)
         else {
             return;
         };
@@ -435,7 +504,7 @@ impl DatabasePanel {
             || self
                 .connections
                 .iter()
-                .any(|node| node.team.is_some() && node.config.url == url);
+                .any(|node| !node.is_personal() && node.config.url == url);
         if !still_used {
             delete_secret(zed_credentials_provider::global(cx), url, cx).detach_and_log_err(cx);
         }

@@ -29,7 +29,7 @@ impl DatabasePanel {
         let connected = self.is_connected(index);
         // Team connections are not in settings, so neither pinned by name nor
         // shared again from here.
-        let personal = node.team.is_none();
+        let personal = node.is_personal();
         let shareable = personal && crate::team_connections::can_share(cx);
         let panel = cx.weak_entity();
 

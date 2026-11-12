@@ -361,6 +361,8 @@ fn team_node(entry: EntryId, name: String, revision: String) -> ConnectionNode {
             fetched: false,
             shared_password: None,
         }),
+        from_project: false,
+        unattended: false,
     }
 }
 
