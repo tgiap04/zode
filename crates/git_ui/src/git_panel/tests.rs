@@ -2889,6 +2889,79 @@ async fn test_commit_row_keeps_its_subject_beside_two_long_refs(cx: &mut TestApp
     );
 }
 
+/// A tip merging `branches` root commits: one row with every branch open beside it.
+fn fan_out_graph_log(branches: usize) -> Vec<Arc<git::repository::InitialGraphCommitData>> {
+    let shas = (0..=branches)
+        .map(|ix| git::Oid::from_bytes(&[ix as u8 + 1; 20]).expect("20 bytes is a valid oid"))
+        .collect::<Vec<_>>();
+    shas.iter()
+        .enumerate()
+        .map(|(ix, sha)| {
+            Arc::new(git::repository::InitialGraphCommitData {
+                sha: *sha,
+                parents: if ix == 0 {
+                    shas[1..].to_vec().into()
+                } else {
+                    Default::default()
+                },
+                ref_names: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+/// The graph row list's laid-out box and its content, after drawing the panel `width` wide.
+async fn graph_list_size(
+    log: Vec<Arc<git::repository::InitialGraphCommitData>>,
+    width: Pixels,
+    cx: &mut TestAppContext,
+) -> gpui::ItemSize {
+    init_test(cx);
+    let (panel, _repository, mut cx) = init_commits_panel_with_log(cx, log).await;
+    let cx = &mut cx;
+    panel.update_in(cx, |panel, _, cx| {
+        panel.toggle_section(PanelSectionKind::Graph, cx);
+    });
+    cx.executor().advance_clock(2 * UPDATE_DEBOUNCE);
+    cx.run_until_parked();
+
+    let panel_to_draw = panel.clone();
+    cx.draw(
+        gpui::point(px(0.), px(0.)),
+        gpui::size(width, px(800.)),
+        |_, _| panel_to_draw.into_any_element(),
+    );
+    panel
+        .update_in(cx, |panel, _, _| {
+            panel
+                .graph_section
+                .as_ref()
+                .and_then(|state| state.scroll_handle.0.borrow().last_item_size)
+        })
+        .expect("the row list must reach layout")
+}
+
+/// Lanes too many for the panel's width push the rows past it, so the list scrolls sideways
+/// rather than drawing the lanes underneath the subjects.
+#[gpui::test]
+async fn test_a_graph_wider_than_the_panel_scrolls_sideways(cx: &mut TestAppContext) {
+    let size = graph_list_size(fan_out_graph_log(24), px(360.), cx).await;
+    assert!(
+        size.contents.width > size.item.width,
+        "24 lanes cannot fit a 360px panel beside a subject, so the rows must be wider than the \
+         list ({:?} of content in a {:?} list)",
+        size.contents.width,
+        size.item.width
+    );
+}
+
+/// A graph that fits leaves the rows the panel's width: no scrollbar for nothing to scroll to.
+#[gpui::test]
+async fn test_a_graph_that_fits_does_not_scroll_sideways(cx: &mut TestAppContext) {
+    let size = graph_list_size(linear_graph_log(8), px(360.), cx).await;
+    assert_eq!(size.contents.width, size.item.width);
+}
+
 /// Drawing without panicking was all phase 05 asserted, and it let a blank section ship: the lane
 /// canvas takes its height from an explicit `h_full` so it painted, while the row list took
 /// `flex_1` inside a row-direction `div`, where that grows the width and leaves the height alone.

@@ -2,10 +2,9 @@ use super::*;
 use git_graph_core::{GraphData, LANE_WIDTH, LEFT_PADDING, LanePaint, accent_colors_count};
 use gpui::Bounds;
 
-/// Widest a subject may be pushed. The panel is 360px by default, so lanes have to yield to the
-/// subject rather than the other way round — the graph tab is the place to go when a branch is too
-/// tangled to read here, which is what the toolbar's expand button is for.
-const MAX_LANE_COLUMN_WIDTH: Pixels = px(96.);
+/// The narrowest a subject is squeezed to beside its lanes before the rows grow wider than the
+/// panel and the list scrolls sideways instead.
+const MIN_SUBJECT_WIDTH: Pixels = px(120.);
 
 /// Where a row's subject starts: clear of the lanes drawn *on that row*.
 ///
@@ -15,7 +14,7 @@ const MAX_LANE_COLUMN_WIDTH: Pixels = px(96.);
 /// against the lane it belongs to, which is also what makes the graph readable as a shape: the
 /// text steps in and out with the branches instead of standing off in one column.
 fn subject_indent(lanes: usize) -> Pixels {
-    (LEFT_PADDING + LANE_WIDTH * lanes.max(1) as f32).min(MAX_LANE_COLUMN_WIDTH)
+    LEFT_PADDING + LANE_WIDTH * lanes.max(1) as f32
 }
 
 /// Present only once the Graph section has been expanded at least once. Absence is the laziness:
@@ -322,6 +321,15 @@ impl GitPanel {
         // The canvas alone is sized to the whole log: it is absolutely positioned, so its width
         // only bounds where lines may be painted and costs the subjects nothing.
         let lane_column_width = subject_indent(state.graph_data.max_lanes);
+        // The widest row decides how far the list scrolls sideways: its lanes plus the least room
+        // a subject is given beside them.
+        let widest_row = state
+            .graph_data
+            .commits
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, commit)| commit.lanes)
+            .map(|(ix, _)| ix);
 
         // A column, not a bare `div`: `div()` lays its children out in a row, where the `flex_1`
         // below grows the list's width and leaves its height at zero. A `uniform_list` contributes
@@ -330,6 +338,7 @@ impl GitPanel {
         let rows = v_flex()
             .relative()
             .size_full()
+            .overflow_hidden()
             .child(self.render_lane_canvas(lane_column_width, window, cx))
             .child(
                 uniform_list(
@@ -370,7 +379,17 @@ impl GitPanel {
                     }),
                 )
                 .flex_1()
+                .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained)
+                .with_width_from_item(widest_row)
                 .track_scroll(&state.scroll_handle),
+            )
+            .custom_scrollbars(
+                Scrollbars::for_settings::<GitPanelScrollbarAccessor>()
+                    .tracked_scroll_handle(&state.scroll_handle)
+                    .with_track_along(ScrollAxes::Horizontal, cx.theme().colors().panel_background)
+                    .notify_content(),
+                window,
+                cx,
             )
             .into_any_element();
 
@@ -398,7 +417,9 @@ impl GitPanel {
         };
 
         let row_height = panel_row_height(window);
-        let scroll_offset_y = -state.scroll_handle.0.borrow().base_handle.offset().y;
+        let scroll_offset = state.scroll_handle.0.borrow().base_handle.offset();
+        let scroll_offset_x = scroll_offset.x.min(px(0.));
+        let scroll_offset_y = -scroll_offset.y;
         let scroll_offset_y = scroll_offset_y.max(px(0.));
         let first_visible_row = (scroll_offset_y / row_height).floor() as usize;
         let vertical_scroll_offset = scroll_offset_y - (first_visible_row as f32 * row_height);
@@ -426,9 +447,10 @@ impl GitPanel {
         div()
             .absolute()
             .top_0()
-            .left_0()
+            .left(scroll_offset_x)
             .h_full()
             .w(lane_column_width)
+            .overflow_hidden()
             .child(
                 gpui::canvas(
                     |_, _, _| {},
@@ -510,13 +532,17 @@ impl GitPanel {
             // branch rather than against the deepest one in the log.
             .child(div().flex_none().w(subject_indent))
             .child(
-                div().flex_1().overflow_hidden().child(
-                    Label::new(subject)
-                        .size(LabelSize::Small)
-                        .color(subject_color)
-                        .single_line()
-                        .truncate(),
-                ),
+                div()
+                    .flex_1()
+                    .min_w(MIN_SUBJECT_WIDTH)
+                    .overflow_hidden()
+                    .child(
+                        Label::new(subject)
+                            .size(LabelSize::Small)
+                            .color(subject_color)
+                            .single_line()
+                            .truncate(),
+                    ),
             )
             .into_any_element()
     }
@@ -564,5 +590,22 @@ impl GitPanel {
     pub(super) fn end_graph_section_resize(&mut self, cx: &mut Context<Self>) {
         self.graph_resize_drag_start = None;
         self.serialize(cx);
+    }
+}
+
+#[cfg(test)]
+mod subject_indent_tests {
+    use super::*;
+
+    /// A capped indent put every lane past the cap underneath the subjects. However deep the
+    /// tangle, the subject starts past the last lane on its row; the list scrolls instead.
+    #[test]
+    fn a_subject_starts_clear_of_every_lane_on_its_row() {
+        for lanes in [1, 7, 40] {
+            assert!(
+                subject_indent(lanes) >= LEFT_PADDING + LANE_WIDTH * lanes as f32,
+                "{lanes} lanes: the subject must start past the last lane drawn on its row"
+            );
+        }
     }
 }
