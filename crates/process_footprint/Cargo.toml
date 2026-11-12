@@ -1,0 +1,23 @@
+[package]
+name = "process_footprint"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/process_footprint.rs"
+doctest = false
+
+[dependencies]
+gpui.workspace = true
+sysinfo.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

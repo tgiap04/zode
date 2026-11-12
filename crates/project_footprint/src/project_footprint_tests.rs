@@ -4,7 +4,7 @@
 //! [`FakeSampler`] with no OS access and no GPUI window except where the
 //! setting itself is under test.
 
-use gpui::{AppContext as _, TestAppContext, UpdateGlobal as _};
+use gpui::{AppContext as _, EntityId, TestAppContext, UpdateGlobal as _};
 use settings::SettingsStore;
 
 use super::*;

@@ -26,7 +26,8 @@ use workspace::{MultiWorkspace, StatusItemView, Workspace};
 
 use super::footprint_popover::{
     CPU_ICON, MEMORY_ICON, build_popover, collect_roots, footprint_parts,
-    footprints_render_the_same, is_discovery_tick, merge_known_pids, wants_polling,
+    footprints_render_the_same, is_discovery_tick, merge_known_pids, overlay_remote,
+    remote_footprint_requests, wants_polling,
 };
 use super::{
     Footprints, Pid, ProcessSampler, ProjectFootprint, ProjectFootprintSetting,
@@ -133,7 +134,7 @@ impl ProjectFootprintIndicator {
             loop {
                 cx.background_executor().timer(POLL_INTERVAL).await;
 
-                let Ok(Some((roots, discover))) = this.update(cx, |this, cx| {
+                let Ok(Some((roots, discover, remote_requests))) = this.update(cx, |this, cx| {
                     if !wants_polling(ProjectFootprintSetting::is_enabled(cx), this.window_active) {
                         // Never touches `self.poll` here: dropping the task
                         // that is currently running this closure, from
@@ -154,7 +155,9 @@ impl ProjectFootprintIndicator {
                         // fall out instead of lingering.
                         merge_known_pids(&mut roots, &this.known_pids);
                     }
-                    Some((roots, discover))
+                    let remote_requests =
+                        remote_footprint_requests(this.multi_workspace.as_ref(), cx);
+                    Some((roots, discover, remote_requests))
                 }) else {
                     break;
                 };
@@ -163,7 +166,7 @@ impl ProjectFootprintIndicator {
                     // No tracked project owns a child process: nothing a
                     // background pass could discover or sample, so none is
                     // started -- the common case in a freshly opened window.
-                    let footprints = Footprints(
+                    let mut footprints = Footprints(
                         roots
                             .into_iter()
                             .map(|project| {
@@ -171,6 +174,7 @@ impl ProjectFootprintIndicator {
                             })
                             .collect(),
                     );
+                    overlay_remote(&mut footprints, answers(remote_requests).await);
                     if this
                         .update(cx, |this, cx| {
                             // Same "replaced wholesale, never merged" rule as
@@ -207,7 +211,7 @@ impl ProjectFootprintIndicator {
                     .await;
 
                 let mut known_pids = HashMap::with_capacity(per_project.len());
-                let footprints = Footprints(
+                let mut footprints = Footprints(
                     roots
                         .into_iter()
                         .zip(per_project)
@@ -217,6 +221,7 @@ impl ProjectFootprintIndicator {
                         })
                         .collect(),
                 );
+                overlay_remote(&mut footprints, answers(remote_requests).await);
                 if this
                     .update(cx, |this, cx| {
                         // Replaced wholesale, never merged: a project that
@@ -242,6 +247,24 @@ impl ProjectFootprintIndicator {
             cx.notify();
         }
     }
+}
+
+/// Each remote project's answer, `None` where its server could not give one:
+/// an older server without the request, or a connection that dropped.
+async fn answers(
+    requests: Vec<(gpui::EntityId, Task<anyhow::Result<ProjectFootprint>>)>,
+) -> Vec<(gpui::EntityId, Option<ProjectFootprint>)> {
+    let mut answers = Vec::with_capacity(requests.len());
+    for (key, request) in requests {
+        let answer = request
+            .await
+            .inspect_err(|error| {
+                log::debug!("project_footprint: remote host did not answer: {error:#}")
+            })
+            .ok();
+        answers.push((key, answer));
+    }
+    answers
 }
 
 impl Render for ProjectFootprintIndicator {

@@ -13,17 +13,15 @@ path = "src/project_footprint.rs"
 doctest = false
 
 [dependencies]
+anyhow.workspace = true
 gpui.workspace = true
 log.workspace = true
+process_footprint.workspace = true
 project.workspace = true
 settings.workspace = true
-sysinfo.workspace = true
 ui.workspace = true
 util.workspace = true
 workspace.workspace = true
-
-[target.'cfg(target_os = "macos")'.dependencies]
-libc.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

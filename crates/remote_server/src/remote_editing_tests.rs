@@ -2990,6 +2990,90 @@ mod terminals {
         assert_eq!(status.and_then(|status| status.code()), Some(3));
     }
 
+    /// A remote project's terminals carry its footprint marker, so the server
+    /// can find them: on the host they descend from nothing the server owns.
+    #[gpui::test]
+    async fn test_a_remote_terminal_carries_the_footprint_marker(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let (_drained, project, _headless) = setup(cx, server_cx).await;
+        let marker = project.read_with(cx, |project, _| project.footprint_marker().to_string());
+        assert!(!marker.is_empty());
+        let terminal = project
+            .update(cx, |project, cx| {
+                project.create_terminal_task(
+                    shell_task(&format!(
+                        "printf 'marker=%s\\n' \"${}\"",
+                        process_footprint::MARKER_VARIABLE
+                    )),
+                    cx,
+                )
+            })
+            .await
+            .expect("the server starts the terminal");
+        wait_until(cx, "the marker", |cx| {
+            screen(&terminal, cx).contains(&format!("marker={marker}"))
+        });
+    }
+
+    /// Not a test: the process `test_a_remote_terminal_is_measured_by_the_server`
+    /// runs in its terminal. This test binary rather than `sleep`, because
+    /// macOS hides the environment of the binaries it ships and kills a copy
+    /// of one started from a shell.
+    #[test]
+    #[ignore]
+    fn idle_in_a_remote_terminal() {
+        std::thread::sleep(Duration::from_secs(30));
+    }
+
+    /// The whole path: a process in a remote terminal is measured by the
+    /// server and its cost reaches the client.
+    #[gpui::test]
+    async fn test_a_remote_terminal_is_measured_by_the_server(
+        cx: &mut TestAppContext,
+        server_cx: &mut TestAppContext,
+    ) {
+        let (_drained, project, _headless) = setup(cx, server_cx).await;
+        let test_binary = std::env::current_exe().expect("the test binary has a path");
+        let terminal = project
+            .update(cx, |project, cx| {
+                project.create_terminal_task(
+                    shell_task(&format!(
+                        "printf 'started\\n'; exec '{}' --ignored --exact \
+                         remote_editing_tests::terminals::idle_in_a_remote_terminal",
+                        test_binary.display()
+                    )),
+                    cx,
+                )
+            })
+            .await
+            .expect("the server starts the terminal");
+        wait_until(cx, "the terminal to start", |cx| {
+            screen(&terminal, cx).contains("started")
+        });
+
+        // The process may still be between fork and exec, showing its shell's
+        // environment, so it is asked again -- past the server's discovery
+        // cadence each time, so the server looks again -- until it is found.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let footprint = loop {
+            let request = project
+                .read_with(cx, |project, cx| project.request_remote_footprint(cx))
+                .expect("a remote project asks its server");
+            let footprint = request.await.expect("the server answers");
+            if footprint.memory_bytes.is_some() || Instant::now() >= deadline {
+                break footprint;
+            }
+            server_cx.executor().advance_clock(Duration::from_secs(31));
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(
+            footprint.memory_bytes.is_some_and(|bytes| bytes > 0),
+            "{footprint:?}"
+        );
+    }
+
     #[gpui::test]
     async fn test_a_shell_over_the_connection_runs_commands(
         cx: &mut TestAppContext,
