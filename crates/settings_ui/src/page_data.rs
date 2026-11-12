@@ -1056,7 +1056,7 @@ fn appearance_page() -> SettingsPage {
             SettingsPageItem::SectionHeader("Window"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Window Opacity",
-                description: "How opaque the window's backgrounds are, from 0 (see-through) to 1 (solid). On macOS text and icons stay solid. With vibrancy or an image, backgrounds keep 88% of this, as in Tabby.",
+                description: "How opaque the window's backgrounds are, from 0 (see-through) to 1 (solid). On macOS text and icons stay solid. With vibrancy or an image, backgrounds keep 90% of this.",
                 field: Box::new(SettingField {
                     json_path: Some("window_opacity"),
                     pick: |settings_content| settings_content.theme.window_opacity.as_ref(),

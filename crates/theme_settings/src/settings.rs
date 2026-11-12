@@ -34,11 +34,10 @@ pub fn appearance_to_mode(appearance: Appearance) -> ThemeAppearanceMode {
 }
 
 /// How much of `window_opacity` the backgrounds keep while vibrancy or a
-/// background image is on: what Tabby shows. Tabby fades each of its
-/// backgrounds to 40%, but they are stacked several deep, so the window ends up
-/// about 88% opaque (measured against Zode side by side, same wallpaper). Zode
-/// fades its backgrounds once, as one layer, so it takes the result directly.
-pub const GLASS_OPACITY: f32 = 0.88;
+/// background image is on. Tabby's look measured about 88% opaque (its 40%
+/// backgrounds are stacked several deep), but next to code that read as a
+/// little too heavy a tint, so Zode keeps slightly more of the background.
+pub const GLASS_OPACITY: f32 = 0.90;
 
 /// Customizable settings for the UI and theme system.
 #[derive(Clone, PartialEq, RegisterSetting)]
