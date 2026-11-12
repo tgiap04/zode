@@ -309,9 +309,8 @@ impl BranchPanel {
 
     /// The right-click menu on an agent.
     ///
-    /// Deleting is offered only for a session with no tab open on it. A tab
-    /// may still be writing its transcript, and one that has finished is still
-    /// showing what would be removed out from under it.
+    /// Deleting an open row closes its tab with the session. A tab that has no
+    /// session yet has nothing to delete.
     fn agent_context_menu(
         &self,
         entry: &AgentEntry,
@@ -321,12 +320,16 @@ impl BranchPanel {
         let panel = cx.entity();
         let entry = entry.clone();
 
-        ui::ContextMenu::build(window, cx, move |menu, _window, _cx| {
+        ui::ContextMenu::build(window, cx, move |menu, _window, cx| {
             let open = panel.clone();
             let open_entry = entry.clone();
             let delete = panel.clone();
             let delete_entry = entry.clone();
             let has_tab = entry.is_open();
+            let can_delete = session_to_delete(&entry, cx).is_some();
+            let skip_prompts = skip_prompts_label(&entry, cx);
+            let unprompted = panel.clone();
+            let unprompted_entry = entry.clone();
 
             menu.item(
                 ui::ContextMenuEntry::new(if has_tab { "Go to Tab" } else { "Resume" })
@@ -340,13 +343,25 @@ impl BranchPanel {
                         open.update(cx, |panel, cx| panel.open_agent(&open_entry, window, cx));
                     }),
             )
+            .when_some(skip_prompts, |menu, label| {
+                menu.item(
+                    ui::ContextMenuEntry::new(label)
+                        .icon(IconName::PlayFilled)
+                        .icon_position(ui::IconPosition::Start)
+                        .handler(move |window, cx| {
+                            unprompted.update(cx, |panel, cx| {
+                                panel.run_agent_without_prompts(&unprompted_entry, window, cx)
+                            });
+                        }),
+                )
+            })
             .separator()
             .item(
                 ui::ContextMenuEntry::new("Delete Session\u{2026}")
                     .icon(IconName::Trash)
                     .icon_position(ui::IconPosition::Start)
                     .icon_color(Color::Error)
-                    .disabled(has_tab)
+                    .disabled(!can_delete)
                     .handler(move |window, cx| {
                         delete.update(cx, |panel, cx| {
                             panel.delete_agent_session(&delete_entry, window, cx)
@@ -367,7 +382,7 @@ impl BranchPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let AgentEntry::Past { id, .. } = entry else {
+        let Some(id) = session_to_delete(entry, cx) else {
             return;
         };
         let (Some(workspace), Some(store)) = (self.workspace.upgrade(), self.session_store.clone())
@@ -379,13 +394,54 @@ impl BranchPanel {
         // host delete it. A collaboration guest's rows are this machine's
         // sessions that merely share a path, and `delete_session` refuses them.
         let index = store.read(cx).index().clone();
-        let Some(session) = index.find(id) else {
+        let Some(session) = index.find(&id) else {
             return;
         };
 
         // The store is shared, so removing the entry there is what refreshes
         // this panel -- no callback needed.
         agent_ui::delete_session(&workspace, session, window, cx);
+    }
+
+    /// Restarts an open tab, or resumes a past session, without permission
+    /// prompts -- for that one tab, as the tab menu and history panel do.
+    pub(crate) fn run_agent_without_prompts(
+        &mut self,
+        entry: &AgentEntry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match entry {
+            AgentEntry::Open { view, .. } => {
+                let view = view.clone();
+                // Deferred for the reason `open_agent` defers: the panel is
+                // leased here, and starting the agent reaches the workspace.
+                window.defer(cx, move |window, cx| {
+                    if let Some(view) = view.upgrade() {
+                        view.update(cx, |view, cx| view.restart_without_prompts(window, cx));
+                    }
+                });
+            }
+            AgentEntry::Past { id, .. } => {
+                let (Some(workspace), Some(store)) =
+                    (self.workspace.upgrade(), self.session_store.clone())
+                else {
+                    return;
+                };
+                let index = store.read(cx).index().clone();
+                let Some(session) = index.find(id) else {
+                    return;
+                };
+                agent_ui::resume_session_with_prompts(
+                    &workspace,
+                    session,
+                    agent_sessions::Fork::Continue,
+                    zed_actions::agent::PermissionPrompts::SkipOnce,
+                    window,
+                    cx,
+                );
+            }
+        }
     }
 
     /// Jumps to a running agent's tab, or brings a finished session back.
@@ -504,10 +560,79 @@ pub(crate) fn compact_age(at: SystemTime) -> String {
     }
 }
 
+/// The session a row's delete takes: a past one's, or the one an open tab
+/// has, which the delete closes along with it.
+fn session_to_delete(entry: &AgentEntry, cx: &App) -> Option<std::sync::Arc<str>> {
+    match entry {
+        AgentEntry::Past { id, .. } => Some(id.clone()),
+        AgentEntry::Open { view, .. } => view
+            .upgrade()?
+            .read(cx)
+            .session_id()
+            .map(std::sync::Arc::from),
+    }
+}
+
+/// What an agent row's menu offers for running without permission prompts.
+///
+/// The same two moves the agent tab and the history panel offer, and decided
+/// by the same rules: an open tab restarts on its session if `AgentView` says it
+/// can, a past session resumes if its agent has a bypass flag at all.
+fn skip_prompts_label(entry: &AgentEntry, cx: &App) -> Option<&'static str> {
+    match entry {
+        AgentEntry::Open { view, .. } => view
+            .upgrade()
+            .filter(|view| view.read(cx).offers_restart_without_prompts())
+            .map(|_| "Restart Without Permission Prompts"),
+        AgentEntry::Past { agent, .. } => {
+            agent_ui::agent_can_skip_prompts(agent).then_some("Resume Without Permission Prompts")
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{SessionBadge, compact_age, session_badges};
-    use crate::branch_panel::tree::AgentActivity;
+    use super::{SessionBadge, compact_age, session_badges, skip_prompts_label};
+    use crate::branch_panel::tree::{AgentActivity, AgentEntry};
+
+    fn past(agent: &'static str) -> AgentEntry {
+        AgentEntry::Past {
+            label: "Fix the parser".into(),
+            agent: agent.into(),
+            id: "0b1c".into(),
+            updated_at: std::time::SystemTime::UNIX_EPOCH,
+        }
+    }
+
+    /// A past session of an agent with a bypass flag can be resumed without
+    /// prompts; one of an agent without a flag is not offered it, since its
+    /// only outcome would be a refusal.
+    #[gpui::test]
+    fn a_past_session_offers_resuming_without_prompts_only_with_a_flag(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            assert_eq!(
+                skip_prompts_label(&past(project::CLAUDE_CODE_AGENT_ID), cx),
+                Some("Resume Without Permission Prompts")
+            );
+            assert_eq!(
+                skip_prompts_label(&past("some-agent-nobody-mapped"), cx),
+                None
+            );
+        });
+    }
+
+    /// A row whose tab has closed since it was drawn offers nothing to restart.
+    #[gpui::test]
+    fn an_open_row_whose_tab_is_gone_offers_no_restart(cx: &mut gpui::TestAppContext) {
+        let entry = AgentEntry::Open {
+            label: "Claude Code".into(),
+            agent: project::CLAUDE_CODE_AGENT_ID.into(),
+            view: gpui::WeakEntity::new_invalid(),
+        };
+        cx.update(|cx| assert_eq!(skip_prompts_label(&entry, cx), None));
+    }
 
     /// A checkout holds many sessions, and only some are open or running. The
     /// two are separate facts: a tab can stay open after its CLI has exited,

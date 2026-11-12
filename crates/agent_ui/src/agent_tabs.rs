@@ -15,7 +15,7 @@ use gpui::{
 };
 use project::AgentId;
 use std::sync::Arc;
-use workspace::{MultiWorkspace, Workspace};
+use workspace::{MultiWorkspace, SaveIntent, Workspace};
 
 #[derive(Default)]
 struct AgentTabs {
@@ -102,6 +102,90 @@ pub(crate) fn open_sessions(cx: &App) -> HashSet<(AgentId, SharedString)> {
             Some((view.agent_id().clone(), SharedString::from(id.to_string())))
         })
         .collect()
+}
+
+/// Closes every tab that has one of `sessions` open, in whichever window holds
+/// it.
+///
+/// Deferred because a delete asks from inside its window's update, and the tab
+/// may sit in that same window, which cannot be entered again until the update
+/// ends.
+pub(crate) fn close_tabs(sessions: &HashSet<(AgentId, SharedString)>, cx: &mut App) {
+    let views = live(cx)
+        .into_iter()
+        .filter(|view| {
+            let view = view.read(cx);
+            view.session_id().is_some_and(|id| {
+                sessions.contains(&(view.agent_id().clone(), SharedString::from(id.to_string())))
+            })
+        })
+        .collect::<Vec<_>>();
+    if views.is_empty() {
+        return;
+    }
+    cx.defer(move |cx| {
+        for view in views {
+            close_tab(&view, cx);
+        }
+    });
+}
+
+fn close_tab(view: &Entity<AgentView>, cx: &mut App) {
+    let Some(workspace) = view.read(cx).workspace().upgrade() else {
+        return;
+    };
+    let item_id = view.entity_id();
+    for handle in cx.windows() {
+        let workspace = workspace.clone();
+        // Either update fails for a window that is closing, which cannot hold
+        // the tab.
+        let found = if let Some(handle) = handle.downcast::<MultiWorkspace>() {
+            handle
+                .update(cx, |multi, window, cx| {
+                    let holds = multi.workspaces().any(|candidate| candidate == &workspace);
+                    if holds {
+                        let panes = workspace.read(cx).panes().to_vec();
+                        close_item_in(panes, item_id, window, cx);
+                    }
+                    holds
+                })
+                .unwrap_or(false)
+        } else if let Some(handle) = handle.downcast::<Workspace>() {
+            handle
+                .update(cx, |root, window, cx| {
+                    // The root is the entity being updated, so its panes are
+                    // read from it rather than through its handle.
+                    let holds = cx.entity() == workspace;
+                    if holds {
+                        close_item_in(root.panes().to_vec(), item_id, window, cx);
+                    }
+                    holds
+                })
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        if found {
+            return;
+        }
+    }
+}
+
+fn close_item_in(
+    panes: Vec<Entity<workspace::Pane>>,
+    item_id: EntityId,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    for pane in panes {
+        let holds_tab = pane.read(cx).items().any(|item| item.item_id() == item_id);
+        if holds_tab {
+            pane.update(cx, |pane, cx| {
+                pane.close_item_by_id(item_id, SaveIntent::Skip, window, cx)
+            })
+            .detach_and_log_err(cx);
+        }
+    }
 }
 
 /// The tab that has `session_id` open under `agent`, if any.

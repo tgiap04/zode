@@ -23,7 +23,8 @@ pub use actions::*;
 pub use agent_roster::{AgentMark, agent_color, agent_icon, agent_marks, agent_working_color};
 pub use agent_tabs::{all_agent_tabs, go_to_tab, observe_tabs};
 pub use agent_view::{
-    AgentView, AgentViewEvent, RESPONDING_WINDOW, RESPONDING_WRITES, SessionOrigin, responding_at,
+    AgentView, AgentViewEvent, RESPONDING_WINDOW, RESPONDING_WRITES, SessionOrigin,
+    agent_can_skip_prompts, responding_at,
 };
 // Only another crate's tests build a tab of a chosen intent.
 #[cfg(any(test, feature = "test-support"))]
@@ -32,7 +33,7 @@ pub use permission_bypass::{BypassHost, PermissionBypassStore};
 pub use session_history::{
     AgentHistoryPanel, DeleteAll, DeleteTarget, PROJECT_SCOPE, ResumeRefusal, delete_all_detail,
     delete_session, execute_session_deletion, plan_delete_all, resume_refusal, resume_refusal_on,
-    resume_session, sessions_in_project,
+    resume_session, resume_session_with_prompts, sessions_in_project,
 };
 pub use session_names::SessionNames;
 #[cfg(any(test, feature = "test-support"))]

@@ -2364,3 +2364,107 @@ async fn a_remote_project_s_panel_is_built_while_its_workspace_is_updating(
         assert!(panel.remote, "the panel of a remote project reads its host");
     });
 }
+
+fn open_item_ids(
+    workspace: &Entity<workspace::Workspace>,
+    cx: &mut VisualTestContext,
+) -> Vec<gpui::EntityId> {
+    workspace.read_with(cx, |workspace, cx| {
+        workspace.items(cx).map(|item| item.item_id()).collect()
+    })
+}
+
+fn session_by_id(
+    panel: &Entity<AgentHistoryPanel>,
+    id: &str,
+    cx: &mut VisualTestContext,
+) -> SessionSummary {
+    panel.read_with(cx, |panel, cx| {
+        panel
+            .sessions(cx)
+            .iter()
+            .find(|session| session.id.as_ref() == id)
+            .expect("the session is in the index")
+            .clone()
+    })
+}
+
+/// A deleted session's tab is closed with it: left open, its agent goes on
+/// writing to a transcript that has been moved, and the row comes back.
+#[gpui::test]
+async fn deleting_a_session_closes_its_tab(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let (panel, mut cx) =
+        panel_with(&["/root"], vec![open_session("one")], Vec::new(), fs, cx).await;
+    let workspace = panel_workspace(&panel, &mut cx);
+    let target = tab_in_workspace(Some("one"), &workspace, &mut cx);
+    let neighbour = tab_in_workspace(None, &workspace, &mut cx);
+    cx.run_until_parked();
+
+    let session = session_by_id(&panel, "one", &mut cx);
+    panel.update_in(&mut cx, |panel, window, cx| {
+        panel.delete(&session, window, cx)
+    });
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Move to Trash");
+    cx.run_until_parked();
+
+    let open = open_item_ids(&workspace, &mut cx);
+    assert!(
+        !open.contains(&target.entity_id()),
+        "the deleted session's tab must be closed"
+    );
+    assert!(
+        open.contains(&neighbour.entity_id()),
+        "a tab for another session must be left alone"
+    );
+}
+
+#[gpui::test]
+async fn cancelling_a_delete_keeps_the_tab(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    let (panel, mut cx) =
+        panel_with(&["/root"], vec![open_session("one")], Vec::new(), fs, cx).await;
+    let workspace = panel_workspace(&panel, &mut cx);
+    let target = tab_in_workspace(Some("one"), &workspace, &mut cx);
+    cx.run_until_parked();
+
+    let session = session_by_id(&panel, "one", &mut cx);
+    panel.update_in(&mut cx, |panel, window, cx| {
+        panel.delete(&session, window, cx)
+    });
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+
+    assert!(open_item_ids(&workspace, &mut cx).contains(&target.entity_id()));
+}
+
+#[gpui::test]
+async fn deleting_all_closes_the_tabs_of_the_sessions_it_takes(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root", json!({ "a.txt": "" })).await;
+    fs.insert_tree("/logs", json!({ "one.jsonl": "" })).await;
+    let (panel, mut cx) = panel_with(
+        &["/root"],
+        vec![open_session("one")],
+        vec![("one", vec![PathBuf::from("/logs/one.jsonl")])],
+        fs,
+        cx,
+    )
+    .await;
+    let workspace = panel_workspace(&panel, &mut cx);
+    let target = tab_in_workspace(Some("one"), &workspace, &mut cx);
+    repaint(&mut cx);
+
+    click_delete_all(&mut cx);
+    cx.simulate_prompt_answer("Move to Trash");
+    cx.run_until_parked();
+
+    assert!(!open_item_ids(&workspace, &mut cx).contains(&target.entity_id()));
+}
