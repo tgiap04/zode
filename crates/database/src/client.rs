@@ -1,6 +1,6 @@
 use crate::protocol::{
     ErrorCode, InitializeResult, Method, PROTOCOL_VERSION, Request, RequestId, Response,
-    ResponseError, version_is_compatible,
+    ResponseError, UpdateRows, UpdateRowsParams, UpdateRowsResult, version_is_compatible,
 };
 use crate::transport::Transport;
 use anyhow::{Context as _, Result};
@@ -165,6 +165,15 @@ impl DriverClient {
             .with_context(|| format!("`{}` answered with neither result nor error", M::NAME))?;
         serde_json::from_value(result)
             .with_context(|| format!("decoding the answer to `{}`", M::NAME))
+    }
+
+    /// Writes a batch of row edits in one transaction on the driver's side.
+    ///
+    /// A driver's refusal arrives as a [`DriverError`] whose code says why:
+    /// `conflict` when a row had moved on, `invalid_value` when the engine
+    /// rejected a value, `unsupported` when the driver cannot write at all.
+    pub async fn update_rows(&self, params: UpdateRowsParams) -> Result<UpdateRowsResult> {
+        self.request::<UpdateRows>(params).await
     }
 
     /// The handshake, and the only place a version is checked.

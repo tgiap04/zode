@@ -15,7 +15,7 @@
 //! needs no server this harness would be skipped in every run and could rot
 //! unnoticed.
 
-use crate::protocol::{Cell, ErrorCode, PROTOCOL_VERSION, ResultSet};
+use crate::protocol::{Cell, EditValue, ErrorCode, PROTOCOL_VERSION, ResultSet};
 use serde_json::{Value, json};
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::path::Path;
@@ -161,6 +161,8 @@ pub fn shared_suite(executable: &Path, url: &str, dialect: Dialect) {
         "a connected driver has at least the schema it is pointed at"
     );
 
+    check_update_rows_claim(&mut driver, &initialized, &connection_id);
+
     // The guarantee the whole design rests on: the engine refuses, not Zode.
     let refused = driver.call(
         "query",
@@ -225,6 +227,169 @@ pub fn shared_suite(executable: &Path, url: &str, dialect: Dialect) {
     );
 
     driver.expect("disconnect", json!({"connection_id": connection_id}));
+}
+
+/// What a driver may and may not say about `update_rows`, whatever its data.
+///
+/// A driver that claims `row_updates` takes an empty batch as a no-op and
+/// refuses a stray connection; one that does not claim it answers
+/// `unsupported`. Either way it is the only write: the refusal of a write
+/// through `query` is checked right after this, on the same connection.
+fn check_update_rows_claim(driver: &mut DriverProcess, initialized: &Value, connection_id: &Value) {
+    let claims = initialized["capabilities"]["row_updates"]
+        .as_bool()
+        .unwrap_or(false);
+    let batch = |connection: &Value, changes: Value| json!({"connection_id": connection, "schema": "main", "table": "none", "changes": changes});
+
+    let empty = driver.call("update_rows", batch(connection_id, json!([])));
+    let stray = driver.call(
+        "update_rows",
+        batch(&json!("no-such-connection"), json!([])),
+    );
+    if claims {
+        let result = empty.expect("an empty batch is accepted by a driver that updates rows");
+        assert_eq!(result["updated"], 0, "an empty batch changes nothing");
+        assert!(
+            matches!(stray, Err((ErrorCode::UnknownConnection, _))),
+            "`update_rows` on an unknown connection must say so"
+        );
+        let empty_change = json!({"key": [], "set": []});
+        let oversized = driver.call(
+            "update_rows",
+            batch(
+                connection_id,
+                json!(vec![
+                    empty_change;
+                    crate::protocol::MAX_CHANGES_PER_CALL + 1
+                ]),
+            ),
+        );
+        assert!(
+            matches!(oversized, Err((ErrorCode::InvalidValue, _))),
+            "a batch past `MAX_CHANGES_PER_CALL` must be refused as `invalid_value`: {oversized:?}"
+        );
+    } else {
+        assert!(
+            matches!(empty, Err((ErrorCode::Unsupported, _))),
+            "a driver that does not claim `row_updates` must answer `unsupported`"
+        );
+    }
+}
+
+/// A table the driver may write to, and a value it will not take.
+///
+/// Separate from [`Dialect`] because a writable fixture is a bigger ask than a
+/// read-only one, and a driver without it still passes [`shared_suite`].
+pub struct RowUpdateFixture {
+    pub schema: &'static str,
+    pub table: &'static str,
+    /// A column that identifies one row, and the value of one existing row.
+    pub key_column: &'static str,
+    pub key_value: &'static str,
+    /// A key that matches no row.
+    pub missing_key_value: &'static str,
+    /// The column that gets edited, and a value it accepts that it does not
+    /// already hold.
+    pub set_column: &'static str,
+    pub new_value: &'static str,
+    /// A value the engine rejects for `set_column`.
+    pub bad_value: &'static str,
+    /// Reads `set_column` of the keyed row back: one column, one row.
+    pub read_back: &'static str,
+}
+
+/// Best effort, for a driver that claims `row_updates` and has a writable
+/// database to try it on. Puts back what it changed.
+pub fn row_update_suite(executable: &Path, url: &str, fixture: RowUpdateFixture) {
+    let mut driver = DriverProcess::start(executable);
+    let initialized = driver.expect("initialize", json!({}));
+    assert_eq!(
+        initialized["capabilities"]["row_updates"], true,
+        "this suite is for drivers that claim `row_updates`"
+    );
+    let connected = driver.expect("connect", json!({"url": url}));
+    let connection_id = connected["connection_id"].clone();
+
+    let key = json!([{"column": fixture.key_column, "value": text(fixture.key_value)}]);
+    let missing = json!([{"column": fixture.key_column, "value": text(fixture.missing_key_value)}]);
+    let set = |value: Value| json!([{"column": fixture.set_column, "value": value}]);
+    let update = |driver: &mut DriverProcess, changes: Value| {
+        driver.call(
+            "update_rows",
+            json!({
+                "connection_id": connection_id,
+                "schema": fixture.schema,
+                "table": fixture.table,
+                "changes": changes,
+            }),
+        )
+    };
+    let read = |driver: &mut DriverProcess| {
+        let page = query(driver, &connection_id, fixture.read_back, 10, 0);
+        assert_eq!(
+            page.rows.len(),
+            1,
+            "the read-back must find exactly one row"
+        );
+        page.rows[0][0].clone()
+    };
+
+    let original = read(&mut driver);
+    let restore = EditValue::from_cell(&original)
+        .and_then(|value| serde_json::to_value(value).ok())
+        .expect("the fixture column must hold something that can be written back");
+
+    let applied = update(
+        &mut driver,
+        json!([{"key": key, "set": set(text(fixture.new_value))}]),
+    )
+    .expect("a valid edit is applied");
+    assert_eq!(applied["updated"], 1);
+    assert_ne!(read(&mut driver), original, "the edit must reach the row");
+
+    // All or nothing: the first change is good, the second finds no row, and
+    // the first must not survive.
+    let before = read(&mut driver);
+    let partial = update(
+        &mut driver,
+        json!([
+            {"key": key, "set": set(json!({"kind": "null"}))},
+            {"key": missing, "set": set(text(fixture.new_value))},
+        ]),
+    );
+    assert!(
+        matches!(partial, Err((ErrorCode::Conflict, _))),
+        "a change matching no row must be a `conflict`: {partial:?}"
+    );
+    assert_eq!(read(&mut driver), before, "a conflict rolls the batch back");
+
+    let rejected = update(
+        &mut driver,
+        json!([{"key": key, "set": set(text(fixture.bad_value))}]),
+    );
+    assert!(
+        matches!(rejected, Err((ErrorCode::InvalidValue, _))),
+        "a value the engine rejects must be `invalid_value`: {rejected:?}"
+    );
+    assert_eq!(
+        read(&mut driver),
+        before,
+        "a rejected value changes nothing"
+    );
+
+    update(&mut driver, json!([{"key": key, "set": set(restore)}]))
+        .expect("the original goes back");
+    assert_eq!(
+        read(&mut driver),
+        original,
+        "the fixture is left as it was found"
+    );
+
+    driver.expect("disconnect", json!({"connection_id": connection_id}));
+}
+
+fn text(value: &str) -> Value {
+    json!({"kind": "text", "value": value})
 }
 
 fn query(

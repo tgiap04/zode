@@ -33,8 +33,13 @@ pub fn cell(value: &Bson) -> Cell {
         Bson::Decimal128(value) => Cell::Number {
             value: value.to_string(),
         },
+        // RFC 3339, not `Display`: the latter prints `2026-11-06 7:20:07.0
+        // +00:00:00`, which a person editing the cell could not type back and
+        // `update_rows` would refuse.
         Bson::DateTime(value) => Cell::Timestamp {
-            value: value.to_string(),
+            value: value
+                .try_to_rfc3339_string()
+                .unwrap_or_else(|_| value.to_string()),
         },
         Bson::Timestamp(value) => Cell::Timestamp {
             value: format!("{}:{}", value.time, value.increment),
@@ -212,6 +217,21 @@ mod tests {
             Cell::Text {
                 value: "65a1f2c3d4e5f60718293a4b".to_string()
             }
+        );
+    }
+
+    /// What a grid shows for a date is what editing it has to accept back.
+    #[test]
+    fn a_date_arrives_in_the_form_an_edit_can_read_back() {
+        let date = mongodb::bson::DateTime::parse_rfc3339_str("2026-11-06T07:20:07.250Z")
+            .expect("fixture");
+        let Cell::Timestamp { value } = cell(&Bson::DateTime(date)) else {
+            panic!("a date must arrive as a timestamp");
+        };
+        assert_eq!(value, "2026-11-06T07:20:07.25Z");
+        assert_eq!(
+            crate::edit_values::convert(&value, Some(&Bson::DateTime(date))),
+            Ok(Bson::DateTime(date))
         );
     }
 

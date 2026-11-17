@@ -8,8 +8,8 @@ use crate::client::{DEFAULT_REQUEST_TIMEOUT, DriverClient, DriverError};
 use crate::fake_driver::{FakeBehaviour, FakeDriver};
 use crate::protocol::{
     Cancel, CancelParams, Cell, Connect, ConnectParams, ConnectionId, ConnectionRef, DescribeTable,
-    DescribeTableParams, Disconnect, ErrorCode, ListSchemas, ListTables, ListTablesParams, Query,
-    QueryParams,
+    DescribeTableParams, Disconnect, EditValue, ErrorCode, ListSchemas, ListTables,
+    ListTablesParams, Query, QueryParams, RowChange, UpdateRowsParams,
 };
 use gpui::TestAppContext;
 use std::sync::Arc;
@@ -26,7 +26,7 @@ fn connection() -> ConnectionRef {
     }
 }
 
-/// All eight, over one client. A driver missing any of them is a driver whose
+/// Every one but `update_rows` (below), over one client. A driver missing any of them is a driver whose
 /// gap only shows up on the click that needs it.
 #[gpui::test]
 async fn every_method_makes_the_round_trip(cx: &mut TestAppContext) {
@@ -244,5 +244,152 @@ async fn the_client_asks_for_exactly_what_it_was_told_to(cx: &mut TestAppContext
         calls.lock().as_slice(),
         ["initialize", "list_schemas"],
         "the client must make no call of its own accord"
+    );
+}
+
+fn email_change(index: u64, email: EditValue) -> RowChange {
+    RowChange {
+        key: vec![crate::protocol::ColumnValue {
+            column: "id".into(),
+            value: EditValue::Text {
+                value: (index + 1).to_string(),
+            },
+        }],
+        set: vec![crate::protocol::ColumnValue {
+            column: "email".into(),
+            value: email,
+        }],
+    }
+}
+
+fn update_params(changes: Vec<RowChange>) -> UpdateRowsParams {
+    UpdateRowsParams {
+        connection_id: ConnectionId("fake-1".into()),
+        schema: "public".into(),
+        table: "users".into(),
+        changes,
+    }
+}
+
+fn driver_error_of(result: anyhow::Result<crate::protocol::UpdateRowsResult>) -> DriverError {
+    result
+        .expect_err("the driver must refuse")
+        .downcast_ref::<DriverError>()
+        .expect("a driver's own refusal must survive as one")
+        .clone()
+}
+
+/// What the driver is sent is what was asked for -- a null edit and an empty
+/// string edit arrive as different things.
+#[gpui::test]
+async fn update_rows_carries_every_change_to_the_driver(cx: &mut TestAppContext) {
+    let driver = Arc::new(FakeDriver::new(FakeBehaviour::Well));
+    let updates = driver.updates.clone();
+    let client = cx.update(|cx| DriverClient::new(driver, DEFAULT_REQUEST_TIMEOUT, &cx.to_async()));
+
+    let initialize = client.initialize().await.unwrap();
+    assert!(initialize.capabilities.row_updates);
+
+    let changes = vec![
+        email_change(0, EditValue::Null),
+        email_change(
+            1,
+            EditValue::Text {
+                value: String::new(),
+            },
+        ),
+    ];
+    let result = client
+        .update_rows(update_params(changes.clone()))
+        .await
+        .unwrap();
+    assert_eq!(result.updated, 2);
+
+    let sent = updates.lock();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].changes, changes);
+    assert_eq!(sent[0].table, "users");
+}
+
+#[gpui::test]
+async fn an_empty_batch_updates_nothing(cx: &mut TestAppContext) {
+    let client = client(cx, FakeBehaviour::Well);
+    let result = client.update_rows(update_params(Vec::new())).await.unwrap();
+    assert_eq!(result.updated, 0);
+}
+
+#[gpui::test]
+async fn a_conflict_keeps_its_code_and_names_the_change(cx: &mut TestAppContext) {
+    let client = client(cx, FakeBehaviour::UpdateConflicts { change: 1 });
+    let error = driver_error_of(
+        client
+            .update_rows(update_params(vec![
+                email_change(0, EditValue::Null),
+                email_change(1, EditValue::Null),
+            ]))
+            .await,
+    );
+    assert_eq!(error.code(), ErrorCode::Conflict);
+    assert_eq!(error.0.data.and_then(|data| data.change), Some(1));
+    assert!(error.0.detail.unwrap_or_default().contains("row 1"));
+}
+
+#[gpui::test]
+async fn a_rejected_value_names_the_column(cx: &mut TestAppContext) {
+    let client = client(cx, FakeBehaviour::UpdateRejectsValue { change: 0 });
+    let error = driver_error_of(
+        client
+            .update_rows(update_params(vec![email_change(0, EditValue::Null)]))
+            .await,
+    );
+    assert_eq!(error.code(), ErrorCode::InvalidValue);
+    assert_eq!(
+        error.0.data.and_then(|data| data.column).as_deref(),
+        Some("email")
+    );
+}
+
+/// New UI, old driver: it reports no capability and answers `unsupported`.
+#[gpui::test]
+async fn an_old_driver_answers_unsupported(cx: &mut TestAppContext) {
+    let client = client(cx, FakeBehaviour::NoRowUpdates);
+    assert!(!client.initialize().await.unwrap().capabilities.row_updates);
+    let error = driver_error_of(
+        client
+            .update_rows(update_params(vec![email_change(0, EditValue::Null)]))
+            .await,
+    );
+    assert_eq!(error.code(), ErrorCode::Unsupported);
+}
+
+#[gpui::test]
+async fn a_read_only_connection_refuses_the_edit_as_read_only(cx: &mut TestAppContext) {
+    let client = client(cx, FakeBehaviour::ReadOnly);
+    let error = driver_error_of(
+        client
+            .update_rows(update_params(vec![email_change(0, EditValue::Null)]))
+            .await,
+    );
+    assert_eq!(error.code(), ErrorCode::ReadOnly);
+}
+
+/// The ground rule: `query` stays read-only, and `update_rows` did not open a
+/// second way in -- a write statement is still refused as `read_only`.
+#[gpui::test]
+async fn query_still_refuses_writes_next_to_update_rows(cx: &mut TestAppContext) {
+    let client = client(cx, FakeBehaviour::ReadOnly);
+    let error = client
+        .request::<Query>(QueryParams {
+            connection_id: ConnectionId("fake-1".into()),
+            sql: "update users set email = null".into(),
+            limit: 10,
+            offset: 0,
+            request_id: "q".into(),
+        })
+        .await
+        .expect_err("a write through query must be refused");
+    assert_eq!(
+        error.downcast_ref::<DriverError>().map(DriverError::code),
+        Some(ErrorCode::ReadOnly)
     );
 }

@@ -95,6 +95,58 @@ pub struct ResultSet {
     pub elapsed_ms: u64,
 }
 
+/// A value on its way *into* a row.
+///
+/// Text and null only, deliberately narrower than [`Cell`]: what a person typed
+/// is text, and the driver binds it as a parameter and casts it to the column's
+/// real type -- the one layer that knows what `int4` or `timestamptz` accepts.
+/// `Null` is its own variant for the same reason it is one in `Cell`: an empty
+/// string typed into a text column is not a request to store NULL.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EditValue {
+    Null,
+    Text { value: String },
+}
+
+impl EditValue {
+    /// What a cell read from a row says, in the form `update_rows` takes it.
+    ///
+    /// `None` for a binary cell: only its size crossed the wire, so there is
+    /// nothing to send back, and guessing one would address the wrong row.
+    pub fn from_cell(cell: &Cell) -> Option<Self> {
+        match cell {
+            Cell::Null => Some(Self::Null),
+            Cell::Text { value }
+            | Cell::Number { value }
+            | Cell::Json { value }
+            | Cell::Timestamp { value } => Some(Self::Text {
+                value: value.clone(),
+            }),
+            Cell::Bool { value } => Some(Self::Text {
+                value: value.to_string(),
+            }),
+            Cell::Binary { .. } => None,
+        }
+    }
+}
+
+/// One column and the value it holds or is to hold.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColumnValue {
+    pub column: String,
+    pub value: EditValue,
+}
+
+/// One row's edit: which row, and what to set on it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RowChange {
+    /// The row's whole identity -- every column of its key. A driver updates
+    /// exactly the row these match and refuses the batch if that is not one.
+    pub key: Vec<ColumnValue>,
+    pub set: Vec<ColumnValue>,
+}
+
 /// What a driver can do, answered once at `initialize`.
 ///
 /// Read at startup so the UI can hide what an engine cannot do rather than
@@ -146,6 +198,14 @@ pub struct Capabilities {
     /// version -- see `PROTOCOL.md`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_table_template: Option<String>,
+    /// Whether `update_rows` does anything. The only write a driver offers, so
+    /// absent means none: the grid stays read-only and no edit is ever sent to
+    /// a driver that never claimed to take one.
+    ///
+    /// An optional field with a cautious default, so it costs no protocol
+    /// version -- see `PROTOCOL.md`.
+    #[serde(default)]
+    pub row_updates: bool,
 }
 
 /// How to ask for a connection to one engine.

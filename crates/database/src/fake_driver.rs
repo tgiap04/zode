@@ -1,15 +1,15 @@
 //! A driver that never leaves the process.
 //!
 //! Exists so the client, and later the panel, can be tested without a binary on
-//! disk or a database anywhere. It answers the same eight methods over the same
+//! disk or a database anywhere. It answers the same nine methods over the same
 //! `Transport`, so what it exercises is the real encode/decode path -- only the
 //! pipe is shortened.
 
 use crate::protocol::{Capabilities, DescribeTableResult, Empty, PROTOCOL_VERSION};
 use crate::protocol::{
-    Cell, ColumnDef, ConnectResult, ConnectionId, ErrorCode, InitializeResult, ListSchemasResult,
-    ListTablesResult, Request, Response, ResponseError, ResultColumn, ResultSet, SchemaRef,
-    TableKind, TableRef,
+    Cell, ColumnDef, ConnectResult, ConnectionId, ErrorCode, ErrorData, InitializeResult,
+    ListSchemasResult, ListTablesResult, Request, Response, ResponseError, ResultColumn, ResultSet,
+    SchemaRef, TableKind, TableRef, UpdateRowsParams, UpdateRowsResult,
 };
 use crate::transport::Transport;
 use anyhow::Result;
@@ -35,6 +35,14 @@ pub enum FakeBehaviour {
     Dies,
     /// Refuses writes the way a read-only connection does.
     ReadOnly,
+    /// A driver that predates `update_rows`: no capability, and the method
+    /// answers `unsupported`.
+    NoRowUpdates,
+    /// `update_rows` finds the row at this change index gone, the way a row
+    /// deleted since the grid read it would be.
+    UpdateConflicts { change: u64 },
+    /// `update_rows` has the engine reject the first column set by this change.
+    UpdateRejectsValue { change: u64 },
 }
 
 pub struct FakeDriver {
@@ -44,6 +52,9 @@ pub struct FakeDriver {
     /// Every method the fake was asked for, in order, so a test can assert that
     /// a lazily-loading tree really did stop at one level.
     pub calls: Arc<Mutex<Vec<String>>>,
+    /// Every `update_rows` the fake accepted for decoding, so a test can assert
+    /// on exactly what the UI sent -- null against empty string included.
+    pub updates: Arc<Mutex<Vec<UpdateRowsParams>>>,
 }
 
 impl FakeDriver {
@@ -54,6 +65,7 @@ impl FakeDriver {
             outbound,
             behaviour,
             calls: Arc::new(Mutex::new(Vec::new())),
+            updates: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -84,6 +96,7 @@ impl FakeDriver {
                 capabilities: Capabilities {
                     multiple_schemas: true,
                     cancellation: true,
+                    row_updates: self.behaviour != FakeBehaviour::NoRowUpdates,
                     ..Default::default()
                 },
             }),
@@ -127,6 +140,10 @@ impl FakeDriver {
                 ],
             }),
             "query" => json!(fake_result_set(request)),
+            "update_rows" => match self.update_rows(request) {
+                Ok(result) => json!(result),
+                Err(error) => return Response::err(id, error),
+            },
             unknown => {
                 return Response::err(
                     id,
@@ -138,6 +155,62 @@ impl FakeDriver {
             }
         };
         Response::ok(id, result)
+    }
+}
+
+impl FakeDriver {
+    fn update_rows(&self, request: &Request) -> Result<UpdateRowsResult, ResponseError> {
+        let params: UpdateRowsParams =
+            serde_json::from_value(request.params.clone()).map_err(|error| {
+                ResponseError::new(ErrorCode::Internal, "the request's params did not decode")
+                    .with_detail(error.to_string())
+            })?;
+        match self.behaviour {
+            FakeBehaviour::NoRowUpdates => {
+                return Err(ResponseError::new(
+                    ErrorCode::Unsupported,
+                    "the fake driver has no `update_rows`",
+                ));
+            }
+            FakeBehaviour::ReadOnly => {
+                return Err(ResponseError::new(
+                    ErrorCode::ReadOnly,
+                    "this connection is read-only",
+                ));
+            }
+            _ => {}
+        }
+
+        let updated = params.changes.len() as u64;
+        let failing_change = match self.behaviour {
+            FakeBehaviour::UpdateConflicts { change }
+            | FakeBehaviour::UpdateRejectsValue { change } => usize::try_from(change)
+                .ok()
+                .and_then(|index| params.changes.get(index).map(|row| (change, row))),
+            _ => None,
+        };
+        let outcome = match (self.behaviour, failing_change) {
+            (FakeBehaviour::UpdateConflicts { .. }, Some((change, _))) => Err(ResponseError::new(
+                ErrorCode::Conflict,
+                "the row was changed or deleted since it was read",
+            )
+            .with_detail(format!("row {change} matched 0 rows"))
+            .with_data(ErrorData {
+                change: Some(change),
+                column: None,
+            })),
+            (FakeBehaviour::UpdateRejectsValue { .. }, Some((change, row))) => Err(
+                ResponseError::new(ErrorCode::InvalidValue, "the engine rejected the value")
+                    .with_detail("invalid input syntax")
+                    .with_data(ErrorData {
+                        change: Some(change),
+                        column: row.set.first().map(|set| set.column.clone()),
+                    }),
+            ),
+            _ => Ok(UpdateRowsResult { updated }),
+        };
+        self.updates.lock().push(params);
+        outcome
     }
 }
 
