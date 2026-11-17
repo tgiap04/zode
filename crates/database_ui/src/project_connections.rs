@@ -171,7 +171,7 @@ impl DatabasePanel {
             })
             .collect();
 
-        self.tasks.push(cx.spawn_in(window, async move |this, cx| {
+        self.keep_task(cx.spawn_in(window, async move |this, cx| {
             let mut configs = Vec::new();
             for (folder, shared, local) in reads {
                 let Some(shared) = shared.await else {

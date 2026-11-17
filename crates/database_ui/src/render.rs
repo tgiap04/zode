@@ -1,5 +1,6 @@
 use crate::database_panel::DatabasePanel;
 use crate::panel_layout::{DraggedSplit, Split};
+use crate::panel_queries::RunScope;
 use crate::query::QueryState;
 use gpui::{Context, DragMoveEvent, Window, uniform_list};
 use ui::{Tab, Tooltip, prelude::*};
@@ -7,6 +8,7 @@ use zed_actions::database as actions;
 
 impl Render for DatabasePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_result_columns(cx);
         // No surface card here. `Dock::render` draws one -- the inset, the
         // rounding, the border and the background -- around *every* dock,
         // own columns included, and full screen still goes through it
@@ -18,8 +20,16 @@ impl Render for DatabasePanel {
         v_flex()
             .key_context("DatabasePanel")
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &actions::RunQuery, window, cx| {
+                this.run_query(RunScope::Statement, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &actions::RunAll, window, cx| {
+                this.run_query(RunScope::All, window, cx)
+            }))
             .on_action(
-                cx.listener(|this, _: &actions::RunQuery, window, cx| this.run_query(window, cx)),
+                cx.listener(|this, _: &actions::ShowQueryHistory, window, cx| {
+                    this.show_query_history(window, cx)
+                }),
             )
             .on_action(
                 cx.listener(|this, _: &actions::CancelQuery, _window, cx| this.cancel_query(cx)),
@@ -35,8 +45,56 @@ impl Render for DatabasePanel {
                     this.copy_page_as_csv(cx)
                 }),
             )
-            .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| {
-                if !this.close_row_detail(cx) {
+            .on_action(
+                cx.listener(|this, _: &actions::RefreshDatabase, _window, cx| {
+                    this.refresh_active(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::CopySelection, _window, cx| {
+                    this.copy_selection(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::SelectAllRows, _window, cx| {
+                    this.select_all_rows(cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &actions::ToggleFilterBar, window, cx| {
+                    this.toggle_filter_bar(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &menu::SelectNext, _window, cx| this.move_selection(1, cx)),
+            )
+            .on_action(cx.listener(|this, _: &menu::SelectPrevious, _window, cx| {
+                this.move_selection(-1, cx)
+            }))
+            .on_action(cx.listener(|this, _: &actions::SaveChanges, window, cx| {
+                this.request_save(window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &actions::DiscardChanges, window, cx| {
+                    this.discard_changes(window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &actions::EditCell, window, cx| {
+                this.edit_selected_cell(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &actions::SetCellNull, _window, cx| {
+                this.set_selected_cell_null(cx)
+            }))
+            .on_action(cx.listener(|this, _: &menu::Cancel, window, cx| {
+                if this.close_row_detail(cx) {
+                    return;
+                }
+                // Escape on a grid with edits waiting asks before it throws
+                // them away. Only there: in the statement box, the tree or the
+                // filter bar it is about what is being typed in them.
+                if this.results_focus.contains_focused(window, cx) && this.has_unsaved_edits(cx) {
+                    this.confirm_discard(window, cx);
+                } else {
                     cx.propagate();
                 }
             }))
@@ -99,6 +157,7 @@ impl Render for DatabasePanel {
                         })
                 }
             })
+            .children(self.render_history_popover(cx))
             // Deferred and anchored at the pointer, so the menu is not clipped by
             // the tree's own scroll area.
             .children(self.context_menu.as_ref().map(|(menu, position, _)| {
@@ -166,13 +225,44 @@ impl DatabasePanel {
                                 .icon_size(IconSize::Small)
                                 .loading(running)
                                 .tooltip(|_window, cx| {
-                                    Tooltip::for_action("Run", &actions::RunQuery, cx)
+                                    Tooltip::for_action("Run Statement", &actions::RunQuery, cx)
                                 })
                                 .on_click(cx.listener(|this, _event, window, cx| {
-                                    this.run_query(window, cx);
+                                    this.run_query(RunScope::Statement, window, cx);
                                 })),
                         )
                     })
+                    .when(can_run, |element| {
+                        element.child(
+                            IconButton::new("database-history", IconName::Clock)
+                                .icon_size(IconSize::Small)
+                                .toggle_state(self.history_popover.is_some())
+                                .tooltip(|_window, cx| {
+                                    Tooltip::for_action(
+                                        "Query History",
+                                        &actions::ShowQueryHistory,
+                                        cx,
+                                    )
+                                })
+                                .on_click(cx.listener(|this, _event, window, cx| {
+                                    this.show_query_history(window, cx);
+                                })),
+                        )
+                    })
+                    // Called directly rather than dispatched, like Run above:
+                    // a click does not move focus into the panel, and an action
+                    // dispatched from here would never reach its handler.
+                    .child(
+                        IconButton::new("database-refresh", IconName::RotateCw)
+                            .icon_size(IconSize::Small)
+                            .disabled(!can_run)
+                            .tooltip(|_window, cx| {
+                                Tooltip::for_action("Refresh", &actions::RefreshDatabase, cx)
+                            })
+                            .on_click(cx.listener(|this, _event, _window, cx| {
+                                this.refresh_active(cx);
+                            })),
+                    )
                     // The one place left to go: a window of its own. There is
                     // no full-screen button (a tab already fills its pane, and
                     // the pane has its own zoom) and no open-in-a-tab button
@@ -270,11 +360,14 @@ impl DatabasePanel {
                 // where `flex_1` under the row parent above did exactly what the
                 // comment warns of: full width, zero rows, no panic.
                 if self.side_by_side() {
-                    tree.w(self.tree_width)
-                        .h_full()
-                        .flex_none()
-                        .border_r_1()
-                        .border_color(cx.theme().colors().border)
+                    tree.w(crate::panel_layout::fitted_tree_width(
+                        self.tree_width,
+                        self.measured_width,
+                    ))
+                    .h_full()
+                    .flex_none()
+                    .border_r_1()
+                    .border_color(cx.theme().colors().border)
                 } else if self.active.is_some() {
                     tree.h(self.tree_height)
                 } else {
@@ -284,19 +377,44 @@ impl DatabasePanel {
             .min_h_0()
             .debug_selector(|| "database-tree-column".into())
             .child(
-                uniform_list(
-                    "database-tree",
-                    count,
-                    cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
-                        range
-                            .filter_map(|index| {
-                                rows.get(index)
-                                    .map(|row| this.render_row(index, row, window, cx))
-                            })
-                            .collect()
-                    }),
-                )
-                .size_full(),
+                div()
+                    .flex_none()
+                    .w_full()
+                    .p_1()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    // The editor propagates `Cancel` when it has nothing of its
+                    // own to dismiss, so a bubbled one means escape was pressed
+                    // in this box. Cleared only if there is something to clear:
+                    // otherwise escape belongs to whatever is above the panel.
+                    .on_action(
+                        cx.listener(|this, _: &editor::actions::Cancel, window, cx| {
+                            if this.tree_filter.is_active() {
+                                this.tree_filter_input
+                                    .update(cx, |input, cx| input.clear(window, cx));
+                            } else {
+                                cx.propagate();
+                            }
+                        }),
+                    )
+                    .child(self.tree_filter_input.clone()),
+            )
+            .child(
+                div().flex_1().min_h_0().w_full().child(
+                    uniform_list(
+                        "database-tree",
+                        count,
+                        cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
+                            range
+                                .filter_map(|index| {
+                                    rows.get(index)
+                                        .map(|row| this.render_row(index, row, window, cx))
+                                })
+                                .collect()
+                        }),
+                    )
+                    .size_full(),
+                ),
             )
     }
 
@@ -328,7 +446,7 @@ impl DatabasePanel {
     ) -> impl IntoElement {
         v_flex()
             .flex_1()
-            .min_h_0()
+            .min_h(crate::panel_layout::MIN_RESULTS_HEIGHT)
             .w_full()
             .when(divider_above, |element| {
                 element

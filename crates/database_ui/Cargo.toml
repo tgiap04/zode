@@ -13,22 +13,28 @@ path = "src/database_ui.rs"
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 credentials_provider.workspace = true
 zed_credentials_provider.workspace = true
 database = { workspace = true, features = ["client"] }
 collections.workspace = true
+db.workspace = true
 editor.workspace = true
 extension.workspace = true
+fs.workspace = true
 futures.workspace = true
 multi_buffer.workspace = true
 gpui.workspace = true
 language.workspace = true
 log.workspace = true
 menu.workspace = true
+picker.workspace = true
 project.workspace = true
 roxmltree.workspace = true
 remote.workspace = true
 rpc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 settings.workspace = true
 ui.workspace = true
 ui_input.workspace = true
@@ -41,6 +47,7 @@ zode_team_vault.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+db = { workspace = true, features = ["test-support"] }
 paths.workspace = true
 # Deliberately minimal, and matching what `sidebar` takes: pulling `sidebar`
 # itself in here to draw the rail would drag `agent_ui` and a feature
@@ -53,7 +60,6 @@ http_client = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 fs = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
-serde_json.workspace = true
 settings = { workspace = true, features = ["test-support"] }
 workspace = { workspace = true, features = ["test-support"] }
 zode_account = { workspace = true, features = ["test-support"] }

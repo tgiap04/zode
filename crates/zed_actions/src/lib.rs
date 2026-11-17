@@ -901,9 +901,15 @@ pub mod database {
             OpenInFloatingWindow,
             /// Closes the connection under the cursor, stopping its driver.
             Disconnect,
+            /// Runs the selected SQL, or the statement the cursor is in when
+            /// nothing is selected.
+            RunQuery,
             /// Runs the selected SQL, or the whole scratch buffer when nothing
             /// is selected.
-            RunQuery,
+            RunAll,
+            /// Lists the statements this connection ran, to insert or run
+            /// again.
+            ShowQueryHistory,
             /// Stops the query that is running.
             CancelQuery,
             /// Shows the next page of results.
@@ -912,6 +918,31 @@ pub mod database {
             PreviousPage,
             /// Copies the page on screen as CSV.
             CopyResultsAsCsv,
+            /// Reads the active connection's schemas, tables and open table
+            /// again, keeping what is expanded.
+            RefreshDatabase,
+            /// Copies the selected result rows as tab-separated text, or the
+            /// one selected cell as its value.
+            CopySelection,
+            /// Selects every row of the result page.
+            SelectAllRows,
+            /// Shows or hides the filter bar over a table opened from the tree.
+            ToggleFilterBar,
+            /// Writes the edited cells of the table on screen to the database,
+            /// after the connection's safety level has had its say.
+            SaveChanges,
+            /// Throws away the edited cells that have not been saved.
+            DiscardChanges,
+            /// Edits the value of the selected cell.
+            EditCell,
+            /// Sets the selected cell to NULL.
+            SetCellNull,
+            /// Keeps what was typed in the cell being edited and moves on to
+            /// the next cell that can be edited.
+            EditNextCell,
+            /// Keeps what was typed in the cell being edited and moves back to
+            /// the previous cell that can be edited.
+            EditPreviousCell,
         ]
     );
 }

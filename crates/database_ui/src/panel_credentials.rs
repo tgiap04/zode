@@ -5,8 +5,10 @@
 
 use crate::database_panel::DatabasePanel;
 use crate::password_prompt::PasswordPrompt;
-use gpui::{DismissEvent, Focusable as _, Pixels, Point, Window};
-use ui::{ContextMenu, prelude::*};
+use crate::safe_mode::SafetyLevel;
+use crate::tree_menus::icon_entry;
+use gpui::{Pixels, Point, Window};
+use ui::{IconPosition, prelude::*};
 
 impl DatabasePanel {
     /// Opens the menu for a connection row.
@@ -31,16 +33,36 @@ impl DatabasePanel {
         // shared again from here.
         let personal = node.is_personal();
         let shareable = personal && crate::team_connections::can_share(cx);
+        let safety = self.safety_of(index, cx);
         let panel = cx.weak_entity();
 
-        let menu = ContextMenu::build(window, cx, move |menu, _window, _cx| {
-            let pin_label = if pinned {
-                "Unpin from This Project"
+        self.open_context_menu(position, window, cx, move |menu, _window, _cx| {
+            let (pin_label, pin_icon) = if pinned {
+                ("Unpin from This Project", IconName::Unpin)
             } else {
-                "Pin to This Project"
+                ("Pin to This Project", IconName::Pin)
             };
-            menu.when(personal, |menu| {
-                menu.entry(pin_label, None, {
+            menu.when(connected, |menu| {
+                let menu = icon_entry(menu, "Refresh", IconName::RotateCw, {
+                    let panel = panel.clone();
+                    move |_window, cx| {
+                        panel
+                            .update(cx, |panel, cx| panel.refresh_connection(index, cx))
+                            .ok();
+                    }
+                });
+                icon_entry(menu, "New Query", IconName::SquarePlus, {
+                    let panel = panel.clone();
+                    move |window, cx| {
+                        panel
+                            .update(cx, |panel, cx| panel.new_query(index, window, cx))
+                            .ok();
+                    }
+                })
+                .separator()
+            })
+            .when(personal, |menu| {
+                icon_entry(menu, pin_label, pin_icon, {
                     let panel = panel.clone();
                     let name = name.clone();
                     move |_window, cx| {
@@ -52,7 +74,7 @@ impl DatabasePanel {
                 .separator()
             })
             .when(connected, |menu| {
-                menu.entry("Disconnect", None, {
+                icon_entry(menu, "Disconnect", IconName::Disconnected, {
                     let panel = panel.clone();
                     move |_window, cx| {
                         panel
@@ -62,7 +84,7 @@ impl DatabasePanel {
                 })
             })
             .when(!connected, |menu| {
-                menu.entry("Connect Again", None, {
+                icon_entry(menu, "Connect Again", IconName::Power, {
                     let panel = panel.clone();
                     move |window, cx| {
                         panel
@@ -72,16 +94,38 @@ impl DatabasePanel {
                 })
             })
             .separator()
-            .entry("Set Password…", None, {
+            .map(|menu| {
+                icon_entry(menu, "Set Password…", IconName::LockOutlined, {
+                    let panel = panel.clone();
+                    move |window, cx| {
+                        panel
+                            .update(cx, |panel, cx| panel.prompt_for_password(index, window, cx))
+                            .ok();
+                    }
+                })
+            })
+            .submenu_with_icon("Safety", IconName::Warning, {
                 let panel = panel.clone();
-                move |window, cx| {
-                    panel
-                        .update(cx, |panel, cx| panel.prompt_for_password(index, window, cx))
-                        .ok();
+                move |mut submenu, _window, _cx| {
+                    for level in SafetyLevel::ALL {
+                        let panel = panel.clone();
+                        submenu = submenu.toggleable_entry(
+                            level.label(),
+                            level == safety,
+                            IconPosition::Start,
+                            None,
+                            move |_window, cx| {
+                                panel
+                                    .update(cx, |panel, cx| panel.set_safety(index, level, cx))
+                                    .ok();
+                            },
+                        );
+                    }
+                    submenu
                 }
             })
             .when(shareable, |menu| {
-                menu.separator().entry("Share with Team…", None, {
+                icon_entry(menu.separator(), "Share with Team…", IconName::Public, {
                     let panel = panel.clone();
                     move |window, cx| {
                         panel
@@ -91,7 +135,7 @@ impl DatabasePanel {
                 })
             })
             .when(personal, |menu| {
-                menu.separator().entry("Remove Connection…", None, {
+                icon_entry(menu.separator(), "Remove Connection…", IconName::Trash, {
                     let panel = panel.clone();
                     move |window, cx| {
                         panel
@@ -103,23 +147,6 @@ impl DatabasePanel {
                 })
             })
         });
-
-        cx.focus_view(&menu, window);
-        let subscription =
-            cx.subscribe_in(&menu, window, |this, _, _: &DismissEvent, window, cx| {
-                if this
-                    .context_menu
-                    .as_ref()
-                    .is_some_and(|(menu, _, _)| menu.focus_handle(cx).contains_focused(window, cx))
-                {
-                    cx.focus_self(window);
-                }
-                this.context_menu.take();
-                cx.notify();
-            });
-
-        self.context_menu = Some((menu, position, subscription));
-        cx.notify();
     }
 
     /// Asks for a password and puts it in the keychain.
@@ -138,6 +165,12 @@ impl DatabasePanel {
             return;
         };
         let config = node.config.clone();
+        // Held by identity: the box stays up while the list may be rebuilt, and
+        // the password is for this connection, not for whichever one is at its
+        // old place when the box closes.
+        let Some(key) = self.node_key(index) else {
+            return;
+        };
         let panel = cx.weak_entity();
 
         self.workspace
@@ -149,7 +182,11 @@ impl DatabasePanel {
                         config.name.clone(),
                         Box::new(move |window, cx| {
                             panel
-                                .update(cx, |panel, cx| panel.reconnect(index, window, cx))
+                                .update(cx, |panel, cx| {
+                                    if let Some(index) = panel.index_of_key(&key) {
+                                        panel.reconnect(index, window, cx);
+                                    }
+                                })
                                 .ok();
                         }),
                         window,

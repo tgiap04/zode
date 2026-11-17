@@ -1,7 +1,10 @@
-use crate::database_panel::{DatabasePanel, NodeState};
-use database::protocol::TableKind;
+use crate::database_panel::{ConnectionNode, DatabasePanel, NodeState};
+use crate::safe_mode::SafetyLevel;
+use database::protocol::{ColumnDef, TableKind, TableRef};
 use gpui::{ClickEvent, Context, Div, MouseButton, MouseDownEvent, Stateful, Window};
-use ui::{CommonAnimationExt as _, ListItem, ListItemSpacing, Tooltip, prelude::*};
+use ui::{
+    CommonAnimationExt as _, HighlightedLabel, ListItem, ListItemSpacing, Tooltip, prelude::*,
+};
 
 /// One step per level, the same for every row: a connection, a schema and a
 /// table line up with each other only if they agree on it.
@@ -36,6 +39,7 @@ pub(crate) enum Row {
     /// One column of the open table: name, type, and whether it is part of the
     /// primary key -- which is what tells you this is the table you meant.
     Column {
+        index: usize,
         name: SharedString,
         type_name: SharedString,
         primary_key: bool,
@@ -51,40 +55,82 @@ pub(crate) enum Row {
 }
 
 impl DatabasePanel {
+    /// The tree as lines. With text in the filter box it narrows to the tables
+    /// (and, for the open table, columns) that match, looking inside schemas
+    /// and connections whether or not they are expanded: a filter that only
+    /// searched what happened to be open would miss most of the tree.
     pub(crate) fn rows(&self) -> Vec<Row> {
+        let filter = &self.tree_filter;
         let mut rows = Vec::new();
-        let first_team = self
-            .connections
-            .iter()
-            .position(|node| node.team.is_some())
-            .unwrap_or(self.connections.len());
-        let first_project = self.connections.iter().position(|node| node.from_project);
+        let mut project_header_pending = true;
+        let mut team_header_pending = true;
         for (index, node) in self.connections.iter().enumerate() {
-            if Some(index) == first_project {
-                rows.push(Row::ProjectHeader);
-            }
-            if index == first_team {
-                self.push_team_header(&mut rows);
-            }
-            rows.push(Row::Connection { index });
-            if !node.expanded || !matches!(node.state, NodeState::Connected(_)) {
+            let mut children = Vec::new();
+            let matched = self.push_connection_children(index, node, &mut children);
+            if filter.is_active() && !matched && !filter.matches(&node.config.name) {
                 continue;
             }
+            if node.from_project && project_header_pending {
+                rows.push(Row::ProjectHeader);
+                project_header_pending = false;
+            }
+            if node.team.is_some() && team_header_pending {
+                self.push_team_header(&mut rows);
+                team_header_pending = false;
+            }
+            rows.push(Row::Connection { index });
+            rows.extend(children);
+        }
+        if filter.is_active() {
+            if rows.is_empty() {
+                rows.push(Row::Note {
+                    text: format!("Nothing matches “{}”", filter.text()).into(),
+                    depth: 0,
+                });
+            }
+        } else if team_header_pending {
+            self.push_team_header(&mut rows);
+        }
+        rows
+    }
 
-            for (schema_index, schema) in node.schemas.iter().enumerate() {
-                // A driver with a single schema for good (SQLite) gets its
-                // tables drawn straight under the connection.
-                if !node.collapse_schema_level {
-                    rows.push(Row::Schema {
-                        index,
-                        schema_index,
-                    });
-                    if !schema.expanded {
-                        continue;
-                    }
+    /// What sits under a connection, and whether any table in it matched the
+    /// filter (always `false` without one).
+    fn push_connection_children(
+        &self,
+        index: usize,
+        node: &ConnectionNode,
+        rows: &mut Vec<Row>,
+    ) -> bool {
+        let filtering = self.tree_filter.is_active();
+        if !matches!(node.state, NodeState::Connected(_)) || !(node.expanded || filtering) {
+            return false;
+        }
+        let mut matched = false;
+        if !filtering && !self.notices.is_empty() {
+            let key = (node.config.name.clone(), node.origin());
+            if let Some(text) = self.notices.get(&key) {
+                rows.push(Row::Note {
+                    text: text.clone(),
+                    depth: 1,
+                });
+            }
+        }
+        for (schema_index, schema) in node.schemas.iter().enumerate() {
+            let depth = if node.collapse_schema_level { 1 } else { 2 };
+            // A driver with a single schema for good (SQLite) gets its tables
+            // drawn straight under the connection.
+            let schema_row = (!node.collapse_schema_level).then_some(Row::Schema {
+                index,
+                schema_index,
+            });
+            let schema_open = node.collapse_schema_level || schema.expanded;
+
+            if !filtering {
+                rows.extend(schema_row);
+                if !schema_open {
+                    continue;
                 }
-
-                let depth = if node.collapse_schema_level { 1 } else { 2 };
                 match &schema.tables {
                     None => rows.push(Row::Note {
                         text: "Loading…".into(),
@@ -95,51 +141,108 @@ impl DatabasePanel {
                         depth,
                     }),
                     Some(tables) => {
-                        for table in tables {
-                            let open = self.open_table.as_ref().is_some_and(|open| {
-                                open.connection == index
-                                    && open.schema == schema.schema.name
-                                    && open.table == table.name
-                            });
-                            rows.push(Row::Table {
-                                index,
-                                schema: schema.schema.name.clone().into(),
-                                name: table.name.clone().into(),
-                                kind: table.kind,
-                                depth,
-                                open,
-                            });
-                            if !open {
-                                continue;
-                            }
-                            match self
-                                .open_table
-                                .as_ref()
-                                .and_then(|open| open.columns.as_ref())
-                            {
-                                None => rows.push(Row::Note {
-                                    text: "Loading columns…".into(),
-                                    depth: depth + 1,
-                                }),
-                                Some(columns) => {
-                                    rows.extend(columns.iter().map(|column| Row::Column {
-                                        name: column.name.clone().into(),
-                                        type_name: column.type_name.clone().into(),
-                                        primary_key: column.primary_key,
-                                        nullable: column.nullable,
-                                        depth: depth + 1,
-                                    }))
-                                }
-                            }
-                        }
+                        self.push_table_rows(index, &schema.schema.name, tables, depth, rows);
                     }
+                }
+                continue;
+            }
+
+            match &schema.tables {
+                Some(tables) => {
+                    let mut table_rows = Vec::new();
+                    if self.push_table_rows(
+                        index,
+                        &schema.schema.name,
+                        tables,
+                        depth,
+                        &mut table_rows,
+                    ) {
+                        matched = true;
+                        rows.extend(schema_row);
+                        rows.extend(table_rows);
+                    }
+                }
+                // Says why this schema contributed nothing, but only where the
+                // user has the connection open: the note is a pointer into a
+                // part of the tree they are looking at.
+                None if node.expanded => {
+                    rows.extend(schema_row);
+                    rows.push(Row::Note {
+                        text: if schema_open {
+                            "Loading…"
+                        } else {
+                            "Not loaded — expand to search"
+                        }
+                        .into(),
+                        depth,
+                    });
+                }
+                None => {}
+            }
+        }
+        matched
+    }
+
+    /// The tables of one schema that pass the filter, each followed by its
+    /// columns when it is the open table. Whether any table was drawn.
+    ///
+    /// A table that matches by name shows every column; one that matches only
+    /// through a column shows just the columns that did.
+    fn push_table_rows(
+        &self,
+        index: usize,
+        schema: &str,
+        tables: &[TableRef],
+        depth: usize,
+        rows: &mut Vec<Row>,
+    ) -> bool {
+        let filter = &self.tree_filter;
+        let mut drawn = false;
+        for table in tables {
+            let open_table = self.open_table.as_ref().filter(|open| {
+                open.connection == index && open.schema == schema && open.table == table.name
+            });
+            let columns = open_table.and_then(|open| open.columns.as_deref());
+            let name_matches = filter.matches(&table.name);
+            let column_matches = |column: &ColumnDef| filter.matches(&column.name);
+            if !name_matches && !columns.is_some_and(|columns| columns.iter().any(column_matches)) {
+                continue;
+            }
+            drawn = true;
+            rows.push(Row::Table {
+                index,
+                schema: schema.to_string().into(),
+                name: table.name.clone().into(),
+                kind: table.kind,
+                depth,
+                open: open_table.is_some(),
+            });
+            if open_table.is_none() {
+                continue;
+            }
+            match columns {
+                None => rows.push(Row::Note {
+                    text: "Loading columns…".into(),
+                    depth: depth + 1,
+                }),
+                Some(columns) => {
+                    rows.extend(
+                        columns
+                            .iter()
+                            .filter(|column| name_matches || column_matches(column))
+                            .map(|column| Row::Column {
+                                index,
+                                name: column.name.clone().into(),
+                                type_name: column.type_name.clone().into(),
+                                primary_key: column.primary_key,
+                                nullable: column.nullable,
+                                depth: depth + 1,
+                            }),
+                    );
                 }
             }
         }
-        if first_team == self.connections.len() {
-            self.push_team_header(&mut rows);
-        }
-        rows
+        drawn
     }
 
     fn push_team_header(&self, rows: &mut Vec<Row>) {
@@ -239,61 +342,110 @@ impl DatabasePanel {
                         .size(IconSize::Small)
                         .color(Color::Muted),
                     )
-                    .child(row_content().child(Label::new(name.clone()).truncate()));
+                    .child(
+                        row_content().child(
+                            HighlightedLabel::new(name.clone(), self.tree_filter.highlight(&name))
+                                .truncate(),
+                        ),
+                    );
+                let (menu_schema, menu_name) = (schema.clone(), name.clone());
                 clickable(id, item)
                     // Both at once: clicking a table means "show me this
                     // table", and that is its shape *and* its rows. Splitting
                     // them across two gestures would make the common one two
                     // clicks.
                     .on_click(cx.listener(move |this, _event, window, cx| {
-                        this.toggle_table(index, &schema, &name, cx);
-                        this.preview_table(index, &schema, &name, window, cx);
+                        this.click_table(index, &schema, &name, window, cx);
                     }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            this.deploy_table_menu(
+                                index,
+                                menu_schema.to_string(),
+                                menu_name.to_string(),
+                                event.position,
+                                window,
+                                cx,
+                            );
+                        }),
+                    )
                     .into_any_element()
             }
             Row::Column {
+                index,
                 name,
                 type_name,
                 primary_key,
                 nullable,
                 depth,
-            } => tree_row(("database-column", position), *depth)
-                .selectable(false)
-                .child(
-                    row_content()
-                        .child(Label::new(name.clone()).truncate())
-                        // The primary key is what tells you this is the table you
-                        // meant.
-                        .when(*primary_key, |content| {
-                            content.child(
-                                Icon::new(IconName::Hash)
-                                    .size(IconSize::XSmall)
-                                    .color(Color::Accent),
+            } => {
+                let (index, column) = (*index, name.to_string());
+                let item = tree_row(("database-column", position), *depth)
+                    .selectable(false)
+                    .child(
+                        row_content()
+                            .child(
+                                HighlightedLabel::new(
+                                    name.clone(),
+                                    self.tree_filter.highlight(name),
+                                )
+                                .truncate(),
                             )
-                        })
-                        .child(
-                            Label::new(type_name.clone())
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted),
-                        )
-                        // Only nullability is marked, and only when it holds: marking
-                        // both would put a badge on every row and say nothing.
-                        .when(*nullable, |content| {
-                            content.child(
-                                Label::new("null")
+                            // The primary key is what tells you this is the table you
+                            // meant.
+                            .when(*primary_key, |content| {
+                                content.child(
+                                    Icon::new(IconName::Hash)
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Accent),
+                                )
+                            })
+                            .child(
+                                Label::new(type_name.clone())
                                     .size(LabelSize::XSmall)
                                     .color(Color::Muted),
                             )
+                            // Only nullability is marked, and only when it holds: marking
+                            // both would put a badge on every row and say nothing.
+                            .when(*nullable, |content| {
+                                content.child(
+                                    Label::new("null")
+                                        .size(LabelSize::XSmall)
+                                        .color(Color::Muted),
+                                )
+                            }),
+                    );
+                // A plain wrapper rather than `clickable`: a column has no
+                // left-click, so no pointer cursor either.
+                div()
+                    .id(("database-column-menu", position))
+                    .w_full()
+                    .child(item)
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            this.deploy_column_menu(
+                                index,
+                                column.clone(),
+                                event.position,
+                                window,
+                                cx,
+                            );
                         }),
-                )
-                .into_any_element(),
+                    )
+                    .into_any_element()
+            }
+            // Truncated: a driver's own words can run to a page, and a row is
+            // one line high.
             Row::Note { text, depth } => tree_row(("database-note", position), *depth)
                 .selectable(false)
                 .child(
                     row_content().child(
                         Label::new(text.clone())
                             .size(LabelSize::Small)
-                            .color(Color::Muted),
+                            .color(Color::Muted)
+                            .truncate(),
                     ),
                 )
                 .into_any_element(),
@@ -350,6 +502,7 @@ impl DatabasePanel {
         let connected = matches!(node.state, NodeState::Connected(_));
         let name = node.config.name.clone();
         let pinned = self.is_pinned(&name);
+        let safety = self.safety_of(index, cx);
 
         // One button, two jobs, and never both at once: what a connection
         // needs is either to be closed or to be opened again, and the row
@@ -403,6 +556,17 @@ impl DatabasePanel {
                                 .size(IconSize::XSmall)
                                 .color(Color::Accent),
                         )
+                    })
+                    // Only the two levels that differ from what a connection
+                    // does when nobody said anything: a badge on every row
+                    // would be a badge on none.
+                    .when_some(safety_badge(safety), |content, (text, colour)| {
+                        content.child(
+                            div()
+                                .id(("database-safety-badge", index))
+                                .debug_selector(|| format!("database-safety-badge-{index}"))
+                                .child(Label::new(text).size(LabelSize::XSmall).color(colour)),
+                        )
                     }),
             )
             .end_slot::<IconButton>(power);
@@ -449,10 +613,17 @@ impl DatabasePanel {
             }))
             .child(row_content().child(Label::new(schema.schema.name.clone()).truncate()));
 
+        let name = schema.schema.name.clone();
         clickable(("database-schema", key), item)
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.toggle_schema(index, schema_index, cx);
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.deploy_schema_menu(index, name.clone(), event.position, window, cx);
+                }),
+            )
             .into_any_element()
     }
 }
@@ -484,4 +655,13 @@ fn row_content() -> Div {
 /// own handler leaves the indent dead while the hover highlight spans it.
 fn clickable(id: impl Into<ElementId>, item: ListItem) -> Stateful<Div> {
     div().id(id).w_full().cursor_pointer().child(item)
+}
+
+/// What the row says about a connection's safety level, if anything.
+fn safety_badge(level: SafetyLevel) -> Option<(&'static str, Color)> {
+    match level {
+        SafetyLevel::ReadOnly => Some(("read-only", Color::Muted)),
+        SafetyLevel::Unrestricted => Some(("unrestricted", Color::Warning)),
+        SafetyLevel::ConfirmWrites => None,
+    }
 }

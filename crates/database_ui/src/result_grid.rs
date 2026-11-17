@@ -1,16 +1,38 @@
 use crate::database_panel::DatabasePanel;
-use crate::query::{QueryState, cell_text};
+use crate::grid_cell::{CellColors, grid_cell};
+use crate::grid_editing::CellAddress;
+use crate::query::{QueryState, TableBrowse, WRITE_PAGE_NOTE, cell_text};
 use database::protocol::Cell;
-use gpui::{Context, Window};
+use gpui::{ClickEvent, Context, MouseButton, Stateful, WeakEntity, Window};
 use std::rc::Rc;
-use ui::{Tab, Table, Tooltip, prelude::*};
+use ui::{ColumnWidthConfig, Tab, Table, Tooltip, prelude::*};
 
 impl DatabasePanel {
-    pub(crate) fn render_results(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    /// The grid, under the filter bar when the table on screen has one.
+    ///
+    /// The bar sits outside the grid's own states so that a filter matching
+    /// nothing, or failing, still leaves it there to be changed.
+    pub(crate) fn render_results(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let body = self.render_result_body(window, cx);
+        // The body alone holds the grid's focus and key context, not the bar
+        // above it: its text boxes must not be under the grid's arrow keys.
+        let grid = v_flex()
+            .min_h_0()
+            .track_focus(&self.results_focus)
+            .key_context("DatabaseResults")
+            .child(body);
+        let Some(bar) = self.render_filter_bar(cx) else {
+            return grid.size_full().into_any_element();
+        };
+        v_flex()
+            .size_full()
+            .min_h_0()
+            .child(bar)
+            .child(grid.flex_1())
+            .into_any_element()
+    }
+
+    fn render_result_body(&self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match &self.query {
             QueryState::Idle => self.render_nothing_chosen(cx),
             QueryState::Running { cancelling, .. } => v_flex()
@@ -77,32 +99,66 @@ impl DatabasePanel {
                 let result = Rc::new(page.result.clone());
                 let columns = result.columns.len();
                 let row_count = result.rows.len();
-                let selected_row = page.selected_row;
+                let selection = page.selection.clone();
                 let selected_background = cx.theme().colors().element_selected;
                 let panel = cx.entity().downgrade();
+                let edit_view = self.edit_view();
+                let colors = Rc::new(CellColors::of(cx));
+                // Offered only for a table opened from the tree: a statement
+                // somebody typed is not rewritten to sort it.
+                let sortable = self.can_sort().then(|| page.browse.clone()).flatten();
 
                 let grid = div().flex_1().min_w_0().min_h_0().overflow_hidden().child(
                     // Virtualised even though a page is bounded: `page_size`
                     // is a setting, and someone will set it to 10_000.
                     Table::new(columns)
+                        .interactable(&self.result_table)
+                        // Sized for these columns only once `sync_result_columns`
+                        // has seen them; until then, shared equally, since a
+                        // width list of another length would not line up.
+                        .when(
+                            self.result_column_widths.read(cx).cols() == columns,
+                            |table| {
+                                table.width_config(ColumnWidthConfig::Resizable(
+                                    self.result_column_widths.clone(),
+                                ))
+                            },
+                        )
                         .striped()
                         .header(
                             result
                                 .columns
                                 .iter()
-                                .map(|column| {
-                                    Label::new(column.name.clone())
-                                        .size(LabelSize::Small)
-                                        .truncate()
+                                .enumerate()
+                                .map(|(index, column)| {
+                                    header_cell(&panel, index, &column.name, sortable.as_ref())
                                 })
                                 .collect::<Vec<_>>(),
                         )
                         .uniform_list("database-results", row_count, {
                             let result = result.clone();
-                            move |range, _window, _cx| {
+                            let panel = panel.clone();
+                            move |range, window, cx| {
                                 range
-                                    .filter_map(|index| result.rows.get(index))
-                                    .map(|row| row.iter().map(render_cell).collect::<Vec<_>>())
+                                    .filter_map(|index| {
+                                        result.rows.get(index).map(|row| (index, row))
+                                    })
+                                    .map(|(index, row)| {
+                                        row.iter()
+                                            .enumerate()
+                                            .map(|(column, cell)| {
+                                                grid_cell(
+                                                    &panel,
+                                                    &edit_view,
+                                                    &colors,
+                                                    CellAddress { row: index, column },
+                                                    cell,
+                                                    window,
+                                                    cx,
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                    })
                                     .collect()
                             }
                         })
@@ -110,12 +166,25 @@ impl DatabasePanel {
                             let panel = panel.clone();
                             row.debug_selector(move || format!("database-result-row-{index}"))
                                 .cursor_pointer()
-                                .when(selected_row == Some(index), |row| {
-                                    row.bg(selected_background)
-                                })
-                                .on_click(move |_event, _window, cx| {
+                                .when(selection.contains(index), |row| row.bg(selected_background))
+                                .on_click(move |event, window, cx| {
                                     panel
-                                        .update(cx, |panel, cx| panel.toggle_row_detail(index, cx))
+                                        .update(cx, |panel, cx| {
+                                            // The second click of a double-click edits
+                                            // the cell under the pointer; where it
+                                            // cannot, it is a click like any other.
+                                            if event.click_count() >= 2
+                                                && panel.edit_under_pointer(
+                                                    index,
+                                                    event.modifiers(),
+                                                    window,
+                                                    cx,
+                                                )
+                                            {
+                                                return;
+                                            }
+                                            panel.click_row(index, event.modifiers(), window, cx)
+                                        })
                                         .ok();
                                 })
                                 .into_any_element()
@@ -123,8 +192,9 @@ impl DatabasePanel {
                 );
 
                 // Beside the rows when the view is wide; under them in the
-                // docked column, where a side pane would leave neither readable.
-                let side_by_side = self.side_by_side();
+                // docked column, and in a side-by-side view too narrow to spare
+                // the width, where a side pane would leave neither readable.
+                let side_by_side = self.row_detail_beside();
                 let detail = page.selected().map(|(index, row)| {
                     let detail = self.render_row_detail(page, index, row, cx);
                     let border = cx.theme().colors().border;
@@ -159,6 +229,7 @@ impl DatabasePanel {
                             .child(grid)
                             .children(detail),
                     )
+                    .children(self.render_edit_bar(cx))
                     .child(self.render_pager(cx))
                     .into_any_element()
             }
@@ -205,7 +276,17 @@ impl DatabasePanel {
             return div();
         };
         let (label, previous, next) = (page.range_label(), page.has_previous(), page.has_next());
+        let turnable = page.can_turn();
         let elapsed = page.result.elapsed_ms;
+        let can_filter = self.can_filter();
+        let filter_shown = self.browse_bar.expanded() || self.has_active_filters();
+        let export_label = self.export_label();
+        let exporting = matches!(
+            self.export.status,
+            crate::export_results::ExportStatus::Running { .. }
+        );
+        let export_over = !exporting && export_label.is_some();
+        let edit_notice = page.edits.notice.clone();
 
         div().child(
             h_flex()
@@ -217,18 +298,87 @@ impl DatabasePanel {
                 .border_t_1()
                 .border_color(cx.theme().colors().border)
                 .child(
+                    // Gives way to the buttons on a narrow view: the page
+                    // controls are what is used, the counts only read.
                     h_flex()
+                        .flex_1()
+                        .min_w_0()
                         .gap_2()
-                        .child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
+                        .overflow_hidden()
+                        .child(
+                            Label::new(label)
+                                .size(LabelSize::Small)
+                                .color(Color::Muted)
+                                .truncate(),
+                        )
                         .child(
                             Label::new(format!("{elapsed} ms"))
                                 .size(LabelSize::XSmall)
-                                .color(Color::Muted),
-                        ),
+                                .color(Color::Muted)
+                                .truncate(),
+                        )
+                        .children(edit_notice.map(|text| {
+                            Label::new(text)
+                                .size(LabelSize::XSmall)
+                                .color(Color::Warning)
+                                .truncate()
+                        }))
+                        .children(export_label.map(|(text, colour)| {
+                            Label::new(text)
+                                .size(LabelSize::XSmall)
+                                .color(colour)
+                                .truncate()
+                        })),
                 )
                 .child(
                     h_flex()
+                        .flex_none()
                         .gap_0p5()
+                        .when(can_filter, |buttons| {
+                            buttons.child(
+                                IconButton::new("database-toggle-filter", IconName::ListFilter)
+                                    .icon_size(IconSize::Small)
+                                    .toggle_state(filter_shown)
+                                    .tooltip(|_window, cx| {
+                                        Tooltip::for_action(
+                                            "Filter Rows",
+                                            &zed_actions::database::ToggleFilterBar,
+                                            cx,
+                                        )
+                                    })
+                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                        this.toggle_filter_bar(window, cx);
+                                    })),
+                            )
+                        })
+                        .when(exporting, |buttons| {
+                            buttons.child(
+                                Button::new("database-export-cancel", "Cancel Export")
+                                    .label_size(LabelSize::Small)
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.cancel_export(cx);
+                                    })),
+                            )
+                        })
+                        .when(export_over, |buttons| {
+                            buttons.child(
+                                IconButton::new("database-export-dismiss", IconName::Close)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text("Dismiss"))
+                                    .on_click(cx.listener(|this, _event, _window, cx| {
+                                        this.dismiss_export_status(cx);
+                                    })),
+                            )
+                        })
+                        .child(
+                            IconButton::new("database-export", IconName::Download)
+                                .icon_size(IconSize::Small)
+                                .disabled(exporting)
+                                .tooltip(Tooltip::text("Export to a File"))
+                                .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                                    this.deploy_export_menu(event.position(), window, cx);
+                                })),
+                        )
                         .child(
                             IconButton::new("database-copy-csv", IconName::Copy)
                                 .icon_size(IconSize::Small)
@@ -240,12 +390,16 @@ impl DatabasePanel {
                         .child(
                             IconButton::new("database-previous-page", IconName::ChevronLeft)
                                 .icon_size(IconSize::Small)
-                                .tooltip(|_window, cx| {
-                                    Tooltip::for_action(
-                                        "Previous Page",
-                                        &zed_actions::database::PreviousPage,
-                                        cx,
-                                    )
+                                .tooltip(move |_window, cx| {
+                                    if turnable {
+                                        Tooltip::for_action(
+                                            "Previous Page",
+                                            &zed_actions::database::PreviousPage,
+                                            cx,
+                                        )
+                                    } else {
+                                        Tooltip::simple(WRITE_PAGE_NOTE, cx)
+                                    }
                                 })
                                 .disabled(!previous)
                                 .on_click(cx.listener(|this, _event, window, cx| {
@@ -255,12 +409,16 @@ impl DatabasePanel {
                         .child(
                             IconButton::new("database-next-page", IconName::ChevronRight)
                                 .icon_size(IconSize::Small)
-                                .tooltip(|_window, cx| {
-                                    Tooltip::for_action(
-                                        "Next Page",
-                                        &zed_actions::database::NextPage,
-                                        cx,
-                                    )
+                                .tooltip(move |_window, cx| {
+                                    if turnable {
+                                        Tooltip::for_action(
+                                            "Next Page",
+                                            &zed_actions::database::NextPage,
+                                            cx,
+                                        )
+                                    } else {
+                                        Tooltip::simple(WRITE_PAGE_NOTE, cx)
+                                    }
                                 })
                                 .disabled(!next)
                                 .on_click(cx.listener(|this, _event, window, cx| {
@@ -272,6 +430,82 @@ impl DatabasePanel {
     }
 }
 
+/// A column's name, which on a table opened from the tree is also the button
+/// that sorts by it, with an arrow once it does.
+fn header_cell(
+    panel: &WeakEntity<DatabasePanel>,
+    index: usize,
+    name: &str,
+    sortable: Option<&TableBrowse>,
+) -> AnyElement {
+    let label = Label::new(name.to_string())
+        .size(LabelSize::Small)
+        .truncate();
+    let Some(browse) = sortable else {
+        return label.into_any_element();
+    };
+    let (panel, column) = (panel.clone(), name.to_string());
+    let selector = format!("database-sort-{name}");
+    h_flex()
+        .id(("database-sort", index))
+        .debug_selector(move || selector)
+        .min_w_0()
+        .gap_1()
+        .cursor_pointer()
+        .child(label)
+        .when_some(browse.sort_of(name), |header, descending| {
+            header.child(
+                Icon::new(if descending {
+                    IconName::ArrowDown
+                } else {
+                    IconName::ArrowUp
+                })
+                .size(IconSize::XSmall)
+                .color(Color::Muted),
+            )
+        })
+        .on_click(move |_event, window, cx| {
+            panel
+                .update(cx, |panel, cx| panel.sort_by(&column, window, cx))
+                .ok();
+        })
+        .into_any_element()
+}
+
+/// A cell that knows its place in the grid: pressing in it remembers the
+/// column, and right-clicking it opens the copy menu.
+///
+/// A plain wrapper rather than a handler on the row, which cannot tell which of
+/// its cells was under the pointer.
+pub(crate) fn cell_target(
+    panel: &WeakEntity<DatabasePanel>,
+    address: CellAddress,
+    name: SharedString,
+    content: AnyElement,
+) -> Stateful<Div> {
+    let (pressed, menu) = (panel.clone(), panel.clone());
+    let (row, column) = (address.row, address.column);
+    let selector = name.clone();
+    div()
+        .id(name)
+        .debug_selector(move || selector.to_string())
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
+        .on_mouse_down(MouseButton::Left, move |_event, _window, cx| {
+            pressed
+                .update(cx, |panel, cx| panel.focus_cell_column(column, cx))
+                .ok();
+        })
+        .on_mouse_down(MouseButton::Right, move |event, window, cx| {
+            menu.update(cx, |panel, cx| {
+                panel.deploy_cell_menu(row, column, event.position, window, cx)
+            })
+            .ok();
+        })
+        .child(content)
+}
+
 /// A null is drawn differently from every other value, because it is the one
 /// value that is not text -- and a grid that renders it like the empty string
 /// is lying about the data.
@@ -279,7 +513,7 @@ impl DatabasePanel {
 /// Every cell is one line. The rows of a `uniform_list` all take the height of
 /// the first, so a text value holding a newline would make every row as tall as
 /// the first row's longest cell and clip the rest.
-fn render_cell(cell: &Cell) -> AnyElement {
+pub(crate) fn render_cell(cell: &Cell) -> AnyElement {
     let text = one_line(&cell_text(cell));
     match cell {
         Cell::Null => Label::new(text)
