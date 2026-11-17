@@ -47,6 +47,17 @@ pub trait CommandHost: Send + Sync {
 
     /// A variable from the environment tools on this host start with.
     fn environment_variable(&self, name: &str) -> Option<String>;
+
+    /// The network address a browser on THIS machine can use to reach ports
+    /// published on the host -- not a display name: an SSH connection's
+    /// nickname is not an address, and a port published inside a dev container
+    /// is not reachable from here at all.
+    ///
+    /// `None` when there is no such address, which is also the answer of a
+    /// host that does not say.
+    fn reachable_address(&self) -> Option<String> {
+        None
+    }
 }
 
 /// This machine.
@@ -80,6 +91,10 @@ impl CommandHost for LocalCommandHost {
 
     fn environment_variable(&self, name: &str) -> Option<String> {
         std::env::var(name).ok()
+    }
+
+    fn reachable_address(&self) -> Option<String> {
+        Some("localhost".to_string())
     }
 }
 
@@ -210,6 +225,40 @@ impl Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn this_machine_is_reached_at_localhost_and_a_host_that_says_nothing_has_no_address() {
+        struct Silent;
+        impl CommandHost for Silent {
+            fn command(
+                &self,
+                program: &str,
+                _args: &[&str],
+                _env: &[(&str, &str)],
+                _cwd: Option<&Path>,
+            ) -> anyhow::Result<Command> {
+                Ok(Command::new(program))
+            }
+
+            fn path_style(&self) -> PathStyle {
+                PathStyle::local()
+            }
+
+            fn remote_name(&self) -> Option<String> {
+                None
+            }
+
+            fn environment_variable(&self, _name: &str) -> Option<String> {
+                None
+            }
+        }
+
+        assert_eq!(
+            LocalCommandHost.reachable_address().as_deref(),
+            Some("localhost")
+        );
+        assert_eq!(Silent.reachable_address(), None);
+    }
 
     #[test]
     fn a_local_host_builds_the_program_and_arguments_unchanged() {

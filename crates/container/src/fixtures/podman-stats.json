@@ -1,0 +1,14 @@
+[
+  {
+    "id": "3f0e9c1a7b2d",
+    "name": "db",
+    "cpu_time": "1.249s",
+    "cpu_percent": "0.53%",
+    "avg_cpu": "0.53%",
+    "mem_usage": "41.2MB / 8.2GB",
+    "mem_percent": "0.50%",
+    "net_io": "1.3kB / 878B",
+    "block_io": "0B / 12.3kB",
+    "pids": "9"
+  }
+]

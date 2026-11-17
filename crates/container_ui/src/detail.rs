@@ -12,6 +12,7 @@
 //! table is wide, and a pane holding both gives each half of a width neither can
 //! spare. A back button returns.
 
+use container::resource::row_key;
 use container::{Resource, ResourceKind};
 use gpui::{Entity, WeakEntity, Window};
 use terminal_view::TerminalView;
@@ -19,9 +20,22 @@ use ui::{Tab, prelude::*};
 use workspace::Workspace;
 
 use crate::container_panel::ContainerPanel;
+use crate::detail_history::HistoryState;
+use crate::detail_inspect::InspectState;
+use crate::detail_stats::StatsState;
+use crate::detail_tabs::DetailTab;
 
 /// The container being looked at, and the terminal following its logs.
 pub(crate) struct Detail {
+    /// Which tab is showing.
+    pub(crate) tab: DetailTab,
+    /// What the Inspect tab has loaded and what is revealed. Owned by the open
+    /// row, so closing it cancels the request and forgets every reveal.
+    pub(crate) inspect: InspectState,
+    /// What the Stats tab has sampled, and the polling loop itself.
+    pub(crate) stats: StatsState,
+    /// The layers of an image, once asked for.
+    pub(crate) history: HistoryState,
     /// The row as it was when it was opened, refreshed from each list that
     /// arrives.
     ///
@@ -44,20 +58,21 @@ pub(crate) struct Detail {
 }
 
 impl ContainerPanel {
-    /// Whether a row of this kind opens onto anything.
-    ///
-    /// Asked of the backend, not decided here: the detail view is the logs, so a
-    /// kind the engine has no logs command for has nothing to open. That is why
-    /// an image row does not react to a click while a container row does.
-    pub(crate) fn rows_open_a_detail(&self) -> bool {
-        self.backend()
-            .is_some_and(|backend| backend.logs_command(self.active_kind, "probe").is_some())
-    }
-
-    /// Opens one resource, and starts following its logs.
+    /// Opens one resource on its first tab.
     pub(crate) fn open_detail(
         &mut self,
         resource: Resource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_detail_on(resource, None, window, cx);
+    }
+
+    /// Opens one resource on `tab` when it has it, else on its first.
+    pub(crate) fn open_detail_on(
+        &mut self,
+        resource: Resource,
+        tab: Option<DetailTab>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -66,24 +81,56 @@ impl ContainerPanel {
         if self
             .detail
             .as_ref()
-            .is_some_and(|detail| detail.resource.id == resource.id)
+            .is_some_and(|detail| row_key(&detail.resource) == row_key(&resource))
         {
+            if let Some(tab) = tab {
+                self.select_detail_tab(tab, window, cx);
+            }
             return;
         }
 
-        let kind = self.active_kind;
-        let command = self
-            .backend()
-            .and_then(|backend| backend.logs_command(kind, &resource.id));
+        let tabs = self.detail_tabs();
+        let Some(first) = tab
+            .filter(|tab| tabs.contains(tab))
+            .or_else(|| tabs.first().copied())
+        else {
+            return;
+        };
 
+        // A terminal still being built for the row that was open belongs to it.
+        self.logs_build = None;
         self.detail = Some(Detail {
-            resource: resource.clone(),
+            tab: first,
+            inspect: InspectState::default(),
+            stats: StatsState::default(),
+            history: HistoryState::default(),
+            resource,
             logs: None,
             trouble: None,
             checkout: None,
         });
         self.probe_checkout(cx);
+        self.enter_detail_tab(first, window, cx);
         cx.notify();
+    }
+
+    /// Starts following the open row's logs, once.
+    ///
+    /// Not again when a terminal is already there, still being built, or has
+    /// failed to build: switching back to the tab must not replace a terminal
+    /// that has scrollback, nor retry a failure every time it is looked at.
+    pub(crate) fn start_logs_if_needed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let kind = self.active_kind;
+        let Some(detail) = self.detail.as_ref() else {
+            return;
+        };
+        if detail.logs.is_some() || detail.trouble.is_some() || self.logs_build.is_some() {
+            return;
+        }
+        let resource = detail.resource.clone();
+        let command = self
+            .backend()
+            .and_then(|backend| backend.logs_command(kind, &resource.id));
 
         let Some((program, args)) = command else {
             self.report_no_logs("this engine has no logs command for it", cx);
@@ -122,7 +169,7 @@ impl ContainerPanel {
         cx: &mut Context<Self>,
     ) {
         let spawn = crate::terminal::logs_task(&program, args, &resource.name, kind);
-        let opened_for = resource.id.clone();
+        let opened_for = row_key(resource);
 
         let project = match workspace.read_with(cx, |workspace, _| workspace.project().clone()) {
             Ok(project) => project,
@@ -146,7 +193,7 @@ impl ContainerPanel {
                 if this
                     .detail
                     .as_ref()
-                    .is_none_or(|detail| detail.resource.id != opened_for)
+                    .is_none_or(|detail| row_key(&detail.resource) != opened_for)
                 {
                     return;
                 }
@@ -197,10 +244,8 @@ impl ContainerPanel {
         let Some(detail) = self.detail.as_mut() else {
             return;
         };
-        match resources
-            .iter()
-            .find(|resource| resource.id == detail.resource.id)
-        {
+        let open = row_key(&detail.resource);
+        match resources.iter().find(|resource| row_key(resource) == open) {
             Some(fresh) => detail.resource = fresh.clone(),
             None => {
                 self.detail = None;
@@ -211,56 +256,64 @@ impl ContainerPanel {
 }
 
 impl ContainerPanel {
-    /// The open row: what it is and what can be done to it, over its live logs.
+    /// The open row: what it is and what can be done to it, over its tabs.
     pub(crate) fn render_detail(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let Some(detail) = self.detail.as_ref() else {
             return div().into_any_element();
         };
         let resource = detail.resource.clone();
-        let logs = detail.logs.clone();
-        let trouble = detail.trouble.clone();
+        let tab = detail.tab;
+
+        let body = match tab {
+            DetailTab::Logs => self.render_logs_body(),
+            DetailTab::Inspect => self.render_inspect(window, cx),
+            DetailTab::Stats => self.render_stats(cx),
+            DetailTab::History => self.render_history(cx),
+        };
 
         v_flex()
             .size_full()
             .debug_selector(|| "container-detail".into())
             .child(self.render_detail_header(&resource, cx))
             .children(self.render_checkout_row(cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_hidden()
-                    .child(match (logs, trouble) {
-                        // The terminal owns everything below the header: its own
-                        // scrollback, selection and search, none of which this
-                        // crate reimplements.
-                        (Some(view), _) => div().size_full().p_1().child(view).into_any_element(),
-                        (None, Some(trouble)) => v_flex()
-                            .size_full()
-                            .items_center()
-                            .justify_center()
-                            .gap_1()
-                            .p_4()
-                            .child(
-                                Icon::new(IconName::Warning)
-                                    .size(IconSize::XLarge)
-                                    .color(Color::Muted),
-                            )
-                            .child(Label::new("No logs here").color(Color::Default))
-                            .child(
-                                Label::new(trouble)
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .into_any_element(),
-                        (None, None) => crate::render::note(None, "Attaching\u{2026}"),
-                    }),
-            )
+            .children(self.render_detail_tabs(tab, cx))
+            .child(div().flex_1().min_h_0().overflow_hidden().child(body))
             .into_any_element()
+    }
+
+    fn render_logs_body(&self) -> gpui::AnyElement {
+        let Some(detail) = self.detail.as_ref() else {
+            return div().into_any_element();
+        };
+        match (detail.logs.clone(), detail.trouble.clone()) {
+            // The terminal owns everything below the header: its own
+            // scrollback, selection and search, none of which this
+            // crate reimplements.
+            (Some(view), _) => div().size_full().p_1().child(view).into_any_element(),
+            (None, Some(trouble)) => v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .p_4()
+                .child(
+                    Icon::new(IconName::Warning)
+                        .size(IconSize::XLarge)
+                        .color(Color::Muted),
+                )
+                .child(Label::new("No logs here").color(Color::Default))
+                .child(
+                    Label::new(trouble)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                )
+                .into_any_element(),
+            (None, None) => crate::render::note(None, "Attaching\u{2026}"),
+        }
     }
 
     /// Back, what this is, and the same buttons the row had.
@@ -313,15 +366,25 @@ impl ContainerPanel {
                         )
                     }),
             )
-            .child(crate::render::render_trailing(
-                resource,
-                self.available_actions(),
-                self.busy_for(&resource.id),
-                self.terminal_available(crate::terminal::TerminalIntent::FollowLogs),
-                self.terminal_available(crate::terminal::TerminalIntent::Shell),
-                self.removable(),
-                handle,
-            ))
+            .child(if resource.kind == ResourceKind::ComposeProject {
+                crate::compose_render::render_compose_trailing(
+                    resource,
+                    &self.compose_context(resource, None),
+                    self.busy_for(&row_key(resource)),
+                    false,
+                    handle,
+                )
+            } else {
+                crate::render::render_trailing(
+                    resource,
+                    self.available_actions(),
+                    self.busy_for(&row_key(resource)),
+                    self.terminal_available(crate::terminal::TerminalIntent::FollowLogs),
+                    self.terminal_available(crate::terminal::TerminalIntent::Shell),
+                    self.removable(),
+                    handle,
+                )
+            })
             .into_any_element()
     }
 }

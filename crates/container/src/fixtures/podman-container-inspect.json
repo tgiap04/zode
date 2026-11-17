@@ -1,0 +1,82 @@
+[
+  {
+    "Id": "3f0e9c1a7b2d4e5f8a6b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f",
+    "Created": "2026-11-10T09:12:41.123456789+01:00",
+    "Path": "docker-entrypoint.sh",
+    "Args": ["postgres"],
+    "State": {
+      "OciVersion": "1.2.0",
+      "Status": "running",
+      "Running": true,
+      "Paused": false,
+      "Restarting": false,
+      "OOMKilled": false,
+      "Dead": false,
+      "Pid": 4242,
+      "ConmonPid": 4240,
+      "ExitCode": 0,
+      "Error": "",
+      "StartedAt": "2026-11-10T09:12:41.5+01:00",
+      "FinishedAt": "0001-01-01T00:00:00Z",
+      "Health": { "Status": "healthy", "FailingStreak": 0, "Log": [] }
+    },
+    "Image": "9a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5061728394a5b6c7d8e9f",
+    "ImageName": "docker.io/library/postgres:16",
+    "Name": "db",
+    "RestartCount": 2,
+    "HostConfig": {
+      "Binds": ["pgdata:/var/lib/postgresql/data:rw,rprivate,nosuid,nodev,rbind"],
+      "NetworkMode": "bridge",
+      "PortBindings": { "5432/tcp": [{ "HostIp": "", "HostPort": "5432" }] },
+      "RestartPolicy": { "Name": "always", "MaximumRetryCount": 0 },
+      "Memory": 536870912,
+      "NanoCpus": 0,
+      "CpuQuota": 150000,
+      "CpuPeriod": 100000,
+      "PidsLimit": 2048
+    },
+    "Mounts": [
+      {
+        "Type": "volume",
+        "Name": "pgdata",
+        "Source": "/home/dev/.local/share/containers/storage/volumes/pgdata/_data",
+        "Destination": "/var/lib/postgresql/data",
+        "Driver": "local",
+        "Mode": "",
+        "Options": ["nosuid", "nodev", "rbind"],
+        "RW": true,
+        "Propagation": "rprivate"
+      }
+    ],
+    "Config": {
+      "Hostname": "3f0e9c1a7b2d",
+      "Domainname": "",
+      "User": "",
+      "Env": [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "POSTGRES_PASSWORD=podman-not-real",
+        "POSTGRES_DB=app"
+      ],
+      "Cmd": ["postgres"],
+      "Image": "docker.io/library/postgres:16",
+      "Volumes": null,
+      "WorkingDir": "/",
+      "Entrypoint": "docker-entrypoint.sh",
+      "Labels": { "io.podman.compose.project": "app" }
+    },
+    "NetworkSettings": {
+      "Ports": { "5432/tcp": [{ "HostIp": "", "HostPort": "5432" }], "9187/tcp": null },
+      "Networks": {
+        "app_default": {
+          "EndpointID": "",
+          "Gateway": "10.89.0.1",
+          "IPAddress": "10.89.0.5",
+          "IPPrefixLen": 24,
+          "MacAddress": "5e:7d:1c:aa:00:01",
+          "Aliases": ["db", "3f0e9c1a7b2d"],
+          "NetworkID": "app_default"
+        }
+      }
+    }
+  }
+]

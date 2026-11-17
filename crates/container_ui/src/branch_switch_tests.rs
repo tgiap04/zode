@@ -36,6 +36,7 @@ fn compose_container(id: &str, state: RunState, directory: &Path, project: &str)
             project: project.into(),
             service: id.into(),
             working_dir: Some(directory.to_string_lossy().into_owned()),
+            config_files: Vec::new(),
         }),
     }
 }

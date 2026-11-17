@@ -962,6 +962,13 @@ pub mod container {
             /// Opens the container list in a window of its own that floats above
             /// other applications.
             OpenInFloatingWindow,
+            /// Adds the row under the cursor to the selection, or takes it out.
+            ToggleRowSelection,
+            /// Selects every row the list currently shows.
+            SelectAllRows,
+            /// Asks to remove the selected rows, or the row under the cursor when
+            /// nothing is selected. Always through the confirmation.
+            RemoveSelectedRows,
         ]
     );
 }

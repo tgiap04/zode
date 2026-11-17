@@ -11,7 +11,20 @@
 //! the only honest confirmation is one built from lists this crate gathered
 //! itself.
 
+use crate::operations::ComposeTarget;
 use crate::resource::{Resource, ResourceKind};
+
+/// What a person has to type, on top of the name, to remove something that is
+/// still in use.
+pub const FORCE_CONFIRMATION: &str = "force";
+
+/// The containers that still depend on one removal target: mount it, sit on
+/// it, or were created from it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Dependents {
+    pub target_id: String,
+    pub containers: Vec<Resource>,
+}
 
 /// How far a prune reaches.
 ///
@@ -51,12 +64,27 @@ pub struct DestructivePlan {
     /// targets themselves.
     warning: Option<String>,
     intent: Intent,
+    /// What depends on the targets, as far as the engine could say.
+    dependents: Vec<Dependents>,
+    /// Set only through [`DestructivePlan::forced`].
+    force: bool,
+    /// Which project a `compose down` is aimed at.
+    compose: Option<ComposeTarget>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Intent {
-    Remove { kind: ResourceKind },
-    Prune { scope: PruneScope },
+    Remove {
+        kind: ResourceKind,
+    },
+    Prune {
+        scope: PruneScope,
+    },
+    /// `compose down`: the project's containers and networks, and its volumes
+    /// only when `with_volumes`.
+    ComposeDown {
+        with_volumes: bool,
+    },
 }
 
 impl DestructivePlan {
@@ -80,7 +108,83 @@ impl DestructivePlan {
                 .then(|| "A volume holds data. Removing it cannot be undone.".to_string()),
             targets,
             intent: Intent::Remove { kind },
+            dependents: Vec::new(),
+            force: false,
+            compose: None,
         })
+    }
+
+    /// Taking a compose project down.
+    ///
+    /// `volumes` is `Some` exactly when `--volumes` was chosen, and then holds
+    /// the project's volumes -- so the flag and the list that justifies it
+    /// cannot disagree. `None` when there is nothing at all to remove.
+    pub fn compose_down(
+        project: ComposeTarget,
+        containers: Vec<Resource>,
+        networks: Vec<Resource>,
+        volumes: Option<Vec<Resource>>,
+    ) -> Option<Self> {
+        let with_volumes = volumes.is_some();
+        let mut targets = containers;
+        targets.extend(networks);
+        targets.extend(volumes.unwrap_or_default());
+        if targets.is_empty() {
+            return None;
+        }
+        let warning = if with_volumes {
+            "This removes the project's volumes with it. Their data cannot be recovered."
+        } else {
+            "Containers and networks are removed. Volumes are kept."
+        };
+        Some(Self {
+            confirmation: project.project.clone(),
+            warning: Some(warning.to_string()),
+            targets,
+            intent: Intent::ComposeDown { with_volumes },
+            dependents: Vec::new(),
+            force: false,
+            compose: Some(project),
+        })
+    }
+
+    /// The same plan, saying what still depends on its targets. Whoever builds
+    /// the plan has asked the engine; this only carries the answer to the
+    /// dialog.
+    pub fn with_dependents(mut self, dependents: Vec<Dependents>) -> Self {
+        self.dependents = dependents;
+        self
+    }
+
+    /// The same removal, forced: the engine is told to remove what is in use.
+    ///
+    /// Takes what was typed and gives nothing back unless it is exactly
+    /// [`FORCE_CONFIRMATION`], so a forced plan cannot exist without a second,
+    /// deliberate confirmation. Only a removal can be forced; anything else
+    /// is `None`.
+    ///
+    /// The warning it sets is engine-neutral, and so says little. Prefer
+    /// [`Self::forced_with_effect`] with
+    /// [`crate::ContainerBackend::force_effect`]: what `--force` does differs
+    /// by engine and by kind.
+    pub fn forced(self, typed: &str) -> Option<Self> {
+        self.forced_with_effect(
+            typed,
+            "Forced: the engine removes this even where it is in use, and anything \
+             depending on it loses it.",
+        )
+    }
+
+    /// [`Self::forced`], with the warning the dialog shows being `effect`: the
+    /// engine's own account of what forcing this kind does, from
+    /// [`crate::ContainerBackend::force_effect`].
+    pub fn forced_with_effect(mut self, typed: &str, effect: &str) -> Option<Self> {
+        if typed.trim() != FORCE_CONFIRMATION || !matches!(self.intent, Intent::Remove { .. }) {
+            return None;
+        }
+        self.force = true;
+        self.warning = Some(effect.to_string());
+        Some(self)
     }
 
     /// Pruning: everything the engine considers unused.
@@ -103,6 +207,9 @@ impl DestructivePlan {
                     .to_string()
             }),
             intent: Intent::Prune { scope },
+            dependents: Vec::new(),
+            force: false,
+            compose: None,
         })
     }
 
@@ -120,6 +227,26 @@ impl DestructivePlan {
 
     pub fn intent(&self) -> Intent {
         self.intent
+    }
+
+    pub fn dependents(&self) -> &[Dependents] {
+        &self.dependents
+    }
+
+    /// Whether anything is still using a target -- the cue to offer
+    /// [`Self::forced`].
+    pub fn has_dependents(&self) -> bool {
+        self.dependents
+            .iter()
+            .any(|entry| !entry.containers.is_empty())
+    }
+
+    pub fn is_forced(&self) -> bool {
+        self.force
+    }
+
+    pub fn compose_target(&self) -> Option<&ComposeTarget> {
+        self.compose.as_ref()
     }
 
     /// Whether what was typed matches.

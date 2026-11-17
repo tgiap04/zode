@@ -21,9 +21,11 @@ use std::sync::Arc;
 use util::command::{Command, CommandHost};
 
 use crate::backend::{BackendEvent, BackendKind, ContainerBackend, ContainerError};
+use crate::inspect::Inspection;
 use crate::kubeconfig::{self, ConfigSource, ConfigTarget, Kubeconfig};
 use crate::kubernetes_types::PodList;
 use crate::resource::{Resource, ResourceAction, ResourceKind};
+use crate::stats::Stats;
 
 const KUBERNETES_KINDS: &[ResourceKind] = &[ResourceKind::Pod];
 
@@ -179,7 +181,7 @@ impl KubernetesBackend {
     /// `NotFound`. Everything else is read out of stderr, because `kubectl`
     /// returns exit 1 for all of it and the words are the only distinguishing
     /// signal there is.
-    async fn stdout(&self, mut command: Command) -> Result<String, ContainerError> {
+    pub(crate) async fn stdout(&self, mut command: Command) -> Result<String, ContainerError> {
         let output = command.output().await.map_err(|error| {
             crate::backend::spawn_failure(self.host.as_ref(), &self.program, error)
         })?;
@@ -205,7 +207,7 @@ impl KubernetesBackend {
 ///
 /// An id with no slash is a name with no namespace, which is what a cluster
 /// without namespaces (or a caller that built the id itself) would produce.
-fn split_id(id: &str) -> (Option<String>, String) {
+pub(crate) fn split_id(id: &str) -> (Option<String>, String) {
     match id.split_once('/') {
         Some((namespace, name)) if !namespace.is_empty() && !name.is_empty() => {
             (Some(namespace.to_string()), name.to_string())
@@ -389,11 +391,17 @@ impl ContainerBackend for KubernetesBackend {
     /// straight back. Irreversible when it does not. The plan's warning carries
     /// that difference; this only runs what was confirmed.
     async fn destroy(&self, plan: &crate::DestructivePlan) -> Result<(), ContainerError> {
-        let crate::Intent::Remove { kind } = plan.intent() else {
-            return Err(ContainerError::CommandFailed {
-                program: self.program.clone(),
-                stderr: "kubernetes has nothing to prune".into(),
-            });
+        let kind = match plan.intent() {
+            crate::Intent::Remove { kind } => kind,
+            crate::Intent::Prune { .. } => {
+                return Err(ContainerError::CommandFailed {
+                    program: self.program.clone(),
+                    stderr: "kubernetes has nothing to prune".into(),
+                });
+            }
+            crate::Intent::ComposeDown { .. } => {
+                return Err(crate::backend::not_offered("compose down"));
+            }
         };
         if kind != ResourceKind::Pod {
             return Err(ContainerError::CommandFailed {
@@ -401,9 +409,18 @@ impl ContainerBackend for KubernetesBackend {
                 stderr: format!("{kind:?} is not something this backend deletes"),
             });
         }
+        // `kubectl delete --force` skips the grace period and can leave the
+        // process running on the node; nothing here asks for it.
+        if plan.is_forced() {
+            return Err(crate::backend::not_offered("a forced pod deletion"));
+        }
         for target in plan.targets() {
             let (namespace, name) = split_id(&target.id);
-            let mut args = vec!["delete".to_string(), "pod".to_string()];
+            // The scope's flags go ahead of the `--`, as in `logs_command`:
+            // `command()` appends them last, where kubectl would read them as
+            // two more pod names.
+            let mut args = self.global_flags();
+            args.extend(["delete".to_string(), "pod".to_string()]);
             if let Some(namespace) = namespace {
                 args.push("-n".into());
                 args.push(namespace);
@@ -411,7 +428,9 @@ impl ContainerBackend for KubernetesBackend {
             args.push("--".into());
             args.push(name);
             let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-            self.stdout(self.command(&borrowed)?).await?;
+            let command =
+                crate::backend::host_command(self.host.as_ref(), &self.program, &borrowed)?;
+            self.stdout(command).await?;
         }
         Ok(())
     }
@@ -461,6 +480,32 @@ impl ContainerBackend for KubernetesBackend {
         args.push("--".into());
         args.push("sh".into());
         Some((self.program.clone(), args))
+    }
+
+    fn supports_inspect(&self, kind: ResourceKind) -> bool {
+        kind == ResourceKind::Pod
+    }
+
+    async fn inspect(
+        &self,
+        kind: ResourceKind,
+        id: &str,
+    ) -> Result<Option<Inspection>, ContainerError> {
+        if kind != ResourceKind::Pod {
+            return Ok(None);
+        }
+        self.inspect_pod(id).await.map(Some)
+    }
+
+    fn supports_stats(&self) -> bool {
+        true
+    }
+
+    async fn stats(&self, ids: &[String]) -> Result<Option<Vec<Stats>>, ContainerError> {
+        if ids.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+        self.top_pods(ids).await
     }
 
     /// `kubectl get pods --watch`, mapped to "pods went stale".

@@ -936,6 +936,22 @@
     },
   },
   {
+    // The list's own keys, bound for the list alone: bound for the whole panel
+    // they would also reach the search box and the log terminal, which both
+    // want space and delete for themselves.
+    "context": "ContainerResults",
+    "use_key_equivalents": true,
+    "bindings": {
+      "up": "menu::SelectPrevious",
+      "down": "menu::SelectNext",
+      "enter": "menu::Confirm",
+      "space": "container::ToggleRowSelection",
+      "delete": "container::RemoveSelectedRows",
+      "backspace": "container::RemoveSelectedRows",
+      "cmd-a": "container::SelectAllRows",
+    },
+  },
+  {
     // Tab is `menu::SelectNext` for any context-less binding, which outranks a
     // binding on the cell's own context; naming the editor under it puts these
     // at the same depth as the editor's keys, and later in the file.
