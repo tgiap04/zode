@@ -194,7 +194,10 @@ impl BranchPickerDelegate {
             Ok(targets) => {
                 self.targets = targets;
                 self.status = match (&self.remote, fetch_failure) {
-                    (None, _) => Status::NoRemote,
+                    // Without a remote the only failure possible is reading the
+                    // remotes, and that is not the same as there being none.
+                    (None, Some(failure)) => Status::ListFailed(failure.to_string()),
+                    (None, None) => Status::NoRemote,
                     (Some(_), Some(failure)) => Status::FetchFailed(failure.to_string()),
                     (Some(_), None) => Status::Ready,
                 };
@@ -360,5 +363,48 @@ impl PickerDelegate for BranchPickerDelegate {
                         .color(Color::Muted),
                 ),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn delegate() -> BranchPickerDelegate {
+        BranchPickerDelegate {
+            modal: WeakEntity::new_invalid(),
+            panel: WeakEntity::new_invalid(),
+            root: PathBuf::from("/repository"),
+            remote: None,
+            targets: Vec::new(),
+            matches: Vec::new(),
+            selected_index: 0,
+            status: Status::Fetching,
+        }
+    }
+
+    #[test]
+    fn remotes_that_could_not_be_read_are_not_reported_as_none() {
+        let mut delegate = delegate();
+        let failure = GitFailure {
+            step: "list remotes",
+            message: "fatal: bad config line 1".to_string(),
+            conflicting_files: Vec::new(),
+        };
+        delegate.finish(None, Some(failure), Ok(Vec::new()));
+        assert_eq!(
+            delegate.status_text().as_deref(),
+            Some("Could not list branches: fatal: bad config line 1")
+        );
+    }
+
+    #[test]
+    fn a_repository_with_no_remote_still_says_so() {
+        let mut delegate = delegate();
+        delegate.finish(None, None, Ok(Vec::new()));
+        assert_eq!(
+            delegate.status_text().as_deref(),
+            Some("This repository has no remote, so only worktrees are listed.")
+        );
     }
 }
