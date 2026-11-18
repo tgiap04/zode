@@ -455,7 +455,7 @@ ztracing_macro = { path = "crates/ztracing_macro" }
 #
 
 aho-corasick = "1.1"
-alacritty_terminal = { git = "https://github.com/tgiap04/alacritty", rev = "e13b2ea761dee4d58b16aa6c12827ea9448e731d" }
+alacritty_terminal = { git = "https://github.com/tgiap04/alacritty", rev = "27357e7701f8f68aa1ae564812e1b271de927c65" }
 any_vec = "0.14"
 anyhow = "1.0.86"
 ashpd = { version = "0.13", default-features = false, features = [

@@ -3102,6 +3102,53 @@ mod tests {
         (terminal, completion_rx)
     }
 
+    /// A program that cannot start must not leave its SIGCHLD handler behind:
+    /// that handler wrote to a pipe nobody reads any more, and the failed write
+    /// overwrote `errno` of whichever thread the signal landed on. A read that
+    /// had just returned EAGAIN then came back as EPIPE, which failed `git` and
+    /// every other child process the app read from on Linux.
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn a_program_that_cannot_start_leaves_errno_alone(cx: &mut TestAppContext) {
+        init_test(cx);
+        let built = cx
+            .update(|cx| {
+                TerminalBuilder::new(
+                    None,
+                    None,
+                    task::Shell::WithArguments {
+                        program: "/nonexistent/zode-terminal-test-program".to_string(),
+                        args: Vec::new(),
+                        title_override: None,
+                    },
+                    HashMap::default(),
+                    CursorShape::default(),
+                    AlternateScroll::On,
+                    None,
+                    vec![],
+                    0,
+                    false,
+                    0,
+                    None,
+                    cx,
+                    vec![],
+                    PathStyle::local(),
+                )
+            })
+            .await;
+        assert!(built.is_err(), "the program does not exist");
+
+        // SAFETY: `close(-1)` only sets `errno`, and `raise` runs whatever
+        // SIGCHLD handler is installed on this thread before it returns.
+        let raised = unsafe {
+            libc::close(-1);
+            libc::raise(libc::SIGCHLD)
+        };
+        let errno = std::io::Error::last_os_error().raw_os_error();
+        assert_eq!(raised, 0);
+        assert_eq!(errno, Some(libc::EBADF), "errno survives the signal");
+    }
+
     fn init_ctrl_click_hyperlink_test(cx: &mut TestAppContext, output: &[u8]) -> Entity<Terminal> {
         cx.update(|cx| {
             let settings_store = settings::SettingsStore::test(cx);
