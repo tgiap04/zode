@@ -20202,7 +20202,7 @@ dependencies = [
 
 [[package]]
 name = "zode"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "activity_indicator",
  "agent_notify",
