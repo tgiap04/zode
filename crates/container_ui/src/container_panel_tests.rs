@@ -31,6 +31,7 @@ pub(crate) fn tab_in_workspace(
 }
 
 pub(crate) fn init_test(cx: &mut TestAppContext) {
+    zlog::init_test();
     cx.update(|cx| {
         let settings_store = settings::SettingsStore::test(cx);
         cx.set_global(settings_store);

@@ -59,3 +59,4 @@ tempfile.workspace = true
 theme.workspace = true
 theme_settings.workspace = true
 workspace = { workspace = true, features = ["test-support"] }
+zlog.workspace = true

@@ -146,13 +146,19 @@ impl Harness {
         let prep = self
             .panel
             .update(cx, |panel, _| panel.confirmation_prep.take());
-        prep.expect("choosing starts reading the checkout").await;
+        let prep = prep.unwrap_or_else(|| {
+            panic!(
+                "choosing {title:?} started no read of the checkout; {}",
+                self.describe(picker, cx)
+            )
+        });
+        prep.await;
         cx.run_until_parked();
         let confirmation = self.workspace.read_with(cx, |workspace, cx| {
             workspace.active_modal::<ConfirmBranchSwitch>(cx)
         });
-        // A read that fails opens the error dialog instead; its words are the
-        // only clue to a failure seen once on a loaded CI runner and never here.
+        // A read that fails opens the error dialog instead, and its words say
+        // which git command failed and how.
         confirmation.unwrap_or_else(|| {
             let shown = self.error_modal(cx).map(|error| {
                 error.read_with(cx, |error, _| {
@@ -168,6 +174,24 @@ impl Harness {
         let task = self.panel.update(cx, |panel, _| panel.switch_task.take());
         task.expect("confirming starts the switch").await;
         self.settle_probe(cx).await;
+    }
+
+    /// What choosing depends on, so a choice that starts nothing says why: the
+    /// list lacked the title, or the open container had lost its checkout.
+    fn describe(&self, picker: &Entity<BranchPicker>, cx: &VisualTestContext) -> String {
+        let (titles, status) = picker.read_with(cx, |picker, cx| {
+            (picker.listed_titles(cx), picker.status_text(cx))
+        });
+        let panel = self.panel.read_with(cx, |panel, _| {
+            format!(
+                "detail open: {}, checkout: {:?}, switching: {:?}, host: {}",
+                panel.detail.is_some(),
+                panel.detail.as_ref().map(|detail| detail.checkout.clone()),
+                panel.branch_switch,
+                panel.command_host.is_some(),
+            )
+        });
+        format!("the picker lists {titles:?} with status {status:?}; {panel}")
     }
 
     fn error_modal(&self, cx: &VisualTestContext) -> Option<Entity<BranchSwitchError>> {

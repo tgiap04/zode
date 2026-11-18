@@ -2409,6 +2409,7 @@ dependencies = [
  "util",
  "workspace",
  "zed_actions",
+ "zlog",
 ]
 
 [[package]]
