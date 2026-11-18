@@ -3697,3 +3697,30 @@ async fn test_window_opacity_fades_the_whole_window(cx: &mut TestAppContext) {
     set_window_settings(cx, 1.0, None);
     assert_eq!(cx.update(|window, _| window.content_opacity()), 1.0);
 }
+
+/// The vibrancy share is read as the window is drawn, so changing it in
+/// settings shows at once, with no theme or vibrancy change to set it off.
+#[gpui::test]
+async fn test_vibrancy_opacity_applies_as_soon_as_it_changes(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    let project = Project::test(fs, [], cx).await;
+    let (_multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
+    let set_share = |share: f32, cx: &mut VisualTestContext| {
+        cx.update(|_, cx| {
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |settings| {
+                    settings.theme.window_opacity = Some(settings::WindowOpacity(1.0));
+                    settings.theme.window_vibrancy = Some(true);
+                    settings.theme.window_vibrancy_opacity = Some(settings::WindowOpacity(share));
+                });
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, _| window.content_opacity())
+    };
+
+    assert_eq!(set_share(0.7, cx), 0.7);
+    assert_eq!(set_share(0.5, cx), 0.5, "a second change shows too");
+}

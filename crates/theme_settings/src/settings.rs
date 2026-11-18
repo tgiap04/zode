@@ -33,10 +33,11 @@ pub fn appearance_to_mode(appearance: Appearance) -> ThemeAppearanceMode {
     }
 }
 
-/// How much of `window_opacity` the backgrounds keep while vibrancy or a
-/// background image is on. Tabby's look measured about 88% opaque (its 40%
-/// backgrounds are stacked several deep), and Zode sits a little below it so
-/// more of what is behind the window shows through.
+/// The default `window_vibrancy_opacity`: how much of `window_opacity` the
+/// backgrounds keep while vibrancy or a background image is on. Tabby's look
+/// measured about 88% opaque (its 40% backgrounds are stacked several deep),
+/// and Zode sits a little below it so more of what is behind the window shows
+/// through. `default.json` carries the same value for the settings UI.
 pub const GLASS_OPACITY: f32 = 0.80;
 
 /// Customizable settings for the UI and theme system.
@@ -85,6 +86,9 @@ pub struct ThemeSettings {
     /// Whether the window shows what is behind it, blurred, through its
     /// backgrounds.
     pub window_vibrancy: bool,
+    /// How much of `window_opacity` the backgrounds keep while vibrancy or a
+    /// background image is on, 0 to 1.
+    pub window_vibrancy_opacity: f32,
     /// The image behind the window's surfaces, by path. Read from there and
     /// never copied.
     pub window_background_image: Option<std::path::PathBuf>,
@@ -433,12 +437,12 @@ impl ThemeSettings {
     }
 
     /// How opaque the window's backgrounds are. With vibrancy or a background
-    /// image it is [`GLASS_OPACITY`] of `window_opacity`, so the glass shows as
-    /// soon as either is turned on, as it does in Tabby; without either it is
-    /// `window_opacity` as set.
+    /// image it is `window_vibrancy_opacity` of `window_opacity`, so the glass
+    /// shows as soon as either is turned on, as it does in Tabby; without
+    /// either it is `window_opacity` as set.
     pub fn background_opacity(&self) -> f32 {
         if self.window_vibrancy || self.window_background_image.is_some() {
-            self.window_opacity * GLASS_OPACITY
+            self.window_opacity * self.window_vibrancy_opacity
         } else {
             self.window_opacity
         }
@@ -614,6 +618,10 @@ impl settings::Settings for ThemeSettings {
                 .map_or(1.0, |opacity| opacity.0)
                 .clamp(0.0, 1.0),
             window_vibrancy: content.window_vibrancy.unwrap_or(false),
+            window_vibrancy_opacity: content
+                .window_vibrancy_opacity
+                .map_or(GLASS_OPACITY, |opacity| opacity.0)
+                .clamp(0.0, 1.0),
             window_background_image: content
                 .window_background_image
                 .as_ref()

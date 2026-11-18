@@ -187,11 +187,13 @@ TBD: Centered layout related settings
   // text and icons stay solid); what shows through is the background image
   // if one is set, otherwise the desktop. `window_vibrancy` blurs what shows
   // through (the desktop through the system's material, or the image) and,
-  // like an image, fades the backgrounds to 88% of `window_opacity`, as in
-  // Tabby. The image is read from its path and never copied: deleting the file
-  // removes it. Settings > Appearance > Window has a file picker for it.
+  // like an image, fades the backgrounds to `window_vibrancy_opacity` of
+  // `window_opacity` (lower shows more through). The image is read from its
+  // path and never copied: deleting the file removes it. Settings > Appearance
+  // > Window has a file picker for it.
   "window_opacity": 1.0,
   "window_vibrancy": false,
+  "window_vibrancy_opacity": 0.8,
   "window_background_image": "",
 
   // Hide the values of in variables from visual display in private files
