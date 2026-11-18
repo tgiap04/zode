@@ -39,6 +39,30 @@ const MIN_REGION_WIDTH: Pixels = px(160.0);
 /// eating the data it exists to open.
 const MAX_REGION_WIDTH: Pixels = px(900.0);
 
+/// The most of a side-by-side view the table list may take, however wide it
+/// was dragged. A width chosen on a large display would otherwise leave a
+/// laptop screen with the list and a sliver of data beside it.
+const MAX_TREE_SHARE: f32 = 0.4;
+
+/// How wide a side-by-side view has to be for a row's detail to stand beside
+/// the rows. Narrower, the detail and the table list together leave the rows
+/// too little to read, so the detail goes under them instead.
+pub(crate) const ROW_DETAIL_BESIDE_WIDTH: Pixels = px(1100.0);
+
+/// The rows keep at least this much height when the panel is short; the
+/// table list gives way first, since it scrolls and the rows are what was asked
+/// for.
+pub(crate) const MIN_RESULTS_HEIGHT: Pixels = px(120.0);
+
+/// The width the table list is drawn at: the one it was given, held to its
+/// share of the view.
+pub(crate) fn fitted_tree_width(width: Pixels, measured: Option<Pixels>) -> Pixels {
+    match measured {
+        Some(measured) => width.min((measured * MAX_TREE_SHARE).max(MIN_REGION_WIDTH)),
+        None => width,
+    }
+}
+
 pub(crate) const LAYOUT_KEY: &str = "database-column-layout";
 
 /// Which boundary is being dragged.
@@ -94,10 +118,20 @@ impl DatabasePanel {
             return;
         };
 
+        // The list's drag starts from the width it is drawn at, not the one
+        // stored: on a narrow view the two differ, and moving from the stored
+        // one would leave the handle still under the pointer for the whole gap.
+        if split == Split::TreeAndBody {
+            self.tree_width = fitted_tree_width(self.tree_width, self.measured_width);
+        }
         let (size, minimum, maximum) = match split {
             Split::TreeAndSql => (&mut self.tree_height, MIN_REGION_HEIGHT, MAX_REGION_HEIGHT),
             Split::SqlAndResults => (&mut self.sql_height, MIN_REGION_HEIGHT, MAX_REGION_HEIGHT),
-            Split::TreeAndBody => (&mut self.tree_width, MIN_REGION_WIDTH, MAX_REGION_WIDTH),
+            Split::TreeAndBody => (
+                &mut self.tree_width,
+                MIN_REGION_WIDTH,
+                fitted_tree_width(MAX_REGION_WIDTH, self.measured_width),
+            ),
         };
         *size = (*size + (pointer - last)).clamp(minimum, maximum);
 
@@ -271,6 +305,26 @@ mod tests {
             MIN_REGION_WIDTH,
             "a width too narrow to read a table name is brought back"
         );
+    }
+
+    #[test]
+    fn the_table_list_keeps_to_its_share_of_a_narrow_view() {
+        assert_eq!(
+            fitted_tree_width(px(600.), Some(px(800.))),
+            px(320.),
+            "a list dragged wide on a large display gives way on a small one"
+        );
+        assert_eq!(
+            fitted_tree_width(DEFAULT_TREE_WIDTH, Some(px(1600.))),
+            DEFAULT_TREE_WIDTH,
+            "a list within its share is drawn as it was left"
+        );
+        assert_eq!(
+            fitted_tree_width(px(600.), Some(px(200.))),
+            MIN_REGION_WIDTH,
+            "never narrower than a table name can be read in"
+        );
+        assert_eq!(fitted_tree_width(px(600.), None), px(600.));
     }
 
     #[test]

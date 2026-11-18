@@ -95,6 +95,50 @@ pub struct ResponseError {
     /// short line and keep the rest for whoever wants it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Where in the request the fault was, when the driver can tell. Lets a UI
+    /// mark the cell instead of printing the engine's sentence.
+    ///
+    /// Read leniently: it is a hint, and a shape this build does not expect
+    /// costs the caller the hint, not the answer.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_data"
+    )]
+    pub data: Option<ErrorData>,
+}
+
+/// Whatever of `data` can be read, and nothing when none of it can.
+///
+/// Field by field rather than through `ErrorData`'s derive, which refuses the
+/// whole value over one field of the wrong type -- and with it the whole
+/// response, which the caller would then wait out the request timeout for.
+fn lenient_data<'de, D>(deserializer: D) -> Result<Option<ErrorData>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let Some(object) = value.as_object() else {
+        return Ok(None);
+    };
+    let data = ErrorData {
+        change: object.get("change").and_then(Value::as_u64),
+        column: object
+            .get("column")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    };
+    Ok((data != ErrorData::default()).then_some(data))
+}
+
+/// Which part of an `update_rows` call an error is about.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ErrorData {
+    /// Index into the request's `changes`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
 }
 
 /// Every link of an error's `source()` chain, joined into one line.
@@ -130,11 +174,17 @@ impl ResponseError {
             code,
             message: message.into(),
             detail: None,
+            data: None,
         }
     }
 
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
         self.detail = Some(detail.into());
+        self
+    }
+
+    pub fn with_data(mut self, data: ErrorData) -> Self {
+        self.data = Some(data);
         self
     }
 }
@@ -162,7 +212,21 @@ pub enum ErrorCode {
     Unsupported,
     /// Cancelled at the caller's request -- not a failure to report as one.
     Cancelled,
+    /// An `update_rows` change matched a number of rows other than one -- the
+    /// row was changed or deleted since the grid read it. The whole batch was
+    /// rolled back.
+    Conflict,
+    /// The engine rejected a value in an `update_rows` change: a failed cast, a
+    /// constraint. The whole batch was rolled back.
+    InvalidValue,
     Internal,
+    /// A code this build does not know, from a newer driver.
+    ///
+    /// Without it one new code makes the whole response undecodable, and the
+    /// caller sits out the request timeout instead of reading an error. Treat
+    /// it as `Internal`: a failure, with the driver's `message` to show.
+    #[serde(other)]
+    Other,
 }
 
 #[cfg(test)]
@@ -225,6 +289,213 @@ mod tests {
         };
         let decoded: Cell = serde_json::from_str(&serde_json::to_string(&cell).unwrap()).unwrap();
         assert_eq!(decoded, cell, "a wide number must survive byte for byte");
+    }
+
+    /// The direction that bites in practice: a driver newer than this build
+    /// answers with a code this build has never heard of. If that failed to
+    /// decode, the client would log "undecodable line", drop the answer and the
+    /// caller would wait out the whole request timeout for an error that had
+    /// already arrived.
+    #[test]
+    fn a_code_from_a_newer_driver_still_decodes_as_an_error() {
+        let line = r#"{"jsonrpc":"2.0","id":3,"error":{"code":"quota_exceeded","message":"too many rows"}}"#;
+        let decoded: Response = serde_json::from_str(line).expect("an unknown code must parse");
+        let error = decoded.error.expect("the error must survive");
+        assert_eq!(error.code, ErrorCode::Other);
+        assert_eq!(error.message, "too many rows");
+    }
+
+    #[test]
+    fn the_new_codes_use_their_documented_wire_names() {
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::Conflict).unwrap(),
+            "\"conflict\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::InvalidValue).unwrap(),
+            "\"invalid_value\""
+        );
+        assert_eq!(
+            serde_json::from_str::<ErrorCode>("\"invalid_value\"").unwrap(),
+            ErrorCode::InvalidValue
+        );
+    }
+
+    /// An error from a driver that predates `data` has no such key, and one
+    /// that carries none must not put one on the wire for a client that
+    /// predates it.
+    #[test]
+    fn error_data_is_optional_in_both_directions() {
+        let old = r#"{"code":"syntax","message":"bad"}"#;
+        let decoded: ResponseError = serde_json::from_str(old).unwrap();
+        assert_eq!(decoded.data, None);
+
+        let encoded = serde_json::to_value(ResponseError::new(ErrorCode::Syntax, "bad")).unwrap();
+        assert!(encoded.get("data").is_none(), "{encoded}");
+
+        let with_data = ResponseError::new(ErrorCode::InvalidValue, "bad").with_data(ErrorData {
+            change: Some(2),
+            column: Some("age".into()),
+        });
+        let round: ResponseError =
+            serde_json::from_str(&serde_json::to_string(&with_data).unwrap()).unwrap();
+        assert_eq!(round.data, with_data.data);
+    }
+
+    /// `data` is a hint for marking a cell. A driver that sends it in a shape
+    /// this build does not expect -- a string where a number was promised, an
+    /// object that is not one -- must cost the caller the hint and nothing else:
+    /// strict decoding made the whole answer undecodable, and the caller sat out
+    /// the request timeout for an error that had already arrived.
+    #[test]
+    fn an_error_whose_data_is_malformed_still_arrives_with_its_code_and_message() {
+        for data in [
+            serde_json::json!({ "change": "two", "column": 7 }),
+            serde_json::json!({ "change": -1 }),
+            serde_json::json!({ "change": 1.5, "column": ["a"] }),
+            serde_json::json!("oops"),
+            serde_json::json!([1, 2]),
+            serde_json::json!(7),
+            serde_json::json!(null),
+            serde_json::json!({}),
+        ] {
+            let line = serde_json::json!({
+                "jsonrpc": "2.0", "id": 4,
+                "error": { "code": "invalid_value", "message": "bad", "data": data },
+            });
+            let decoded: Response = serde_json::from_value(line)
+                .unwrap_or_else(|error| panic!("{data}: the answer must decode: {error}"));
+            let error = decoded.error.expect("the error survives");
+            assert_eq!(error.code, ErrorCode::InvalidValue, "{data}");
+            assert_eq!(error.message, "bad", "{data}");
+            assert_eq!(error.data, None, "{data}: nothing usable in it");
+        }
+    }
+
+    /// Whatever part of `data` can be read is kept, and a field this build has
+    /// never heard of is ignored.
+    #[test]
+    fn the_readable_part_of_error_data_survives_the_unreadable_part() {
+        let decoded: ResponseError = serde_json::from_value(serde_json::json!({
+            "code": "invalid_value", "message": "bad",
+            "data": { "change": "two", "column": "age", "row": 9 },
+        }))
+        .expect("decodes");
+        assert_eq!(
+            decoded.data,
+            Some(ErrorData {
+                change: None,
+                column: Some("age".into())
+            })
+        );
+        let decoded: ResponseError = serde_json::from_value(serde_json::json!({
+            "code": "conflict", "message": "gone", "data": { "change": 3, "column": null },
+        }))
+        .expect("decodes");
+        assert_eq!(
+            decoded.data,
+            Some(ErrorData {
+                change: Some(3),
+                column: None
+            })
+        );
+    }
+
+    /// A UI built before `row_updates` existed asks nothing of it, and a
+    /// driver that never heard of it reports nothing: both must read as "no".
+    #[test]
+    fn a_driver_that_never_heard_of_row_updates_cannot_update_rows() {
+        let old: InitializeResult = serde_json::from_str(
+            r#"{"protocol_version":1,"driver_name":"x","capabilities":{"cancellation":true}}"#,
+        )
+        .unwrap();
+        assert!(!old.capabilities.row_updates);
+        let bare: InitializeResult =
+            serde_json::from_str(r#"{"protocol_version":1,"driver_name":"x"}"#).unwrap();
+        assert!(!bare.capabilities.row_updates);
+    }
+
+    /// The wire shape is the contract third-party drivers code against.
+    #[test]
+    fn update_rows_params_have_the_documented_shape() {
+        let params = UpdateRowsParams {
+            connection_id: ConnectionId("c1".into()),
+            schema: "public".into(),
+            table: "users".into(),
+            changes: vec![RowChange {
+                key: vec![ColumnValue {
+                    column: "id".into(),
+                    value: EditValue::Text { value: "7".into() },
+                }],
+                set: vec![ColumnValue {
+                    column: "email".into(),
+                    value: EditValue::Null,
+                }],
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&params).unwrap(),
+            serde_json::json!({
+                "connection_id": "c1",
+                "schema": "public",
+                "table": "users",
+                "changes": [{
+                    "key": [{"column": "id", "value": {"kind": "text", "value": "7"}}],
+                    "set": [{"column": "email", "value": {"kind": "null"}}],
+                }],
+            })
+        );
+        assert_eq!(UpdateRows::NAME, "update_rows");
+        assert!(METHOD_NAMES.contains(&"update_rows"));
+    }
+
+    /// Typing nothing into a text column is a value; clearing it to NULL is a
+    /// different instruction -- through JSON, not just through the type.
+    #[test]
+    fn an_empty_edit_is_not_a_null_edit() {
+        let null = serde_json::to_string(&EditValue::Null).unwrap();
+        let empty = serde_json::to_string(&EditValue::Text {
+            value: String::new(),
+        })
+        .unwrap();
+        assert_ne!(null, empty);
+        assert_eq!(
+            serde_json::from_str::<EditValue>(&null).unwrap(),
+            EditValue::Null
+        );
+        assert_eq!(
+            serde_json::from_str::<EditValue>(&empty).unwrap(),
+            EditValue::Text {
+                value: String::new()
+            }
+        );
+    }
+
+    #[test]
+    fn a_cell_becomes_an_edit_value_unless_only_its_size_is_known() {
+        let text = |value: &str| {
+            Some(EditValue::Text {
+                value: value.into(),
+            })
+        };
+        assert_eq!(EditValue::from_cell(&Cell::Null), Some(EditValue::Null));
+        assert_eq!(
+            EditValue::from_cell(&Cell::Number {
+                value: "1.50".into()
+            }),
+            text("1.50")
+        );
+        assert_eq!(
+            EditValue::from_cell(&Cell::Bool { value: true }),
+            text("true")
+        );
+        assert_eq!(
+            EditValue::from_cell(&Cell::Timestamp {
+                value: "2026-08-15 10:00:00".into()
+            }),
+            text("2026-08-15 10:00:00")
+        );
+        assert_eq!(EditValue::from_cell(&Cell::Binary { byte_len: 4 }), None);
     }
 
     #[test]

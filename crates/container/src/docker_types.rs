@@ -18,6 +18,7 @@ use crate::resource::{ComposeLabels, Resource, ResourceKind, RunState};
 const COMPOSE_PROJECT: &str = "com.docker.compose.project";
 const COMPOSE_SERVICE: &str = "com.docker.compose.service";
 const COMPOSE_WORKING_DIR: &str = "com.docker.compose.project.working_dir";
+const COMPOSE_CONFIG_FILES: &str = "com.docker.compose.project.config_files";
 
 /// `Labels` as the engines print it: Docker joins `key=value` pairs with commas
 /// into one string, Podman may print an object. Either, or null, must read.
@@ -40,6 +41,10 @@ impl Labels {
         let working_dir = pairs
             .remove(COMPOSE_WORKING_DIR)
             .filter(|dir| !dir.is_empty());
+        let config_files = pairs
+            .remove(COMPOSE_CONFIG_FILES)
+            .map(|files| crate::operations::split_config_files(&files))
+            .unwrap_or_default();
         let project = pairs.remove(COMPOSE_PROJECT);
         let service = pairs.remove(COMPOSE_SERVICE);
         if working_dir.is_none() && project.is_none() && service.is_none() {
@@ -49,6 +54,7 @@ impl Labels {
             project: project.unwrap_or_default(),
             service: service.unwrap_or_default(),
             working_dir,
+            config_files,
         })
     }
 }

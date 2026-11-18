@@ -1833,7 +1833,7 @@ impl AgentView {
             // the task that was already awaiting the binary, rather than at
             // construction, because a tab has to be able to exist before it knows
             // whether its session is still on disk.
-            let session = match resolve_session(
+            let (start, transcript) = resolve_session(
                 &agent,
                 &intent,
                 anchor,
@@ -1841,8 +1841,8 @@ impl AgentView {
                 session_host,
                 cx,
             )
-            .await
-            {
+            .await;
+            let session = match start {
                 SessionStart::Fresh => None,
                 SessionStart::Command(command) => Some(command),
                 SessionStart::Gone => {
@@ -1864,17 +1864,54 @@ impl AgentView {
             // and the spawn come to disagree about which checkout this is.
             let cwd = launch_cwd(session.as_ref(), default_cwd);
 
-            let extra_args = match resolve_bypass(
+            // `--resume` alone starts the CLI in its configured default mode,
+            // not the one the session was in, so a session left running without
+            // prompts would come back asking -- or in whatever mode the user
+            // set as their default. A fork reads its source's transcript and so
+            // starts in the mode its source was left in. A transcript that
+            // cannot be read leaves the CLI's default, as before.
+            let previous_mode = match transcript.filter(|_| session.is_some()) {
+                Some(transcript) => cx
+                    .background_spawn(async move {
+                        agent_sessions::last_claude_permission_mode(&transcript)
+                    })
+                    .await
+                    .log_err()
+                    .flatten(),
+                None => None,
+            };
+            let restored = prompts_after_previous_mode(prompts, previous_mode.as_deref());
+
+            let resolved = resolve_bypass(
                 &agent,
                 &binary,
                 bypass_host.as_ref(),
                 cwd.as_deref(),
-                prompts,
+                restored,
                 &store,
                 cx,
             )
-            .await
-            {
+            .await;
+            // Nobody asked for this bypass; it was read off the transcript. If
+            // the flag cannot be confirmed, the session still opens, the way it
+            // is configured, rather than failing over a request never made.
+            let resolved = match resolved {
+                Err(refusal) if restored != prompts => {
+                    log::warn!("not restoring a session's bypass: {refusal}");
+                    resolve_bypass(
+                        &agent,
+                        &binary,
+                        bypass_host.as_ref(),
+                        cwd.as_deref(),
+                        prompts,
+                        &store,
+                        cx,
+                    )
+                    .await
+                }
+                resolved => resolved,
+            };
+            let extra_args = match resolved {
                 Ok(extra_args) => extra_args,
                 Err(refusal) => {
                     this.update(cx, |this, cx| {
@@ -1887,7 +1924,9 @@ impl AgentView {
                 }
             };
 
-            let extra_args_taken = extra_args.clone();
+            let bypassed = !extra_args.is_empty();
+            let mut extra_args = extra_args;
+            extra_args.extend(previous_mode_args(previous_mode.as_deref(), bypassed));
             let terminal = project
                 .update(cx, |project, cx| {
                     project.create_terminal_task(
@@ -1900,7 +1939,7 @@ impl AgentView {
             this.update_in(cx, |this, window, cx| {
                 // Set here, beside the terminal the args went into, so the field
                 // and the argv are decided in one place and cannot drift.
-                this.bypassed = !extra_args_taken.is_empty();
+                this.bypassed = bypassed;
                 match terminal {
                     Ok(terminal) => {
                         // Taken before the handle is given away, and from the
@@ -2188,26 +2227,35 @@ async fn resolve_session(
     default_cwd: Option<std::path::PathBuf>,
     session_host: Option<AgentSessionHost>,
     cx: &mut gpui::AsyncApp,
-) -> SessionStart {
+) -> (SessionStart, Option<std::path::PathBuf>) {
     let Some(host) = session_host else {
-        return hostless_session_start(intent);
+        return (hostless_session_start(intent), None);
     };
     let id = match intent {
-        SessionIntent::Untracked => return SessionStart::Fresh,
+        SessionIntent::Untracked => return (SessionStart::Fresh, None),
         SessionIntent::Tracked(id) | SessionIntent::Fork(id) => id.to_string(),
     };
     let Some(kind) = AgentKind::from_builtin_agent_id(agent.as_ref()) else {
         // A user-configured agent: this editor reads four stores and has no
         // business guessing at a fifth's.
-        return SessionStart::Fresh;
+        return (SessionStart::Fresh, None);
     };
     let lookup = cx
         .update(|cx| host.find_pinned(kind, &id, anchor, cx))
         .await;
+    // Only a transcript on this machine can be read here: a remote host's
+    // `log_path` names a file on that host.
+    let transcript = match (&host, &lookup) {
+        (AgentSessionHost::Local(_), Ok(Some(found))) if kind == AgentKind::Claude => {
+            found.log_path.clone()
+        }
+        _ => None,
+    };
     // Asked only to spell the command line, which it builds from the summary
     // without reading anything.
     let commands = agent_sessions::provider_for(kind);
-    start_after_lookup(commands.as_ref(), intent, default_cwd, &id, lookup)
+    let start = start_after_lookup(commands.as_ref(), intent, default_cwd, &id, lookup);
+    (start, transcript)
 }
 
 /// What a tab with no host to ask starts as: a collaboration guest's, whose
@@ -2413,6 +2461,38 @@ impl AgentView {
         }
         self.restart(window, cx);
         cx.emit(AgentViewEvent::UpdateTab);
+    }
+}
+
+/// The Claude modes a resumed session is started back in with
+/// `--permission-mode`. `bypassPermissions` is not one: running without prompts
+/// goes through [`resolve_bypass`], which confirms the flag first. A mode this
+/// list does not know is left to the CLI's default rather than passed to a
+/// CLI that might refuse it and not start.
+const RESTORABLE_PERMISSION_MODES: &[&str] = &["acceptEdits", "auto", "plan", "dontAsk", "manual"];
+
+/// A session that was last running without prompts asks for that again, the
+/// way the one-off launch does -- so the flag is still verified and the tab
+/// still marked. Anything the reader asked for by name is left as asked.
+fn prompts_after_previous_mode(
+    prompts: PermissionPrompts,
+    previous_mode: Option<&str>,
+) -> PermissionPrompts {
+    match (prompts, previous_mode) {
+        (PermissionPrompts::AsConfigured, Some("bypassPermissions")) => PermissionPrompts::SkipOnce,
+        _ => prompts,
+    }
+}
+
+/// The arguments that start a resumed session back in its previous mode, when
+/// that mode is not running without prompts. A launch that is bypassing already
+/// carries its flag, and a second mode beside it would contradict it.
+fn previous_mode_args(previous_mode: Option<&str>, bypassed: bool) -> Vec<String> {
+    match previous_mode {
+        Some(mode) if !bypassed && RESTORABLE_PERMISSION_MODES.contains(&mode) => {
+            vec!["--permission-mode".to_string(), mode.to_string()]
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -3615,6 +3695,49 @@ mod tests {
             Some(PathBuf::from("/here")),
             "a fresh session falls back to the window's own worktree"
         );
+    }
+
+    /// A session last running without prompts comes back without them, through
+    /// the verified one-off path; a request made by name is never overridden.
+    #[test]
+    fn a_session_left_bypassing_resumes_bypassing() {
+        assert_eq!(
+            prompts_after_previous_mode(PermissionPrompts::AsConfigured, Some("bypassPermissions")),
+            PermissionPrompts::SkipOnce
+        );
+        assert_eq!(
+            prompts_after_previous_mode(PermissionPrompts::AsConfigured, Some("auto")),
+            PermissionPrompts::AsConfigured
+        );
+        assert_eq!(
+            prompts_after_previous_mode(PermissionPrompts::AsConfigured, None),
+            PermissionPrompts::AsConfigured
+        );
+        assert_eq!(
+            prompts_after_previous_mode(PermissionPrompts::SkipOnce, Some("plan")),
+            PermissionPrompts::SkipOnce
+        );
+    }
+
+    #[test]
+    fn a_resumed_session_is_started_back_in_its_previous_mode() {
+        assert_eq!(
+            previous_mode_args(Some("plan"), false),
+            ["--permission-mode", "plan"]
+        );
+        assert!(
+            previous_mode_args(Some("plan"), true).is_empty(),
+            "a launch carrying the bypass flag must not also name a mode"
+        );
+        assert!(
+            previous_mode_args(Some("bypassPermissions"), false).is_empty(),
+            "bypass is only ever passed through the verified flag"
+        );
+        assert!(
+            previous_mode_args(Some("someFutureMode"), false).is_empty(),
+            "an unknown mode is left to the CLI's default"
+        );
+        assert!(previous_mode_args(None, false).is_empty());
     }
 
     /// A counterweight, and it says so: this is green whether or not the bypass
@@ -6943,6 +7066,7 @@ mod tests {
                 &mut cx.to_async(),
             )
             .await
+            .0
         }
 
         fn args_of(start: SessionStart) -> Option<(Vec<String>, PathBuf)> {
@@ -6971,6 +7095,50 @@ mod tests {
                     PathBuf::from("/home/u/project")
                 )),
                 "the session the host holds is resumed where it ran"
+            );
+        }
+
+        /// The transcript a resumed session's mode is read from: the found
+        /// session's own, and only from a store on this machine.
+        #[gpui::test]
+        async fn a_resumed_session_hands_back_its_transcript(cx: &mut TestAppContext) {
+            let log = PathBuf::from("/home/u/.claude/projects/p/one.jsonl");
+            let found = copy("/home/u/project", Some(log.clone()));
+            let (_, transcript) = resolve_session(
+                &AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                &SessionIntent::Tracked(ONE.into()),
+                None,
+                Some(PathBuf::from("/default")),
+                host_holding(Ok(Some(found))),
+                &mut cx.to_async(),
+            )
+            .await;
+            assert_eq!(transcript, Some(log.clone()));
+
+            let (_, transcript) = resolve_session(
+                &AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
+                &SessionIntent::Tracked(ONE.into()),
+                None,
+                Some(PathBuf::from("/default")),
+                host_holding(Ok(None)),
+                &mut cx.to_async(),
+            )
+            .await;
+            assert_eq!(transcript, None, "a session never written has no mode");
+
+            let found = copy("/home/u/project", Some(log));
+            let (_, transcript) = resolve_session(
+                &AgentId::new(project::CODEX_AGENT_ID.to_string()),
+                &SessionIntent::Tracked(ONE.into()),
+                None,
+                Some(PathBuf::from("/default")),
+                host_holding(Ok(Some(found))),
+                &mut cx.to_async(),
+            )
+            .await;
+            assert_eq!(
+                transcript, None,
+                "only a Claude transcript records its permission mode"
             );
         }
 

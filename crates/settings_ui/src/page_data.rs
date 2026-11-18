@@ -1051,12 +1051,12 @@ fn appearance_page() -> SettingsPage {
         ]
     }
 
-    fn window_section() -> [SettingsPageItem; 4] {
+    fn window_section() -> [SettingsPageItem; 5] {
         [
             SettingsPageItem::SectionHeader("Window"),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Window Opacity",
-                description: "How opaque the window's backgrounds are, from 0 (see-through) to 1 (solid). On macOS text and icons stay solid. With vibrancy or an image, backgrounds keep 90% of this.",
+                description: "How opaque the window's backgrounds are, from 0 (see-through) to 1 (solid). On macOS text and icons stay solid. With vibrancy or an image, backgrounds keep the Vibrancy Opacity share of this.",
                 field: Box::new(SettingField {
                     json_path: Some("window_opacity"),
                     pick: |settings_content| settings_content.theme.window_opacity.as_ref(),
@@ -1075,6 +1075,21 @@ fn appearance_page() -> SettingsPage {
                     pick: |settings_content| settings_content.theme.window_vibrancy.as_ref(),
                     write: |settings_content, value| {
                         settings_content.theme.window_vibrancy = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Vibrancy Opacity",
+                description: "How much of the window opacity the backgrounds keep while vibrancy or a background image is on, from 0 to 1. Lower shows more of what is behind the window.",
+                field: Box::new(SettingField {
+                    json_path: Some("window_vibrancy_opacity"),
+                    pick: |settings_content| {
+                        settings_content.theme.window_vibrancy_opacity.as_ref()
+                    },
+                    write: |settings_content, value| {
+                        settings_content.theme.window_vibrancy_opacity = value;
                     },
                 }),
                 metadata: None,

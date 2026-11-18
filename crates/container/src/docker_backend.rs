@@ -9,13 +9,17 @@
 use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt as _};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use util::command::{Command, CommandHost};
 
 use crate::backend::{BackendEvent, BackendKind, ContainerBackend, ContainerError};
 use crate::docker_resources::{ComposeProject, DockerImage, DockerNetwork, DockerVolume};
 use crate::docker_types::DockerContainer;
+use crate::inspect::Inspection;
+use crate::operations::{ComposeOp, ComposeTarget, ImageLayer, Op, RunSpec};
 use crate::podman::PodmanPod;
 use crate::resource::{Resource, ResourceAction, ResourceKind};
+use crate::stats::Stats;
 
 /// Podman's kinds are Docker's plus the one word Docker has no equivalent for.
 ///
@@ -59,6 +63,9 @@ pub struct DockerBackend {
     /// The machine the engine is asked on: this one, or a remote project's
     /// host. Every command below is built through it.
     host: Arc<dyn CommandHost>,
+    /// Set once `compose version` has answered, so the panel does not spawn a
+    /// process every time a menu opens.
+    compose_confirmed: AtomicBool,
 }
 
 impl DockerBackend {
@@ -67,6 +74,7 @@ impl DockerBackend {
             program: "docker".into(),
             kind: BackendKind::Docker,
             host,
+            compose_confirmed: AtomicBool::new(false),
         }
     }
 
@@ -75,6 +83,7 @@ impl DockerBackend {
             program: "podman".into(),
             kind: BackendKind::Podman,
             host,
+            compose_confirmed: AtomicBool::new(false),
         }
     }
 
@@ -87,7 +96,20 @@ impl DockerBackend {
             program: program.into(),
             kind,
             host: Arc::new(util::command::LocalCommandHost),
+            compose_confirmed: AtomicBool::new(false),
         }
+    }
+
+    pub(crate) fn program(&self) -> &str {
+        &self.program
+    }
+
+    pub(crate) fn compose_confirmed(&self) -> bool {
+        self.compose_confirmed.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn confirm_compose(&self) {
+        self.compose_confirmed.store(true, Ordering::Relaxed);
     }
 
     fn command(&self, args: &[&str]) -> Result<Command, ContainerError> {
@@ -101,7 +123,7 @@ impl DockerBackend {
     /// spawn itself, and a live binary that cannot reach its daemon is confirmed
     /// by asking `info` -- which only happens on the error path, so the common
     /// case pays nothing for it.
-    async fn stdout(&self, args: &[&str]) -> Result<String, ContainerError> {
+    pub(crate) async fn stdout(&self, args: &[&str]) -> Result<String, ContainerError> {
         let mut command = self.command(args)?;
         let output = command.output().await.map_err(|error| {
             crate::backend::spawn_failure(self.host.as_ref(), &self.program, error)
@@ -155,16 +177,18 @@ impl DockerBackend {
 /// `None` for a kind with no removal, which is the only reason this is fallible.
 /// `--` before the id every time: the id came from the engine, but the name
 /// inside it was chosen by whoever made the resource.
-fn remove_args(kind: ResourceKind, id: &str) -> Result<Vec<String>, ContainerError> {
+///
+/// `--force` only when the plan was forced (see
+/// [`crate::DestructivePlan::forced`]): without it a running container or an
+/// image in use refuses, which is the engine telling the truth rather than this
+/// crate deciding for somebody.
+fn remove_args(kind: ResourceKind, id: &str, force: bool) -> Result<Vec<String>, ContainerError> {
     let args = match kind {
-        // Not `-f`: forcing kills a running container, and "remove" was not
-        // "kill". A running container refuses, which is the engine telling the
-        // truth rather than this crate deciding for somebody.
-        ResourceKind::Container => vec!["rm", "--"],
-        ResourceKind::Image => vec!["rmi", "--"],
-        ResourceKind::Volume => vec!["volume", "rm", "--"],
-        ResourceKind::Network => vec!["network", "rm", "--"],
-        ResourceKind::Pod => vec!["pod", "rm", "--"],
+        ResourceKind::Container => vec!["rm"],
+        ResourceKind::Image => vec!["rmi"],
+        ResourceKind::Volume => vec!["volume", "rm"],
+        ResourceKind::Network => vec!["network", "rm"],
+        ResourceKind::Pod => vec!["pod", "rm"],
         other => {
             return Err(ContainerError::CommandFailed {
                 program: "docker".into(),
@@ -173,8 +197,25 @@ fn remove_args(kind: ResourceKind, id: &str) -> Result<Vec<String>, ContainerErr
         }
     };
     let mut args: Vec<String> = args.into_iter().map(String::from).collect();
+    if force {
+        args.push("--force".into());
+    }
+    args.push("--".into());
     args.push(id.to_string());
     Ok(args)
+}
+
+/// What `rm`, `rmi` and the rest are given for a target.
+///
+/// An image row from `docker images` is one *tag* of an image, and the id is
+/// shared by every tag of it: `rmi <id>` of an image with two tags is refused
+/// ("referenced in multiple repositories"), and with `--force` removes both.
+/// A row that names a `repo:tag` is removed by that name, which untags just it.
+fn removal_handle(kind: ResourceKind, target: &Resource) -> &str {
+    if kind == ResourceKind::Image {
+        return crate::docker_resources::tagged_reference(target).unwrap_or(&target.id);
+    }
+    &target.id
 }
 
 impl DockerBackend {
@@ -188,7 +229,7 @@ impl DockerBackend {
             .stdout(&["images", "-f", "dangling=true", "--format", "{{json .}}"])
             .await?;
         targets.extend(
-            parse_json_lines::<DockerImage>(&images)
+            parse_json_lines_strict::<DockerImage>(&images)?
                 .into_iter()
                 .map(DockerImage::into_resource),
         );
@@ -206,7 +247,7 @@ impl DockerBackend {
             ])
             .await?;
         targets.extend(
-            parse_json_lines::<DockerContainer>(&stopped)
+            parse_json_lines_strict::<DockerContainer>(&stopped)?
                 .into_iter()
                 .map(DockerContainer::into_resource),
         );
@@ -223,7 +264,7 @@ impl DockerBackend {
                 ])
                 .await?;
             targets.extend(
-                parse_json_lines::<DockerVolume>(&volumes)
+                parse_json_lines_strict::<DockerVolume>(&volumes)?
                     .into_iter()
                     .map(DockerVolume::into_resource),
             );
@@ -233,28 +274,75 @@ impl DockerBackend {
     }
 }
 
-/// Reads however many JSON values stdout holds.
+/// The rows of `--format '{{json .}}'` output, each read on its own: one JSON
+/// value after another, whether they sit one to a line or are pretty-printed
+/// over several (the shape `kubectl --watch` emits, which this reader carries
+/// over to). A single `from_str` would fail the moment there were two rows.
 ///
-/// `--format '{{json .}}'` prints one object per line rather than one array, so
-/// a single `from_str` would fail the moment there are two rows. A
-/// `StreamDeserializer` reads values back to back and does not care whether they
-/// are separated by a newline or pretty-printed over several -- which is the
-/// same shape `kubectl --watch` emits, so this reader carries over.
-///
-/// A row that will not parse is dropped with a log rather than failing the list:
-/// one unreadable container must not hide the other nine.
-pub(crate) fn parse_json_lines<T: serde::de::DeserializeOwned>(stdout: &str) -> Vec<T> {
-    let mut out = Vec::new();
-    for value in serde_json::Deserializer::from_str(stdout).into_iter::<T>() {
-        match value {
-            Ok(value) => out.push(value),
-            Err(error) => {
-                log::warn!("skipping an unreadable row of container output: {error}");
-                break;
+/// A row that will not parse is its own `Err` and reading resumes at the next
+/// line, so one bad row is only itself.
+fn json_rows<T: serde::de::DeserializeOwned>(stdout: &str) -> Vec<Result<T, serde_json::Error>> {
+    let mut rows = Vec::new();
+    let mut rest = stdout;
+    loop {
+        rest = rest.trim_start();
+        if rest.is_empty() {
+            return rows;
+        }
+        let mut stream = serde_json::Deserializer::from_str(rest).into_iter::<T>();
+        match stream.next() {
+            Some(Ok(row)) => {
+                rows.push(Ok(row));
+                rest = &rest[stream.byte_offset()..];
             }
+            Some(Err(error)) => {
+                rows.push(Err(error));
+                rest = rest.split_once('\n').map_or("", |(_, tail)| tail);
+            }
+            None => return rows,
         }
     }
-    out
+}
+
+/// Reads a listing for display: a row that will not parse is dropped with a
+/// log, because one unreadable container must not hide the other nine.
+///
+/// Never for something a destructive plan or a "who depends on this" answer is
+/// built from -- there a missing row is a thing silently left out of what is
+/// about to be lost. Those use [`parse_json_lines_strict`].
+pub(crate) fn parse_json_lines<T: serde::de::DeserializeOwned>(stdout: &str) -> Vec<T> {
+    json_rows(stdout)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            row.inspect_err(|error| {
+                log::warn!(
+                    "skipping row {} of container output, which could not be read: {error}",
+                    index + 1
+                );
+            })
+            .ok()
+        })
+        .collect()
+}
+
+/// Reads a listing that must be whole: any row that will not parse fails the
+/// read, naming which one.
+pub(crate) fn parse_json_lines_strict<T: serde::de::DeserializeOwned>(
+    stdout: &str,
+) -> Result<Vec<T>, ContainerError> {
+    json_rows(stdout)
+        .into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            row.map_err(|error| ContainerError::Parse {
+                detail: format!(
+                    "row {} of the engine's list could not be read: {error}",
+                    index + 1
+                ),
+            })
+        })
+        .collect()
 }
 
 #[async_trait]
@@ -409,12 +497,27 @@ impl ContainerBackend for DockerBackend {
     async fn destroy(&self, plan: &crate::DestructivePlan) -> Result<(), ContainerError> {
         match plan.intent() {
             crate::Intent::Remove { kind } => {
+                // A force that only suppresses "no such volume" is not what
+                // the person agreed to; refuse before running anything.
+                if plan.is_forced() && self.force_effect(kind).is_none() {
+                    return Err(crate::backend::not_offered(&format!(
+                        "forcing the removal of a {kind:?}"
+                    )));
+                }
                 for target in plan.targets() {
-                    let args = remove_args(kind, &target.id)?;
+                    let args = remove_args(kind, removal_handle(kind, target), plan.is_forced())?;
                     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
                     self.stdout(&borrowed).await?;
                 }
                 Ok(())
+            }
+            crate::Intent::ComposeDown { with_volumes } => {
+                let Some(target) = plan.compose_target() else {
+                    return Err(ContainerError::Invalid {
+                        detail: "a compose down plan without a project".into(),
+                    });
+                };
+                self.compose_down(target, with_volumes).await
             }
             crate::Intent::Prune { scope } => {
                 let mut args = vec!["system", "prune", "--force"];
@@ -477,6 +580,156 @@ impl ContainerBackend for DockerBackend {
                 "sh".into(),
             ],
         ))
+    }
+
+    /// What `--force` does, which differs by engine and is what the dialog
+    /// has to say. Docker's `volume rm -f` and `network rm -f` only ignore a
+    /// missing resource and still refuse one in use, so there is nothing to
+    /// offer; Podman's remove the containers that use them.
+    fn force_effect(&self, kind: ResourceKind) -> Option<String> {
+        let podman = self.kind == BackendKind::Podman;
+        let effect = match kind {
+            ResourceKind::Container => {
+                "Forced: a running container is killed outright, not stopped gracefully, and then removed."
+            }
+            ResourceKind::Image if podman => {
+                "Forced: all containers using this image, running or not, are stopped and removed with it."
+            }
+            ResourceKind::Image => {
+                "Forced: the image is removed even where stopped containers were created from it; \
+                 they stay, without their image. An image a running container uses is still refused."
+            }
+            ResourceKind::Volume if podman => {
+                "Forced: every container using this volume is stopped and removed with it, \
+                 and the volume's data is deleted."
+            }
+            ResourceKind::Network if podman => {
+                "Forced: every container attached to this network is stopped and removed with it."
+            }
+            ResourceKind::Pod if podman => {
+                "Forced: the pod's running containers are stopped and all of its containers are \
+                 removed with it."
+            }
+            _ => return None,
+        };
+        Some(effect.to_string())
+    }
+
+    fn supports_inspect(&self, kind: ResourceKind) -> bool {
+        matches!(
+            kind,
+            ResourceKind::Container
+                | ResourceKind::Image
+                | ResourceKind::Volume
+                | ResourceKind::Network
+        )
+    }
+
+    async fn inspect(
+        &self,
+        kind: ResourceKind,
+        id: &str,
+    ) -> Result<Option<Inspection>, ContainerError> {
+        self.inspect_resource(kind, id).await
+    }
+
+    fn supports_stats(&self) -> bool {
+        true
+    }
+
+    async fn stats(&self, ids: &[String]) -> Result<Option<Vec<Stats>>, ContainerError> {
+        self.engine_stats(ids).await.map(Some)
+    }
+
+    fn supports_usages(&self, kind: ResourceKind) -> bool {
+        matches!(
+            kind,
+            ResourceKind::Volume | ResourceKind::Network | ResourceKind::Image
+        )
+    }
+
+    async fn usages(
+        &self,
+        kind: ResourceKind,
+        id: &str,
+    ) -> Result<Option<Vec<Resource>>, ContainerError> {
+        self.containers_using(kind, id).await
+    }
+
+    fn offers(&self, _op: Op) -> bool {
+        true
+    }
+
+    async fn compose_available(&self) -> bool {
+        self.probe_compose().await
+    }
+
+    fn compose_command(
+        &self,
+        project: &ComposeTarget,
+        op: ComposeOp,
+        services: &[String],
+    ) -> Option<(String, Vec<String>)> {
+        self.compose_terminal_command(project, op, services)
+    }
+
+    async fn compose_down_plan(
+        &self,
+        project: &ComposeTarget,
+        with_volumes: bool,
+    ) -> Result<Option<crate::DestructivePlan>, ContainerError> {
+        self.gather_compose_down(project, with_volumes).await
+    }
+
+    fn pull_command(&self, reference: &str) -> Option<(String, Vec<String>)> {
+        self.pull_terminal_command(reference)
+    }
+
+    async fn pull(&self, reference: &str) -> Result<(), ContainerError> {
+        self.pull_image(reference).await
+    }
+
+    async fn tag(&self, source: &str, target: &str) -> Result<(), ContainerError> {
+        self.tag_image(source, target).await
+    }
+
+    async fn history(&self, id: &str) -> Result<Vec<ImageLayer>, ContainerError> {
+        self.image_history(id).await
+    }
+
+    fn run_command(&self, spec: &RunSpec) -> Result<(String, Vec<String>), ContainerError> {
+        self.run_terminal_command(spec)
+    }
+
+    async fn create_volume(
+        &self,
+        name: &str,
+        driver: Option<&str>,
+        labels: &[(String, String)],
+    ) -> Result<(), ContainerError> {
+        self.create_volume_named(name, driver, labels).await
+    }
+
+    async fn create_network(
+        &self,
+        name: &str,
+        driver: Option<&str>,
+        subnet: Option<&str>,
+    ) -> Result<(), ContainerError> {
+        self.create_network_named(name, driver, subnet).await
+    }
+
+    async fn connect(
+        &self,
+        network: &str,
+        container: &str,
+        alias: Option<&str>,
+    ) -> Result<(), ContainerError> {
+        self.connect_to_network(network, container, alias).await
+    }
+
+    async fn disconnect(&self, network: &str, container: &str) -> Result<(), ContainerError> {
+        self.disconnect_from_network(network, container).await
     }
 
     /// `docker events`, mapped to "this kind went stale".

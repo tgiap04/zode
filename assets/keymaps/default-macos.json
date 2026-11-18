@@ -910,10 +910,67 @@
     "use_key_equivalents": true,
     "bindings": {
       "cmd-enter": "database::RunQuery",
+      "cmd-shift-enter": "database::RunAll",
+      "cmd-alt-r": "database::ShowQueryHistory",
       "cmd-escape": "database::CancelQuery",
       "alt-cmd-right": "database::NextPage",
       "alt-cmd-left": "database::PreviousPage",
       "cmd-shift-c": "database::CopyResultsAsCsv",
+      "cmd-c": "database::CopySelection",
+      "cmd-a": "database::SelectAllRows",
+      "cmd-f": "database::ToggleFilterBar",
+      "f5": "database::RefreshDatabase",
+    },
+  },
+  {
+    // The arrows move the grid's cursor, so they are bound for the grid alone:
+    // bound for the whole panel they also reach a text box in it, which hands
+    // an arrow on when it has nothing to do with it.
+    "context": "DatabaseResults",
+    "use_key_equivalents": true,
+    "bindings": {
+      "up": "menu::SelectPrevious",
+      "down": "menu::SelectNext",
+      "cmd-s": "database::SaveChanges",
+      "f2": "database::EditCell",
+    },
+  },
+  {
+    // The list's own keys, bound for the list alone: bound for the whole panel
+    // they would also reach the search box and the log terminal, which both
+    // want space and delete for themselves.
+    "context": "ContainerResults",
+    "use_key_equivalents": true,
+    "bindings": {
+      "up": "menu::SelectPrevious",
+      "down": "menu::SelectNext",
+      "enter": "menu::Confirm",
+      "space": "container::ToggleRowSelection",
+      "delete": "container::RemoveSelectedRows",
+      "backspace": "container::RemoveSelectedRows",
+      "cmd-a": "container::SelectAllRows",
+    },
+  },
+  {
+    // Tab is `menu::SelectNext` for any context-less binding, which outranks a
+    // binding on the cell's own context; naming the editor under it puts these
+    // at the same depth as the editor's keys, and later in the file.
+    "context": "DatabaseCellEditor > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "tab": "database::EditNextCell",
+      "shift-tab": "database::EditPreviousCell",
+    },
+  },
+  {
+    // The SQL buffer is an `Editor && mode == full`, which binds these keys
+    // for itself one level below the panel and would win there.
+    "context": "DatabasePanel > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-enter": "database::RunQuery",
+      "cmd-shift-enter": "database::RunAll",
+      "cmd-alt-r": "database::ShowQueryHistory",
     },
   },
   {

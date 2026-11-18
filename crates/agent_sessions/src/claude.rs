@@ -468,10 +468,173 @@ fn count_messages(path: &PathBuf) -> Result<Option<usize>> {
     Ok(Some(count))
 }
 
+/// How much of a transcript is read at a time while looking back for its mode.
+const PERMISSION_MODE_CHUNK: usize = 256 * 1024;
+/// Longer than any `permission-mode` record, which is a few dozen bytes.
+const MAX_PERMISSION_MODE_RECORD: usize = 4 * 1024;
+
+/// The permission mode the session at `log_path` was last in, as Claude
+/// recorded it: `bypassPermissions`, `auto`, `plan` and so on.
+///
+/// Claude appends a `permission-mode` record whenever the mode is set or
+/// changed, so the last one is the mode the session ended in. Resuming with
+/// `--resume` alone does not restore it -- the CLI starts in its configured
+/// default -- so the caller has to pass it back.
+///
+/// Read from the end, a chunk at a time: the record is usually near the end,
+/// and a restored window asks this for every tab at once.
+pub fn last_permission_mode(log_path: &Path) -> Result<Option<String>> {
+    read_last_permission_mode(log_path, PERMISSION_MODE_CHUNK)
+}
+
+fn read_last_permission_mode(log_path: &Path, chunk: usize) -> Result<Option<String>> {
+    let mut file = File::open(log_path)?;
+    let mut end = file.metadata()?.len();
+    // The start of a line whose beginning is in a chunk not read yet.
+    let mut carry: Vec<u8> = Vec::new();
+    // Inside a line already too long to be a mode record, still looking back
+    // for where it begins. Carrying such a line would copy it again with every
+    // chunk, and one base64 image line runs to megabytes.
+    let mut skipping = false;
+    while end > 0 {
+        let start = end.saturating_sub(chunk as u64);
+        file.seek(SeekFrom::Start(start))?;
+        let mut buffer = vec![0; (end - start) as usize];
+        file.read_exact(&mut buffer)?;
+        end = start;
+        if skipping {
+            let Some(newline) = buffer.iter().rposition(|byte| *byte == b'\n') else {
+                continue;
+            };
+            buffer.truncate(newline + 1);
+            skipping = false;
+        } else {
+            buffer.extend_from_slice(&carry);
+        }
+        // Only from the start of the file is the first line known to be whole.
+        let complete_from = if start == 0 {
+            0
+        } else {
+            match buffer.iter().position(|byte| *byte == b'\n') {
+                Some(newline) => newline + 1,
+                None => buffer.len(),
+            }
+        };
+        for line in buffer[complete_from..].split(|byte| *byte == b'\n').rev() {
+            if let Some(mode) = claude_log::permission_mode_of(&String::from_utf8_lossy(line)) {
+                return Ok(Some(mode));
+            }
+        }
+        buffer.truncate(complete_from);
+        if buffer.len() > MAX_PERMISSION_MODE_RECORD {
+            buffer.clear();
+            skipping = true;
+        }
+        carry = buffer;
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::Speaker;
+
+    mod last_permission_mode {
+        use super::super::*;
+
+        fn mode_line(mode: &str) -> String {
+            format!(r#"{{"type":"permission-mode","permissionMode":"{mode}","sessionId":"s"}}"#)
+        }
+
+        fn transcript(lines: &[String]) -> (tempfile::TempDir, PathBuf) {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("session.jsonl");
+            std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+            (root, path)
+        }
+
+        fn message(text: &str) -> String {
+            format!(r#"{{"type":"user","message":{{"role":"user","content":"{text}"}}}}"#)
+        }
+
+        #[test]
+        fn the_last_recorded_mode_wins() {
+            let (_root, path) = transcript(&[
+                mode_line("bypassPermissions"),
+                message("hi"),
+                mode_line("plan"),
+                message("again"),
+            ]);
+            assert_eq!(
+                read_last_permission_mode(&path, 1024).unwrap().as_deref(),
+                Some("plan")
+            );
+        }
+
+        #[test]
+        fn a_transcript_without_a_mode_has_none() {
+            let (_root, path) = transcript(&[message("hi")]);
+            assert_eq!(read_last_permission_mode(&path, 1024).unwrap(), None);
+        }
+
+        /// The mode sits far behind the end, and the chunk boundary falls inside
+        /// its line: the line must still be read whole, not as two fragments.
+        #[test]
+        fn a_mode_line_split_across_chunks_is_still_found() {
+            let filler = message(&"x".repeat(200));
+            let mut lines = vec![message("first"), mode_line("bypassPermissions")];
+            lines.extend(std::iter::repeat_n(filler, 20));
+            let (_root, path) = transcript(&lines);
+            for chunk in [7, 13, 64, 101] {
+                assert_eq!(
+                    read_last_permission_mode(&path, chunk).unwrap().as_deref(),
+                    Some("bypassPermissions"),
+                    "chunk of {chunk} bytes"
+                );
+            }
+        }
+
+        #[test]
+        fn crlf_and_a_missing_final_newline_are_read() {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("session.jsonl");
+            std::fs::write(&path, format!("{}\r\n{}", message("hi"), mode_line("plan"))).unwrap();
+            for chunk in [1, 5, 1024] {
+                assert_eq!(
+                    read_last_permission_mode(&path, chunk).unwrap().as_deref(),
+                    Some("plan"),
+                    "chunk of {chunk} bytes"
+                );
+            }
+        }
+
+        /// A line far longer than any record is passed over, not carried, and
+        /// the record before it is still found.
+        #[test]
+        fn a_huge_line_after_the_mode_is_skipped() {
+            let huge = message(&"x".repeat(MAX_PERMISSION_MODE_RECORD * 5));
+            let (_root, path) = transcript(&[mode_line("acceptEdits"), huge, message("end")]);
+            for chunk in [100, 4096, MAX_PERMISSION_MODE_RECORD * 10] {
+                assert_eq!(
+                    read_last_permission_mode(&path, chunk).unwrap().as_deref(),
+                    Some("acceptEdits"),
+                    "chunk of {chunk} bytes"
+                );
+            }
+        }
+
+        /// A user message that merely quotes the record is not the record.
+        #[test]
+        fn a_message_quoting_the_record_is_not_a_mode() {
+            let quoted = r#"{"type":"user","message":{"role":"user","content":"\"type\":\"permission-mode\""}}"#;
+            let (_root, path) = transcript(&[mode_line("auto"), quoted.to_string()]);
+            assert_eq!(
+                read_last_permission_mode(&path, 1024).unwrap().as_deref(),
+                Some("auto")
+            );
+        }
+    }
 
     // Claude names a transcript by a UUID, and `list` and `find` hold nothing
     // else to that shape, so every fixture is named by one.

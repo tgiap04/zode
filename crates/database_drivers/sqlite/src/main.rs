@@ -4,15 +4,18 @@
 //! `SQLITE_OPEN_READ_ONLY`, so the handle itself cannot write. That is stronger
 //! than `PRAGMA query_only`, which any statement the user types can turn back
 //! off -- and a read-only mode the user can switch off by typing is not one.
+//! The one write, `update_rows`, uses a separate handle (see `update`).
 
 mod introspect;
+mod update;
 mod values;
 
 use database::protocol::{
     CancelParams, Capabilities, ConnectParams, ConnectResult, ConnectionField, ConnectionForm,
     ConnectionId, ConnectionRef, DescribeTableParams, DescribeTableResult, Empty, ErrorCode,
     InitializeResult, ListSchemasResult, ListTablesParams, ListTablesResult, NoParams,
-    PROTOCOL_VERSION, QueryParams, ResponseError, ResultColumn, ResultSet,
+    PROTOCOL_VERSION, QueryParams, ResponseError, ResultColumn, ResultSet, UpdateRowsParams,
+    UpdateRowsResult,
 };
 use database::server::{Driver, serve, typed};
 use rusqlite::{Connection, InterruptHandle, OpenFlags};
@@ -26,6 +29,9 @@ struct Live {
     /// Reachable without the connection lock -- which is the whole point:
     /// `cancel` arrives while `query` holds that lock.
     interrupt: InterruptHandle,
+    /// Where `update_rows` opens its own writable handle: the browsing one is
+    /// read-only for good.
+    path: String,
     /// Which request the connection is busy with, so a stale `cancel` cannot
     /// interrupt the query that came after the one it named.
     running: Mutex<Option<String>>,
@@ -83,6 +89,7 @@ impl Driver for SqliteDriver {
                     // Absent: `SELECT * FROM {schema}.{table}` is exactly what
                     // this engine wants, and the default says so.
                     read_table_template: None,
+                    row_updates: true,
                 },
             })
         })
@@ -102,6 +109,7 @@ impl Driver for SqliteDriver {
 
             let live = Arc::new(Live {
                 interrupt: connection.get_interrupt_handle(),
+                path: path.to_string(),
                 connection: Mutex::new(connection),
                 running: Mutex::new(None),
             });
@@ -172,6 +180,22 @@ impl Driver for SqliteDriver {
             let result = run_page(&connection, &params);
             *live.running.lock().map_err(poisoned)? = None;
             result
+        })
+    }
+
+    fn update_rows(&self, params: serde_json::Value) -> Result<serde_json::Value, ResponseError> {
+        typed(params, |params: UpdateRowsParams| {
+            let live = self.live(&params.connection_id)?;
+            if params.changes.is_empty() {
+                return Ok(UpdateRowsResult { updated: 0 });
+            }
+            // The browsing lock is held only to read the catalog. The write
+            // goes through its own handle and must not make the grid wait.
+            let columns = {
+                let connection = live.connection.lock().map_err(poisoned)?;
+                update::table_columns(&connection, &params.schema, &params.table)?
+            };
+            update::apply(&live.path, &columns, &params)
         })
     }
 
@@ -273,3 +297,5 @@ fn main() -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod update_tests;

@@ -1,0 +1,15 @@
+[
+  {
+    "name": "app_default",
+    "id": "2f259bab93aaaaa2542ba43ef33eb990d0999ee1b9924b557b7be53c0b7a1bb9",
+    "driver": "bridge",
+    "network_interface": "podman1",
+    "created": "2026-10-20T09:00:00.1+01:00",
+    "subnets": [{ "subnet": "10.89.0.0/24", "gateway": "10.89.0.1" }],
+    "ipv6_enabled": false,
+    "internal": false,
+    "dns_enabled": true,
+    "ipam_options": { "driver": "host-local" },
+    "labels": { "io.podman.compose.project": "app" }
+  }
+]

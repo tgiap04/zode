@@ -1,10 +1,15 @@
+use container::resource::row_key;
 use container::{BackendKind, ContainerError, Resource, ResourceAction, ResourceKind, RunState};
-use gpui::{Anchor, AnyElement, App, Context, PathPromptOptions, Window};
+use gpui::{
+    Anchor, AnyElement, App, Context, MouseButton, MouseDownEvent, PathPromptOptions, Window,
+};
 use ui::{
     Banner, CommonAnimationExt as _, ContextMenu, Indicator, PopoverMenu, Severity, Tab, TabBar,
     Table, prelude::*,
 };
 
+use crate::compose_actions::{ComposeContext, is_service_row, with_services};
+use crate::compose_render::render_compose_trailing;
 use crate::container_panel::{Busy, ContainerPanel, ListState};
 use crate::terminal::TerminalIntent;
 
@@ -29,13 +34,35 @@ impl Render for ContainerPanel {
             .when(self.shows_search(cx), |element| {
                 element.child(self.render_search(window, cx))
             })
+            .children(self.render_selection_bar(cx))
             .child(
                 div()
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
+                    // Not over an open row: its log terminal has a right-click
+                    // menu of its own.
+                    .when(self.detail.is_none(), |element| {
+                        element.on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                                this.deploy_panel_menu(event.position, window, cx)
+                            }),
+                        )
+                    })
                     .child(self.render_body(window, cx)),
             )
+            // Deferred and anchored at the pointer, so the list's own clipping
+            // does not cut the menu off.
+            .children(self.context_menu.as_ref().map(|(menu, position, _)| {
+                gpui::deferred(
+                    gpui::anchored()
+                        .position(*position)
+                        .anchor(Anchor::TopLeft)
+                        .child(menu.clone()),
+                )
+                .with_priority(1)
+            }))
             // The view has to know how wide it is before it can decide which
             // columns to show, and nothing tells it -- a tab is as wide as its
             // pane and a window as wide as it was dragged. A `canvas` is the only
@@ -319,7 +346,9 @@ impl ContainerPanel {
                 // The plain total while a row is open: the field is out of sight
                 // then, and a count narrowed by a filter nobody can see reads
                 // as missing rows.
-                if self.detail.is_some() || self.query(cx).is_empty() {
+                if self.detail.is_some()
+                    || (self.query(cx).is_empty() && !self.quick_filter_active())
+                {
                     Some(total.to_string())
                 } else {
                     Some(format!("{}/{total}", self.visible(resources, cx).len()))
@@ -343,6 +372,18 @@ impl ContainerPanel {
                     .tooltip(|_window, cx| ui::Tooltip::simple("Refresh", cx))
                     .on_click(cx.listener(|this, _, _window, cx| this.reload(cx))),
             )
+            .when_some(self.creation(), |element, (_, label)| {
+                element.child(
+                    div().debug_selector(|| "container-create".into()).child(
+                        IconButton::new("container-create", IconName::Plus)
+                            .icon_size(IconSize::Small)
+                            .tooltip(move |_window, cx| ui::Tooltip::simple(label, cx))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.start_creation(window, cx)),
+                            ),
+                    ),
+                )
+            })
             .when(self.prune_available(), |element| {
                 element.child(
                     IconButton::new("container-prune", IconName::Trash)
@@ -400,14 +441,14 @@ impl ContainerPanel {
                 let visible: Vec<Resource> =
                     self.visible(resources, cx).into_iter().cloned().collect();
                 if visible.is_empty() {
-                    return note(
-                        Some(IconName::MagnifyingGlass),
-                        format!(
-                            "No {} match \"{}\"",
-                            self.active_kind.label().to_lowercase(),
-                            self.query(cx)
-                        ),
-                    );
+                    let kind = self.active_kind.label().to_lowercase();
+                    let query = self.query(cx);
+                    let message = if query.is_empty() {
+                        format!("No {kind} match the filters")
+                    } else {
+                        format!("No {kind} match \"{query}\"")
+                    };
+                    return note(Some(IconName::MagnifyingGlass), message);
                 }
                 let columns = columns_for(self.active_kind, self.shows_every_column());
                 self.render_list(visible, columns, cx)
@@ -591,7 +632,24 @@ impl ContainerPanel {
         let shell = self.terminal_available(TerminalIntent::Shell);
         // A trailing cell exists if there is anything at all to put in it.
         let removable = self.removable();
-        let has_trailing = !actions.is_empty() || logs || shell || removable;
+        // The Compose tab draws its own buttons, and its services under the
+        // projects they belong to. Services are added here, after the rows the
+        // selection and the filters know about were decided.
+        let composing = self.active_kind == ResourceKind::ComposeProject;
+        let resources = if composing {
+            with_services(resources, &self.compose_members, &self.compose_expanded)
+        } else {
+            resources
+        };
+        let compose_contexts: Option<std::rc::Rc<Vec<ComposeContext>>> = composing.then(|| {
+            std::rc::Rc::new(
+                resources
+                    .iter()
+                    .map(|resource| self.compose_context(resource, None))
+                    .collect(),
+            )
+        });
+        let has_trailing = composing || !actions.is_empty() || logs || shell || removable;
         // Handed to the closure as *data*, not as elements: `AnyElement` is not
         // `Clone`, and `uniform_list` asks for a range again on every frame.
         let resources = std::rc::Rc::new(resources);
@@ -606,46 +664,120 @@ impl ContainerPanel {
             header.push("".into());
         }
         let handle = cx.entity().downgrade();
-        // Rows open onto their logs only where the engine has a logs command for
-        // the kind. An image row therefore does not react to a click, because
-        // there would be nothing behind it.
-        let rows_open = self.rows_open_a_detail();
+        // Every row answers a click now: it opens onto its logs where the kind
+        // has them, and selects otherwise.
         let clickable = resources.clone();
         let row_handle = handle.clone();
+        let selection = std::rc::Rc::new(self.selection.clone());
 
         div()
             .size_full()
+            .key_context("ContainerResults")
+            .track_focus(&self.results_focus)
+            .on_action(
+                cx.listener(|this, _: &menu::SelectNext, _window, cx| this.move_cursor(1, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &menu::SelectPrevious, _window, cx| this.move_cursor(-1, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &menu::Confirm, window, cx| this.open_cursor_row(window, cx)),
+            )
+            // Escape clears a selection and otherwise goes on to whatever is
+            // above the panel.
+            .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| this.clear_selection(cx)))
+            .on_action(cx.listener(
+                |this, _: &zed_actions::container::ToggleRowSelection, _window, cx| {
+                    this.toggle_cursor_row(cx)
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &zed_actions::container::SelectAllRows, _window, cx| {
+                    this.select_all_rows(cx)
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &zed_actions::container::RemoveSelectedRows, window, cx| {
+                    this.remove_selected_rows(window, cx)
+                },
+            ))
             .child(
                 Table::new(column_count)
                     .striped()
-                    .when(rows_open, |table| {
-                        table.map_row(move |(index, row), _window, _cx| {
-                            let Some(resource) = clickable.get(index).cloned() else {
-                                return row.into_any_element();
-                            };
-                            let handle = row_handle.clone();
-                            row.cursor_pointer()
-                                .on_click(move |_event, window, cx| {
-                                    handle
-                                        .update(cx, |panel, cx| {
-                                            panel.open_detail(resource.clone(), window, cx)
-                                        })
-                                        .ok();
+                    .interactable(&self.list_scroll)
+                    .map_row(move |(index, row), _window, cx| {
+                        let Some(resource) = clickable.get(index).cloned() else {
+                            return row.into_any_element();
+                        };
+                        let key = row_key(&resource);
+                        let selected = selection.contains(&key);
+                        let on_cursor = selection.cursor() == Some(key.as_str());
+                        let colors = cx.theme().colors();
+                        let (selected_background, cursor_border) =
+                            (colors.element_selected, colors.border_focused);
+                        let click = row_handle.clone();
+                        let menu = row_handle.clone();
+                        let clicked = resource.clone();
+                        let selector_id = key;
+                        row.debug_selector(move || format!("container-row:{selector_id}"))
+                            .cursor_pointer()
+                            // Always drawn, transparent off the cursor, so the
+                            // cursor moving never shifts a row by a pixel.
+                            .border_1()
+                            .border_color(if on_cursor {
+                                cursor_border
+                            } else {
+                                gpui::transparent_black()
+                            })
+                            .when(selected, |row| row.bg(selected_background))
+                            .on_click(move |event, window, cx| {
+                                click
+                                    .update(cx, |panel, cx| {
+                                        panel.click_row(&clicked, event.modifiers(), window, cx)
+                                    })
+                                    .ok();
+                            })
+                            // `on_mouse_down(Right, ..)` rather than
+                            // `on_right_click`, which only the buttons have.
+                            // Stopped here so the empty-area menu behind the row
+                            // does not open over this one.
+                            .on_mouse_down(MouseButton::Right, move |event, window, cx| {
+                                cx.stop_propagation();
+                                menu.update(cx, |panel, cx| {
+                                    panel.deploy_row_menu(
+                                        resource.clone(),
+                                        event.position,
+                                        window,
+                                        cx,
+                                    )
                                 })
-                                .into_any_element()
-                        })
+                                .ok();
+                            })
+                            .into_any_element()
                     })
                     .header(header)
                     .uniform_list("container-list", count, move |range, _window, _cx| {
                         range
-                            .filter_map(|index| resources.get(index))
-                            .map(|resource| {
+                            .filter_map(|index| Some((index, resources.get(index)?)))
+                            .map(|(index, resource)| {
                                 let mut cells = render_row(resource, columns);
-                                if has_trailing {
+                                let busy = busy_rows.get(&row_key(resource)).copied();
+                                let compose = compose_contexts
+                                    .as_ref()
+                                    .and_then(|contexts| contexts.get(index));
+                                if let Some(context) = compose {
+                                    cells.push(render_compose_trailing(
+                                        resource,
+                                        context,
+                                        busy,
+                                        true,
+                                        handle.clone(),
+                                    ));
+                                } else if has_trailing {
                                     cells.push(render_trailing(
                                         resource,
                                         actions,
-                                        busy_rows.get(&resource.id).copied(),
+                                        busy,
                                         logs,
                                         shell,
                                         removable,
@@ -729,6 +861,16 @@ pub(crate) fn render_row(resource: &Resource, columns: &[&str]) -> Vec<AnyElemen
         .iter()
         .map(|column| match *column {
             "" => state_dot(resource.state).into_any_element(),
+            "Name" if is_service_row(resource) => div()
+                .pl_4()
+                .min_w_0()
+                .overflow_hidden()
+                .child(truncated_text(
+                    cell_id(resource, column),
+                    resource.name.clone(),
+                    Color::Default,
+                ))
+                .into_any_element(),
             "Name" => truncated_text(
                 cell_id(resource, column),
                 resource.name.clone(),
@@ -740,7 +882,7 @@ pub(crate) fn render_row(resource: &Resource, columns: &[&str]) -> Vec<AnyElemen
 }
 
 fn cell_id(resource: &Resource, column: &str) -> SharedString {
-    format!("container-cell-{}-{column}", resource.id).into()
+    format!("container-cell-{}-{column}", row_key(resource)).into()
 }
 
 /// Text that is cut with an ellipsis when its column is too narrow, and shows
@@ -812,9 +954,9 @@ pub(crate) fn render_trailing(
     handle: gpui::WeakEntity<ContainerPanel>,
 ) -> AnyElement {
     if let Some(busy) = busy {
-        return render_busy(&resource.id, busy);
+        return render_busy(&row_key(resource), busy);
     }
-    let id_for_selector = resource.id.clone();
+    let id_for_selector = row_key(resource);
     h_flex()
         .debug_selector(move || format!("container-row-buttons:{id_for_selector}"))
         .gap_0p5()
@@ -878,23 +1020,20 @@ pub(crate) fn render_trailing(
             })
         })
         .when(removable, |element| {
-            let id = resource.id.clone();
+            let key = row_key(resource);
             let handle = handle.clone();
             element.child(
-                IconButton::new(
-                    SharedString::from(format!("remove-{}", resource.id)),
-                    IconName::Trash,
-                )
-                .icon_size(IconSize::Small)
-                .icon_color(Color::Error)
-                .tooltip(|_window, cx| ui::Tooltip::simple("Remove\u{2026}", cx))
-                // Opens the confirmation and nothing else. The button cannot
-                // remove anything; only a plan that got past the dialog can.
-                .on_click(move |_event, window, cx| {
-                    handle
-                        .update(cx, |panel, cx| panel.start_removal(&id, window, cx))
-                        .ok();
-                }),
+                IconButton::new(SharedString::from(format!("remove-{key}")), IconName::Trash)
+                    .icon_size(IconSize::Small)
+                    .icon_color(Color::Error)
+                    .tooltip(|_window, cx| ui::Tooltip::simple("Remove\u{2026}", cx))
+                    // Opens the confirmation and nothing else. The button cannot
+                    // remove anything; only a plan that got past the dialog can.
+                    .on_click(move |_event, window, cx| {
+                        handle
+                            .update(cx, |panel, cx| panel.start_removal(&key, window, cx))
+                            .ok();
+                    }),
             )
         })
         .into_any_element()
@@ -902,7 +1041,7 @@ pub(crate) fn render_trailing(
 
 /// The spinner and what it is doing, shared by the list row and the open row's
 /// header so a start and a removal wait the same way.
-fn render_busy(id: &str, busy: Busy) -> AnyElement {
+pub(crate) fn render_busy(id: &str, busy: Busy) -> AnyElement {
     h_flex()
         .debug_selector({
             let id = id.to_string();
@@ -952,19 +1091,7 @@ fn render_actions(
             if !action_is_useful(action, resource.state) {
                 return None;
             }
-            let icon = match action {
-                ResourceAction::Start => IconName::PlayFilled,
-                // `Power` rather than a square: this crate's icon set has no
-                // stop glyph, and a power symbol reads as "turn it off" without
-                // pretending to be a media control.
-                ResourceAction::Stop => IconName::Power,
-                ResourceAction::Restart => IconName::RotateCw,
-                ResourceAction::Pause => IconName::DebugPause,
-                // The same glyph as Start, and deliberately: to a person both
-                // buttons mean "make it run again". Which verb the engine wants
-                // is the backend's business, and the tooltip says "Resume".
-                ResourceAction::Unpause => IconName::PlayFilled,
-            };
+            let icon = action_icon(action);
             let id = resource.id.clone();
             let handle = handle.clone();
             Some(
@@ -982,6 +1109,23 @@ fn render_actions(
             )
         }))
         .into_any_element()
+}
+
+/// The glyph for an action, on the row's buttons and in its menu alike.
+pub(crate) fn action_icon(action: ResourceAction) -> IconName {
+    match action {
+        ResourceAction::Start => IconName::PlayFilled,
+        // `Power` rather than a square: this crate's icon set has no stop glyph,
+        // and a power symbol reads as "turn it off" without pretending to be a
+        // media control.
+        ResourceAction::Stop => IconName::Power,
+        ResourceAction::Restart => IconName::RotateCw,
+        ResourceAction::Pause => IconName::DebugPause,
+        // The same glyph as Start, and deliberately: to a person both buttons
+        // mean "make it run again". Which verb the engine wants is the backend's
+        // business, and the tooltip says "Resume".
+        ResourceAction::Unpause => IconName::PlayFilled,
+    }
 }
 
 /// Whether an action is worth offering on a resource in this state.

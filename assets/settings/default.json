@@ -85,12 +85,16 @@
   "unnecessary_code_fade": 0.3,
   // How opaque the window's backgrounds are: 1 is solid, 0 is see-through.
   // They fade evenly; on macOS text and icons stay solid. With vibrancy or a
-  // background image the backgrounds keep 90% of this.
+  // background image the backgrounds keep `window_vibrancy_opacity` of this.
   "window_opacity": 1.0,
   // Vibrancy: what is behind the window shows through its backgrounds,
   // blurred -- the desktop through the system's material, or the background
   // image, blurred, when one is set.
   "window_vibrancy": false,
+  // How much of `window_opacity` the backgrounds keep while vibrancy or a
+  // background image is on, from 0 to 1: lower shows more of what is behind
+  // the window. No effect with neither turned on.
+  "window_vibrancy_opacity": 0.8,
   // An image to show behind the window's surfaces, by its path. It is read
   // from that path and never copied: deleting the file removes it from the
   // window. Empty means none.
@@ -1557,11 +1561,22 @@
     //   "connections": [
     //     { "name": "local app", "driver": "sqlite", "url": "./db/app.sqlite" },
     //     { "name": "staging", "driver": "postgres",
-    //       "url": "postgres://reader@staging.internal:5432/app" }
+    //       "url": "postgres://reader@staging.internal:5432/app",
+    //       "safety": "read_only" }
     //   ]
+    //
+    // "safety" is what the editor does with a statement that changes data:
+    // "confirm_writes" (the default) asks first, "read_only" refuses it, and
+    // "unrestricted" sends it without asking. Whether the statement then works
+    // is up to the driver and the database user, either of which may refuse to
+    // write. This guards against mistakes, not against anyone -- for a database
+    // nobody must write to, connect as a user without write privileges.
     "connections": [],
     // How many rows one page of results holds
     "page_size": 200,
+    // The most rows one export to a file writes. An export that reaches it
+    // stops and says so, so a table of unbounded size cannot fill a disk
+    "export_row_limit": 1000000,
   },
   // Settings specific to journaling
   "journal": {

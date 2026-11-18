@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 # No `client` feature: a driver needs the protocol and the serve loop, and
 # nothing that would drag gpui into a sidecar binary.
+bytes.workspace = true
 database.workspace = true
 postgres.workspace = true
 rustls.workspace = true

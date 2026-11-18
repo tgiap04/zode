@@ -58,7 +58,7 @@ fn normalized(declared_type: &str) -> String {
     declared_type.trim().to_ascii_uppercase()
 }
 
-fn is_boolean(declared_type: &str) -> bool {
+pub fn is_boolean(declared_type: &str) -> bool {
     let declared = normalized(declared_type);
     declared == "BOOLEAN" || declared == "BOOL"
 }

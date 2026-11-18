@@ -1,0 +1,89 @@
+[
+  {
+    "Id": "sha256:c0b913633dd90d8aa41f9e15e8e1b5ae43e8b0038e6132aa08cc6d6c3b352fb1",
+    "RepoTags": [
+      "ghcr.io/devt-faye/devt-kit-api:sha-85ed671a5e10b1bf7bd93c5aa6da16c2bad49bca"
+    ],
+    "RepoDigests": [
+      "ghcr.io/devt-faye/devt-kit-api@sha256:c0b913633dd90d8aa41f9e15e8e1b5ae43e8b0038e6132aa08cc6d6c3b352fb1"
+    ],
+    "Comment": "buildkit.dockerfile.v0",
+    "Created": "2026-11-12T15:26:55.51405489Z",
+    "Config": {
+      "User": "65532",
+      "ExposedPorts": {
+        "3000/tcp": {}
+      },
+      "Env": [
+        "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt"
+      ],
+      "Entrypoint": [
+        "/api"
+      ],
+      "Volumes": {
+        "/data/releases": {}
+      },
+      "WorkingDir": "/home/nonroot",
+      "Labels": {
+        "org.opencontainers.image.created": "2026-11-12T15:16:23.554Z",
+        "org.opencontainers.image.description": "devt-kit HTTP API (grants, Tobi Kit releases, one-time install tokens)",
+        "org.opencontainers.image.licenses": "",
+        "org.opencontainers.image.revision": "85ed671a5e10b1bf7bd93c5aa6da16c2bad49bca",
+        "org.opencontainers.image.source": "https://github.com/devt-faye/devt-kit",
+        "org.opencontainers.image.title": "devt-kit",
+        "org.opencontainers.image.url": "https://github.com/devt-faye/devt-kit",
+        "org.opencontainers.image.version": "main"
+      },
+      "Healthcheck": {
+        "Test": [
+          "CMD",
+          "/api",
+          "healthcheck"
+        ],
+        "Interval": 10000000000,
+        "Timeout": 5000000000,
+        "StartPeriod": 10000000000,
+        "Retries": 3
+      }
+    },
+    "Architecture": "arm64",
+    "Os": "linux",
+    "Size": 5394183,
+    "RootFS": {
+      "Type": "layers",
+      "Layers": [
+        "sha256:e842bc95a0a8664498b7881e537b5929e419d590f5a9954fb7f81c73c20fc6c7",
+        "sha256:621c35e751a51a9a9dc3e80aa0b7fe8be2a93402ea6ccd307d30852cd7776cda",
+        "sha256:b64fe4bb89ff075efc03878811052cbaf4f9dd891aed968e9ed6993fedf1f4a7",
+        "sha256:b5764396d8d3f88c6c91b8e97022f147ec721afcf85710d96775922e0df881af",
+        "sha256:275a30dd8ce958b21daa9ad962c6fbc09f98306ee2f486b65c9075dc257b1412",
+        "sha256:4d049f83d9cf21d1f5cc0e11deaf36df02790d0e60c1a3829538fb4b61685368",
+        "sha256:af5aa97ebe6ce1604747ec1e21af7136ded391bcabe4acef882e718a87c86bcc",
+        "sha256:6f1cdceb6a3146f0ccb986521156bef8a422cdbb0863396f7f751f575ba308f4",
+        "sha256:bd3cdfae1d3fdd83a2231d608969b38b82349777c2fff9a7c12d54f8ac5c9b38",
+        "sha256:4cde6b0bb6f50a5f255eef7b2a42162c661cf776b803225dcac9a659e396bb6b",
+        "sha256:ad51d0769d16ba578106a177987dfe3d2e02c1668c852b795b2f6b024068242a",
+        "sha256:187cfc6d1e3e8a40a5e64653bcd3239c140807dcf1c09e48021178705a5a6139",
+        "sha256:0762a1f6557d1e88a761ab05aa7f65a10dc0e559913ea13befb873d907e1a396",
+        "sha256:a24765e87a26db0fa3e8219c32cf0b54a0c91c758f70274238e4ebb592d011af",
+        "sha256:69839864e9af651d7ff94e51d4c7adc380109307b7321a91b51e67313ce4e8c1"
+      ]
+    },
+    "Metadata": {
+      "LastTagTime": "2026-11-12T15:33:03.064741545Z"
+    },
+    "Descriptor": {
+      "mediaType": "application/vnd.oci.image.index.v1+json",
+      "digest": "sha256:c0b913633dd90d8aa41f9e15e8e1b5ae43e8b0038e6132aa08cc6d6c3b352fb1",
+      "size": 1609
+    },
+    "Identity": {
+      "Pull": [
+        {
+          "Repository": "ghcr.io/devt-faye/devt-kit-api"
+        }
+      ]
+    }
+  }
+]

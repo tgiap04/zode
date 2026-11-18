@@ -38,6 +38,11 @@ pub(crate) fn stands_side_by_side(width: Option<Pixels>) -> bool {
     width.is_none_or(|width| width >= SIDE_BY_SIDE_WIDTH)
 }
 
+/// Unmeasured reads as beside, for the reason unmeasured reads as side by side.
+pub(crate) fn row_detail_stands_beside(width: Option<Pixels>) -> bool {
+    width.is_none_or(|width| width >= crate::panel_layout::ROW_DETAIL_BESIDE_WIDTH)
+}
+
 /// This view emits nothing to its pane.
 ///
 /// An empty enum rather than `()`: it cannot be constructed, so it says at the
@@ -246,12 +251,18 @@ impl DatabasePanel {
         stands_side_by_side(self.measured_width)
     }
 
+    /// Whether a row's detail stands beside the rows rather than under them.
+    pub(crate) fn row_detail_beside(&self) -> bool {
+        row_detail_stands_beside(self.measured_width)
+    }
+
     pub(crate) fn note_measured_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
-        // Only when the answer changes, not on every frame: this runs from a
-        // prepaint and a `notify` per frame would be a redraw loop.
-        let was = self.side_by_side();
-        self.measured_width = Some(width);
-        if self.side_by_side() != was {
+        // Redrawn only when the width actually moves, not on every frame: this
+        // runs from a prepaint and a `notify` per frame would be a redraw loop.
+        // Every width matters now, not just the breakpoints -- the table list is
+        // drawn at a share of it.
+        if self.measured_width != Some(width) {
+            self.measured_width = Some(width);
             cx.notify();
         }
     }
@@ -272,6 +283,20 @@ mod tests {
         assert!(stands_side_by_side(Some(SIDE_BY_SIDE_WIDTH + px(1.))));
         assert!(!stands_side_by_side(Some(SIDE_BY_SIDE_WIDTH - px(1.))));
         assert!(!stands_side_by_side(Some(px(0.))));
+    }
+
+    /// Between the two breakpoints the view is side by side, but the detail
+    /// goes under the rows: beside them it and the table list would leave the
+    /// rows a sliver.
+    #[test]
+    fn a_row_detail_stands_beside_only_when_there_is_room() {
+        assert!(row_detail_stands_beside(None));
+        assert!(row_detail_stands_beside(Some(
+            crate::panel_layout::ROW_DETAIL_BESIDE_WIDTH
+        )));
+        let laptop = SIDE_BY_SIDE_WIDTH + px(200.);
+        assert!(stands_side_by_side(Some(laptop)));
+        assert!(!row_detail_stands_beside(Some(laptop)));
     }
 
     /// The half of the black-window defect this crate can check by machine:

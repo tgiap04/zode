@@ -91,6 +91,15 @@ impl SessionIndex {
         self.by_cwd.get(cwd).map(Vec::as_slice).unwrap_or(&[])
     }
 
+    /// Every directory some session ran in, once each, in no particular order.
+    ///
+    /// For a caller that groups by something coarser than the exact directory
+    /// -- a checkout holding many of them -- and so cannot ask
+    /// [`Self::sessions_for`] with a key it already knows.
+    pub fn directories(&self) -> impl Iterator<Item = &Arc<Path>> {
+        self.by_cwd.keys()
+    }
+
     /// The sessions that ran in `cwd`, borrowed. Nothing is cloned.
     pub fn sessions_for<'a>(&'a self, cwd: &Path) -> impl Iterator<Item = &'a SessionSummary> {
         self.indices_for(cwd)

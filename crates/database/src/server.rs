@@ -1,6 +1,6 @@
 //! The driver half of the protocol.
 //!
-//! Every driver reads the same framing, dispatches the same eight names and
+//! Every driver reads the same framing, dispatches the same nine names and
 //! reports errors the same way, so that lives here rather than three times over.
 //! A driver implements [`Driver`] and calls [`serve`]; nothing else about the
 //! wire is its business.
@@ -11,7 +11,7 @@
 //! query it cancels, so a sequential loop would make it unreachable -- the
 //! method would exist and never once do anything.
 
-use crate::protocol::{ErrorCode, Request, Response, ResponseError};
+use crate::protocol::{ErrorCode, MAX_CHANGES_PER_CALL, Request, Response, ResponseError};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -36,6 +36,16 @@ pub trait Driver: Send + Sync + 'static {
     fn describe_table(&self, params: Value) -> Result<Value, ResponseError>;
     fn query(&self, params: Value) -> Result<Value, ResponseError>;
     fn cancel(&self, params: Value) -> Result<Value, ResponseError>;
+
+    /// The one write. Optional: a driver that does not override it answers
+    /// `unsupported`, which is also what it reports as `row_updates: false`,
+    /// so a driver written before this method existed stays read-only.
+    fn update_rows(&self, _params: Value) -> Result<Value, ResponseError> {
+        Err(ResponseError::new(
+            ErrorCode::Unsupported,
+            "this driver does not update rows",
+        ))
+    }
 }
 
 /// Decodes params, runs `body`, encodes the result.
@@ -140,6 +150,24 @@ fn write_one(output: &mut impl Write, response: &Response) -> std::io::Result<()
     output.flush()
 }
 
+/// Looks at the raw params rather than decoding them: the count is all it
+/// needs, and a driver that decodes them again should not pay for a batch it is
+/// about to be refused.
+fn refuse_oversized_batch(params: &Value) -> Result<(), ResponseError> {
+    let count = params
+        .get("changes")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    if count > MAX_CHANGES_PER_CALL {
+        return Err(
+            ResponseError::new(ErrorCode::InvalidValue, "too many changes in one save").with_detail(
+                format!("{count} changes were sent and at most {MAX_CHANGES_PER_CALL} are taken in one call"),
+            ),
+        );
+    }
+    Ok(())
+}
+
 fn dispatch(driver: &impl Driver, request: &Request) -> Result<Value, ResponseError> {
     let params = request.params.clone();
     match request.method.as_str() {
@@ -151,9 +179,137 @@ fn dispatch(driver: &impl Driver, request: &Request) -> Result<Value, ResponseEr
         "describe_table" => driver.describe_table(params),
         "query" => driver.query(params),
         "cancel" => driver.cancel(params),
+        "update_rows" => {
+            refuse_oversized_batch(&params)?;
+            driver.update_rows(params)
+        }
         unknown => Err(ResponseError::new(
             ErrorCode::Unsupported,
             format!("no such method `{unknown}`"),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::Request;
+    use crate::protocol::RequestId;
+
+    /// Everything a driver is obliged to write, and nothing else: the shape of
+    /// a driver written before `update_rows` existed.
+    struct OldDriver;
+
+    impl Driver for OldDriver {
+        fn initialize(&self, _: Value) -> Result<Value, ResponseError> {
+            Ok(Value::Null)
+        }
+        fn connect(&self, _: Value) -> Result<Value, ResponseError> {
+            Ok(Value::Null)
+        }
+        fn disconnect(&self, _: Value) -> Result<Value, ResponseError> {
+            Ok(Value::Null)
+        }
+        fn list_schemas(&self, _: Value) -> Result<Value, ResponseError> {
+            Ok(Value::Null)
+        }
+        fn list_tables(&self, _: Value) -> Result<Value, ResponseError> {
+            Ok(Value::Null)
+        }
+        fn describe_table(&self, _: Value) -> Result<Value, ResponseError> {
+            Ok(Value::Null)
+        }
+        fn query(&self, _: Value) -> Result<Value, ResponseError> {
+            Ok(Value::Null)
+        }
+        fn cancel(&self, _: Value) -> Result<Value, ResponseError> {
+            Ok(Value::Null)
+        }
+    }
+
+    #[test]
+    fn a_driver_that_does_not_override_update_rows_answers_unsupported() {
+        let request = Request::new(
+            RequestId::Number(1),
+            "update_rows",
+            serde_json::json!({
+                "connection_id": "c", "schema": "s", "table": "t", "changes": []
+            }),
+        );
+        let error = dispatch(&OldDriver, &request).expect_err("the default must not write");
+        assert_eq!(error.code, ErrorCode::Unsupported);
+    }
+
+    #[test]
+    fn every_listed_method_has_a_dispatch_arm() {
+        for name in crate::protocol::METHOD_NAMES {
+            let request = Request::new(RequestId::Number(1), name, Value::Null);
+            let outcome = dispatch(&OldDriver, &request);
+            let fell_through = matches!(
+                &outcome,
+                Err(error) if error.message.starts_with("no such method")
+            );
+            assert!(!fell_through, "`{name}` is listed but not dispatched");
+        }
+    }
+
+    /// A driver that takes an `update_rows` of any size, to show the limit is
+    /// not the driver's to enforce.
+    struct Accepting;
+
+    impl Driver for Accepting {
+        fn initialize(&self, params: Value) -> Result<Value, ResponseError> {
+            OldDriver.initialize(params)
+        }
+        fn connect(&self, params: Value) -> Result<Value, ResponseError> {
+            OldDriver.connect(params)
+        }
+        fn disconnect(&self, params: Value) -> Result<Value, ResponseError> {
+            OldDriver.disconnect(params)
+        }
+        fn list_schemas(&self, params: Value) -> Result<Value, ResponseError> {
+            OldDriver.list_schemas(params)
+        }
+        fn list_tables(&self, params: Value) -> Result<Value, ResponseError> {
+            OldDriver.list_tables(params)
+        }
+        fn describe_table(&self, params: Value) -> Result<Value, ResponseError> {
+            OldDriver.describe_table(params)
+        }
+        fn query(&self, params: Value) -> Result<Value, ResponseError> {
+            OldDriver.query(params)
+        }
+        fn cancel(&self, params: Value) -> Result<Value, ResponseError> {
+            OldDriver.cancel(params)
+        }
+        fn update_rows(&self, _: Value) -> Result<Value, ResponseError> {
+            Ok(serde_json::json!({ "updated": 0 }))
+        }
+    }
+
+    fn update_with(changes: usize) -> Request {
+        let change = serde_json::json!({
+            "key": [{ "column": "id", "value": { "kind": "text", "value": "1" } }],
+            "set": [{ "column": "a", "value": { "kind": "null" } }],
+        });
+        Request::new(
+            RequestId::Number(1),
+            "update_rows",
+            serde_json::json!({
+                "connection_id": "c", "schema": "s", "table": "t",
+                "changes": vec![change; changes],
+            }),
+        )
+    }
+
+    #[test]
+    fn one_call_carries_a_bounded_number_of_changes() {
+        let limit = crate::protocol::MAX_CHANGES_PER_CALL;
+        dispatch(&Accepting, &update_with(limit)).expect("the limit itself is allowed");
+        let error = dispatch(&Accepting, &update_with(limit + 1))
+            .expect_err("one past the limit is refused before the driver sees it");
+        assert_eq!(error.code, ErrorCode::InvalidValue);
+        assert_eq!(error.message, "too many changes in one save");
+        assert!(error.data.is_none(), "no single change is at fault");
     }
 }

@@ -1,0 +1,71 @@
+[
+  {
+    "Name": "shop-edge",
+    "Id": "0fd0d6b4e37f9818000c98522148b5e130528381c7ab97bc848d461702f9dbf2",
+    "Created": "2026-11-17T05:53:48.727505167Z",
+    "Scope": "local",
+    "Driver": "bridge",
+    "EnableIPv4": true,
+    "EnableIPv6": false,
+    "IPAM": {
+      "Driver": "default",
+      "Options": null,
+      "Config": [
+        {
+          "Subnet": "172.18.0.0/16",
+          "Gateway": "172.18.0.1"
+        }
+      ]
+    },
+    "Internal": false,
+    "Attachable": false,
+    "Ingress": false,
+    "ConfigFrom": {
+      "Network": ""
+    },
+    "ConfigOnly": false,
+    "Options": {
+      "com.docker.network.enable_ipv4": "true",
+      "com.docker.network.enable_ipv6": "false"
+    },
+    "Labels": {
+      "com.docker.compose.config-hash": "9f3f170b1fe370dc3756448f0409fe7e33551b0df6965cd15fdf1b326fbfe903",
+      "com.docker.compose.network": "edge",
+      "com.docker.compose.project": "shop",
+      "com.docker.compose.version": "5.4.0"
+    },
+    "Containers": {
+      "27fdc5b316b3a460aa8685e49b5f163098bff5a885897bc34730d432612da2f9": {
+        "Name": "shop-gateway-a-1",
+        "EndpointID": "87625aa66f7e3fa3d5c4cc50de5771bd58bccd3ae2c0618639c47a5156d4a1a2",
+        "MacAddress": "ee:49:36:a5:c0:be",
+        "IPv4Address": "172.18.0.4/16",
+        "IPv6Address": ""
+      },
+      "734aeaeeb75d3c3eeadd3e4e4429c3df448dc4c3659963c8f9f13a29b7bbaf8c": {
+        "Name": "shop-fe-1",
+        "EndpointID": "cd4d3aa5067f90b0fc001c2e7101bcf7666b6032b60dc15ddb76f22f48d701b6",
+        "MacAddress": "1a:25:40:38:dd:92",
+        "IPv4Address": "172.18.0.3/16",
+        "IPv6Address": ""
+      },
+      "85f57ceb28529798c9587160306dd8c45c6ef56fb5354a2e03071c8048984890": {
+        "Name": "shop-traefik-1",
+        "EndpointID": "5c99a1e84298b65a4714ddf5ad03c7373ecfa9a45fef2caca22b0d1f41ed9cbd",
+        "MacAddress": "86:0a:f8:0d:b3:d9",
+        "IPv4Address": "172.18.0.2/16",
+        "IPv6Address": ""
+      }
+    },
+    "Status": {
+      "IPAM": {
+        "Subnets": {
+          "172.18.0.0/16": {
+            "IPsInUse": 6,
+            "DynamicIPsAvailable": 65530
+          }
+        }
+      }
+    }
+  }
+]

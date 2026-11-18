@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// A database with the shapes that break drivers: a table with a primary key,
 /// one without, a view, every storage class, and a null.
-fn fixture() -> (tempfile::TempDir, PathBuf) {
+pub(crate) fn fixture() -> (tempfile::TempDir, PathBuf) {
     let directory = tempfile::tempdir().expect("a temp dir");
     let path = directory.path().join("fixture.sqlite");
     let writable = Connection::open(&path).expect("creating the fixture");
@@ -25,6 +25,12 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
              );
              INSERT INTO users VALUES (1, 'a@b.com', 0.1, x'00010203', 1, '2026-08-15 10:00:00');
              INSERT INTO users VALUES (2, NULL, 2.5, NULL, 0, NULL);
+             CREATE TABLE enrolment (
+                 student INTEGER,
+                 course TEXT,
+                 grade TEXT,
+                 PRIMARY KEY (student, course)
+             );
              CREATE TABLE keyless (note TEXT);
              INSERT INTO keyless VALUES ('no primary key here');
              CREATE VIEW active_users AS SELECT id FROM users WHERE active = 1;",
@@ -33,7 +39,7 @@ fn fixture() -> (tempfile::TempDir, PathBuf) {
     (directory, path)
 }
 
-fn connected(path: &PathBuf) -> (SqliteDriver, ConnectionId) {
+pub(crate) fn connected(path: &PathBuf) -> (SqliteDriver, ConnectionId) {
     let driver = SqliteDriver::default();
     let result = driver
         .connect(json!({ "url": path.display().to_string() }))
@@ -42,7 +48,11 @@ fn connected(path: &PathBuf) -> (SqliteDriver, ConnectionId) {
     (driver, result.connection_id)
 }
 
-fn query(driver: &SqliteDriver, id: &ConnectionId, sql: &str) -> Result<ResultSet, ResponseError> {
+pub(crate) fn query(
+    driver: &SqliteDriver,
+    id: &ConnectionId,
+    sql: &str,
+) -> Result<ResultSet, ResponseError> {
     let value = driver.query(json!({
         "connection_id": id,
         "sql": sql,
@@ -78,7 +88,7 @@ fn all_eight_methods_answer_against_a_real_file() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(tables.tables.len(), 3, "two tables and a view");
+    assert_eq!(tables.tables.len(), 4, "three tables and a view");
     assert!(
         tables
             .tables
@@ -211,6 +221,43 @@ fn a_syntax_error_is_not_reported_as_a_read_only_refusal() {
     let (driver, id) = connected(&path);
     let error = query(&driver, &id, "SELECT FROM WHERE").expect_err("that is not SQL");
     assert_eq!(error.code, ErrorCode::Syntax);
+}
+
+/// Editing names a row by its whole key, so every column of a composite key
+/// has to be marked -- one marked column would match every row sharing it.
+#[test]
+fn every_column_of_a_composite_primary_key_is_marked() {
+    let (_dir, path) = fixture();
+    let (driver, id) = connected(&path);
+    let described: DescribeTableResult = serde_json::from_value(
+        driver
+            .describe_table(json!({ "connection_id": id, "schema": "main", "table": "enrolment" }))
+            .unwrap(),
+    )
+    .unwrap();
+    let keys: Vec<_> = described
+        .columns
+        .iter()
+        .filter(|column| column.primary_key)
+        .map(|column| column.name.as_str())
+        .collect();
+    assert_eq!(keys, ["student", "course"], "and `grade` is not one");
+}
+
+/// A view has no key of its own, and must not borrow one from its tables.
+#[test]
+fn a_view_has_no_primary_key() {
+    let (_dir, path) = fixture();
+    let (driver, id) = connected(&path);
+    let described: DescribeTableResult = serde_json::from_value(
+        driver
+            .describe_table(
+                json!({ "connection_id": id, "schema": "main", "table": "active_users" }),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(described.columns.iter().all(|column| !column.primary_key));
 }
 
 /// Plenty of real tables have no primary key. Reporting that honestly beats

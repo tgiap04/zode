@@ -242,7 +242,8 @@ impl BranchPanel {
     ///   are in -- from the moment it opens, not from the moment its CLI
     ///   answers -- and a tab running in another worktree shows under that one. Whether it is working is
     ///   the mark's business, not this list's.
-    /// - **Finished**: from the shared session index, one hash per checkout.
+    /// - **Finished**: from the shared session index, under the innermost
+    ///   checkout holding the directory each one ran in.
     fn agents_by_checkout(
         &self,
         worktrees: &[git::repository::Worktree],
@@ -309,10 +310,20 @@ impl BranchPanel {
 
         let names = agent_ui::SessionNames::try_global(cx);
         let names = names.as_ref().map(|names| names.read(cx));
-        for worktree in worktrees {
-            let path: Arc<Path> = Arc::from(worktree.path.as_path());
+        // Filed by the same rule as an open tab -- the innermost checkout holding
+        // the directory -- and not by an exact match on the checkout's path. A
+        // workspace opened on a subdirectory of a repository runs its agent
+        // there, so the tab is drawn under the checkout and its transcript
+        // records the subdirectory; an exact match found no row for it, and the
+        // session vanished from the list the moment its tab closed.
+        let mut past_by_path: collections::HashMap<Arc<Path>, Vec<AgentEntry>> = Default::default();
+        for directory in index.directories() {
+            let Some(checkout) = checkout_containing(worktrees, std::slice::from_ref(directory))
+            else {
+                continue;
+            };
             let past = index
-                .sessions_for(&path)
+                .sessions_for(directory)
                 .filter(|session| !open_sessions.contains(session.id.as_ref()))
                 .map(|session| AgentEntry::Past {
                     label: names
@@ -322,10 +333,19 @@ impl BranchPanel {
                     id: session.id.clone(),
                     updated_at: session.updated_at,
                 });
-            let past: Vec<_> = past.collect();
-            if !past.is_empty() {
-                by_path.entry(path).or_default().extend(past);
+            past_by_path
+                .entry(Arc::from(checkout.path.as_path()))
+                .or_default()
+                .extend(past);
+        }
+        for (path, mut past) in past_by_path {
+            if past.is_empty() {
+                continue;
             }
+            // Several directories can feed one checkout, each newest first on
+            // its own; the list as a whole has to be too.
+            past.sort_by_key(|entry| std::cmp::Reverse(entry.updated_at()));
+            by_path.entry(path).or_default().extend(past);
         }
 
         finish(by_path)
@@ -593,6 +613,7 @@ mod tests {
                 vec![std::sync::Arc::new(LateTranscript {
                     written: written.clone(),
                     with_older: false,
+                    cwd: "/repos/zode",
                 })],
                 cx,
             )
@@ -844,6 +865,8 @@ mod tests {
     struct LateTranscript {
         written: std::sync::Arc<std::sync::atomic::AtomicBool>,
         with_older: bool,
+        /// Where the late session ran.
+        cwd: &'static str,
     }
 
     impl agent_sessions::SessionProvider for LateTranscript {
@@ -879,10 +902,10 @@ mod tests {
                 title: "hello".into(),
                 preview: String::new(),
                 preview_speaker: None,
-                cwd: std::path::PathBuf::from("/repos/zode"),
+                cwd: std::path::PathBuf::from(self.cwd),
                 branch: None,
                 model: None,
-                updated_at: std::time::SystemTime::UNIX_EPOCH,
+                updated_at: std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
                 log_path: None,
                 log_bytes: 0,
             });
@@ -961,6 +984,7 @@ mod tests {
                 vec![std::sync::Arc::new(LateTranscript {
                     written: written.clone(),
                     with_older: false,
+                    cwd: "/repos/zode",
                 })],
                 cx,
             );
@@ -1023,6 +1047,7 @@ mod tests {
                 vec![std::sync::Arc::new(LateTranscript {
                     written: written.clone(),
                     with_older: true,
+                    cwd: "/repos/zode",
                 })],
                 cx,
             );
@@ -1060,6 +1085,74 @@ mod tests {
         cx.run_until_parked();
         panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
         assert_eq!(listed(&panel, cx), (0, 2));
+    }
+
+    /// A workspace opened on a subdirectory of the repository runs its agent
+    /// there, and the transcript records that subdirectory. The tab was drawn
+    /// under the checkout while open; closing it must not drop the session off
+    /// the list, and it sorts above the older session from the checkout root.
+    #[gpui::test]
+    async fn a_closed_tab_from_a_subdirectory_stays_under_its_checkout(cx: &mut TestAppContext) {
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (panel, cx) = panel_over_a_repo(cx).await;
+        cx.update(|_, cx| {
+            agent_ui::SessionStore::install_global_for_test(
+                vec![std::sync::Arc::new(LateTranscript {
+                    written: written.clone(),
+                    with_older: true,
+                    cwd: "/repos/zode/src",
+                })],
+                cx,
+            );
+        });
+        let workspace = panel
+            .read_with(cx, |panel, _| panel.workspace.clone())
+            .upgrade()
+            .expect("workspace alive");
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_active(true, window, cx);
+            panel.ensure_session_store(cx);
+            panel.refresh_if_stale(cx);
+        });
+        cx.run_until_parked();
+        workspace.update_in(cx, |workspace, window, cx| {
+            agent_ui::AgentView::open_tracked(
+                workspace,
+                project::CLAUDE_CODE_AGENT_ID,
+                Default::default(),
+                window,
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+        assert_eq!(listed(&panel, cx), (1, 1), "the open tab and the older one");
+        written.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        let item_id = pane.read_with(cx, |pane, _| pane.items().next().unwrap().item_id());
+        pane.update_in(cx, |pane, window, cx| {
+            pane.remove_item(item_id, true, true, window, cx);
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, |panel, _, cx| panel.refresh_if_stale(cx));
+        assert_eq!(listed(&panel, cx), (0, 2));
+        let labels: Vec<String> = panel.read_with(cx, |panel, cx| {
+            panel
+                .rows
+                .iter()
+                .filter_map(|row| match row {
+                    crate::branch_panel::tree::TreeRow::Worktree { agents, .. } => Some(agents),
+                    _ => None,
+                })
+                .flat_map(|agents| agents.iter().map(|agent| agent.label(cx).to_string()))
+                .collect()
+        });
+        assert_eq!(
+            labels,
+            ["hello", "older"],
+            "newest first across directories"
+        );
     }
 
     #[gpui::test]

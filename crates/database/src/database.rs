@@ -8,10 +8,10 @@
 //!
 //! Layers, bottom up:
 //!
-//! - [`protocol`] is the eight calls and their payloads. This is the part third
+//! - [`protocol`] is the nine calls and their payloads. This is the part third
 //!   parties pin to, so it changes only with [`protocol::PROTOCOL_VERSION`].
 //! - [`server`] is the driver's half: framing and dispatch, so each driver
-//!   writes only the eight answers.
+//!   writes only the answers.
 //! - `transport` moves lines. `transport::StdioTransport` runs a real child
 //!   process; [`fake_driver`] answers in process for tests.
 //! - `client` turns those calls into typed methods and enforces the version

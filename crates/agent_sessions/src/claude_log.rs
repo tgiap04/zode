@@ -107,6 +107,25 @@ pub(crate) fn line_is_message(line: &str) -> bool {
     line.contains(r#""type":"user""#) || line.contains(r#""type":"assistant""#)
 }
 
+/// The mode a `permission-mode` record sets, when `line` is one.
+///
+/// The substring test only skips lines that cannot be one; the parse decides,
+/// so a message that quotes the record is not taken for it.
+pub(crate) fn permission_mode_of(line: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Record {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(rename = "permissionMode")]
+        permission_mode: String,
+    }
+    if !line.contains(r#""permission-mode""#) {
+        return None;
+    }
+    let record: Record = parse_object(line)?;
+    (record.kind == "permission-mode").then_some(record.permission_mode)
+}
+
 /// What one pass over a stretch of transcript found.
 #[derive(Default, Debug, PartialEq)]
 pub(crate) struct ChunkScan {

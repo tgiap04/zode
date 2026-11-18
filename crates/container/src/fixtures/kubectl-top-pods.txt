@@ -1,0 +1,3 @@
+web-7d4b9c6f8-x2k9q   3m    25Mi
+worker-0              1500m 1Gi
+broken-pod            <unknown>   <unknown>

@@ -101,6 +101,19 @@ pub(crate) struct Search {
     _edited: Subscription,
 }
 
+impl Search {
+    #[cfg(test)]
+    pub(crate) fn typed_text(&self, cx: &App) -> String {
+        self.input.read(cx).text(cx)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn input_focus(&self, cx: &App) -> gpui::FocusHandle {
+        use gpui::Focusable as _;
+        self.input.focus_handle(cx)
+    }
+}
+
 impl ContainerPanel {
     /// What is typed in the search field, trimmed.
     pub(crate) fn query(&self, cx: &App) -> String {
@@ -110,16 +123,25 @@ impl ContainerPanel {
             .unwrap_or_default()
     }
 
-    /// The rows the list shows: all of them, or those the query matches.
+    /// The rows the list shows: all of them, or those the query and the quick
+    /// filters of this kind let through.
     pub(crate) fn visible<'a>(&self, listing: &'a Listing, cx: &App) -> Vec<&'a Resource> {
         let query = self.query(cx);
+        let filter = self.quick_filter();
         if query.is_empty() {
-            return listing.iter().collect();
+            if !filter.is_active() {
+                return listing.iter().collect();
+            }
+            return listing
+                .iter()
+                .filter(|resource| filter.admits(resource))
+                .collect();
         }
         listing
             .matching(&query)
             .iter()
             .filter_map(|&position| listing.get(position))
+            .filter(|resource| filter.admits(resource))
             .collect()
     }
 
@@ -212,7 +234,9 @@ impl ContainerPanel {
             .on_action(
                 cx.listener(|this, _: &menu::Cancel, window, cx| this.clear_search(window, cx)),
             )
+            .gap_1p5()
             .child(div().flex_1().child(input))
+            .children(self.render_quick_filters(cx))
             .into_any_element()
     }
 }

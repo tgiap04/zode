@@ -1,16 +1,30 @@
 use crate::connection_store::ConnectionConfig;
 use crate::driver_registry::DriverHost;
 use anyhow::{Context as _, Result};
-use database::client::{DEFAULT_REQUEST_TIMEOUT, DriverClient};
+use database::client::{DEFAULT_REQUEST_TIMEOUT, DriverClient, DriverError};
 use database::protocol::{
     Cancel, CancelParams, Capabilities, Connect, ConnectParams, ConnectionId, ConnectionRef,
-    DescribeTable, DescribeTableParams, ListSchemas, ListTables, ListTablesParams, Query,
-    QueryParams, ResultSet, SchemaRef, TableRef,
+    DescribeTable, DescribeTableParams, ErrorCode, ListSchemas, ListTables, ListTablesParams,
+    Query, QueryParams, ResponseError, ResultSet, RowChange, SchemaRef, TableRef, UpdateRowsParams,
 };
 use database::registry::DriverDescriptor;
 use database::transport::{StdioTransport, Transport};
 use gpui::{App, AsyncApp, Task};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Which connection a [`Session`] is, as opposed to which name it was opened
+/// under: a name can come to mean another database (its url was edited), and
+/// then the session that answers to it is not the one a page was read from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SessionId(u64);
+
+impl SessionId {
+    fn next() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+}
 
 /// A driver process with one connection open on it.
 ///
@@ -18,6 +32,7 @@ use std::sync::Arc;
 /// kills the child process -- so closing a connection never leaves a driver
 /// holding a database handle nobody is watching.
 pub struct Session {
+    pub(crate) id: SessionId,
     client: Arc<DriverClient>,
     connection_id: ConnectionId,
     /// What the driver calls itself. Shown on the connection's tooltip, which
@@ -153,11 +168,24 @@ impl Session {
             .with_context(|| format!("connecting to `{}`", config.name))?;
 
         Ok(Self {
+            id: SessionId::next(),
             client,
             connection_id: connected.connection_id,
             driver_name: initialize.driver_name,
             capabilities: initialize.capabilities,
         })
+    }
+
+    /// A session over a client the test built, with no process behind it.
+    #[cfg(test)]
+    pub(crate) fn for_test(client: DriverClient, capabilities: Capabilities) -> Self {
+        Self {
+            id: SessionId::next(),
+            client: Arc::new(client),
+            connection_id: ConnectionId("fake-1".into()),
+            driver_name: "fake".into(),
+            capabilities,
+        }
     }
 
     fn connection(&self) -> ConnectionRef {
@@ -187,6 +215,36 @@ impl Session {
                 request_id,
             })
             .await
+    }
+
+    /// Writes edited cells, all or nothing. Returns how many rows changed.
+    ///
+    /// Refused here, without a round trip, when the driver never claimed
+    /// `row_updates`: an edit is the one write Zode sends, and a driver that did
+    /// not offer to take it is not asked.
+    pub async fn update_rows(
+        &self,
+        schema: &str,
+        table: &str,
+        changes: Vec<RowChange>,
+    ) -> Result<u64> {
+        if !self.capabilities.row_updates {
+            return Err(DriverError(ResponseError::new(
+                ErrorCode::Unsupported,
+                format!("the `{}` driver does not update rows", self.driver_name),
+            ))
+            .into());
+        }
+        let result = self
+            .client
+            .update_rows(UpdateRowsParams {
+                connection_id: self.connection_id.clone(),
+                schema: schema.to_string(),
+                table: table.to_string(),
+                changes,
+            })
+            .await?;
+        Ok(result.updated)
     }
 
     /// Asks the driver to interrupt a query.
@@ -236,5 +294,79 @@ impl Session {
             })
             .await?
             .columns)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use database::fake_driver::{FakeBehaviour, FakeDriver};
+    use database::protocol::{ColumnValue, EditValue};
+    use gpui::TestAppContext;
+
+    fn session(cx: &mut TestAppContext, behaviour: FakeBehaviour) -> (Session, Arc<FakeDriver>) {
+        let driver = Arc::new(FakeDriver::new(behaviour));
+        let client = cx.update(|cx| {
+            DriverClient::new(driver.clone(), DEFAULT_REQUEST_TIMEOUT, &cx.to_async())
+        });
+        let capabilities = Capabilities {
+            row_updates: behaviour != FakeBehaviour::NoRowUpdates,
+            ..Default::default()
+        };
+        (Session::for_test(client, capabilities), driver)
+    }
+
+    fn change() -> RowChange {
+        RowChange {
+            key: vec![ColumnValue {
+                column: "id".into(),
+                value: EditValue::Text { value: "1".into() },
+            }],
+            set: vec![ColumnValue {
+                column: "email".into(),
+                value: EditValue::Null,
+            }],
+        }
+    }
+
+    #[gpui::test]
+    async fn an_edit_reaches_the_driver_and_reports_the_rows_changed(cx: &mut TestAppContext) {
+        let (session, driver) = session(cx, FakeBehaviour::Well);
+        let updated = session
+            .update_rows("public", "users", vec![change(), change()])
+            .await
+            .unwrap();
+        assert_eq!(updated, 2);
+        assert_eq!(driver.updates.lock()[0].schema, "public");
+    }
+
+    #[gpui::test]
+    async fn a_driver_that_never_claimed_row_updates_is_not_asked(cx: &mut TestAppContext) {
+        let (session, driver) = session(cx, FakeBehaviour::NoRowUpdates);
+        let error = session
+            .update_rows("public", "users", vec![change()])
+            .await
+            .expect_err("no capability, no write");
+        assert_eq!(
+            error.downcast_ref::<DriverError>().map(DriverError::code),
+            Some(ErrorCode::Unsupported)
+        );
+        assert!(
+            !driver.calls.lock().iter().any(|call| call == "update_rows"),
+            "an edit must not be sent to a driver that did not offer to take it"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_conflict_comes_back_as_a_driver_error(cx: &mut TestAppContext) {
+        let (session, _driver) = session(cx, FakeBehaviour::UpdateConflicts { change: 0 });
+        let error = session
+            .update_rows("public", "users", vec![change()])
+            .await
+            .expect_err("the fake finds the row gone");
+        assert_eq!(
+            error.downcast_ref::<DriverError>().map(DriverError::code),
+            Some(ErrorCode::Conflict)
+        );
     }
 }

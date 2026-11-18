@@ -32,16 +32,31 @@ Errors carry a coarse `code`, a short `message`, and the engine's own words in
 
 | `code` | When |
 |---|---|
-| `read_only` | The connection refused a write. **Not** `syntax` — the user is told the column is read-only, not that their SQL is wrong |
+| `read_only` | The connection refused a write — a read-only transaction, or an account without the privilege to write. **Not** `syntax` — the user is told the column is read-only, not that their SQL is wrong |
 | `authentication` | Credentials rejected. The one error worth offering a password prompt for |
 | `connection` | Could not reach the server, or lost it mid-call |
 | `syntax` | The engine rejected the statement |
 | `unknown_connection` | The call named a connection this driver does not have |
 | `unsupported` | This driver does not implement the method |
 | `cancelled` | Stopped at the caller's request — not a failure to report as one |
-| `internal` | Anything else |
+| `conflict` | An `update_rows` change matched a number of rows other than one, so the batch was rolled back. See [Updating rows](#updating-rows) |
+| `invalid_value` | The engine rejected a value in an `update_rows` change, or the request asked for something the table cannot do (a view that is not updatable, a binary column, too many changes), so the batch was rolled back |
+| `internal` | Anything else — including a lock that could not be had in time and a deadlock, which are not `conflict`: that code says *the row changed*, and a row someone else is holding says nothing of the kind |
 
-## The eight methods
+An error may also carry `data`, naming where in an `update_rows` call the fault
+was, when the driver can tell: `{ "change": 2, "column": "age" }`, both optional.
+A client reads whatever part of `data` it understands and ignores the rest — a
+field of an unexpected type costs it the hint, never the answer.
+
+**A client must treat a `code` it does not know as a plain failure** — Zode
+reads it as `other` and shows the `message`. Without that, one new code makes a
+whole answer undecodable and the caller waits out its timeout for an error that
+had already arrived. Codes are added without a version bump on the strength of
+that rule, and only ever in answer to a method or capability the old side never
+used: a driver emits `conflict` and `invalid_value` only for `update_rows`, which
+a client older than it never sends.
+
+## The nine methods
 
 | Method | Params | Result |
 |---|---|---|
@@ -53,6 +68,9 @@ Errors carry a coarse `code`, a short `message`, and the engine's own words in
 | `describe_table` | `{ connection_id, schema, table }` | `{ columns: [{ name, type_name, nullable, primary_key }] }` |
 | `query` | `{ connection_id, sql, limit, offset, request_id }` | `ResultSet` |
 | `cancel` | `{ connection_id, request_id }` | `{}` |
+| `update_rows` | `{ connection_id, schema, table, changes }` | `{ updated }` |
+
+`update_rows` is optional — see [Updating rows](#updating-rows).
 
 `capabilities` — every field defaults to the cautious answer, so a driver
 written against an older version of this struct stays correct:
@@ -71,6 +89,8 @@ written against an older version of this struct stays correct:
 - `connection_form` — what to ask for when someone adds a connection. Absent
   means Zode asks for a URL and nothing else, which is right for a driver
   written before this existed and for any engine whose DSN does not decompose.
+- `row_updates` — whether `update_rows` is implemented. Absent or `false`
+  means it is not, and Zode never sends one: the grid stays read-only.
 
 ```json
 { "connection_form": {
@@ -176,6 +196,111 @@ obvious approach on every engine tried so far:
 
 A read-only mode the user can switch off by typing is not one.
 
+**`query` runs exactly one statement.** A string that holds two must be
+refused before either runs, not run whole: `SELECT 1; COMMIT; UPDATE …` ends
+the read-only transaction the first statement opened and writes with the rest.
+Wrapping the text in a script of the driver's own does not help — whatever
+protocol takes several statements takes these. So the driver hands the text to
+the engine in a form that takes one: PostgreSQL declares the cursor over it with
+a prepared (extended-protocol) statement, which the server refuses if it holds
+more than one; MySQL prepares the statement it is about to send, because a
+prepare is parsed with multi-statement support off, and sends only what was
+prepared; SQLite's prepare already stops at the first statement. The refusal
+is a `syntax` error (or `read_only`), never a success.
+
+`query` stays read-only on every connection. The one way to write is
+`update_rows`, below, which carries structured values and no SQL text — so
+there is nothing to inspect, and nothing that could be typed to turn it on.
+
+## Updating rows
+
+`update_rows` is how an edited cell reaches the database, and the only write a
+driver offers. A driver that implements it reports `row_updates: true` at
+`initialize`; one that does not answers `unsupported` and is never asked.
+
+```json
+→ {"jsonrpc":"2.0","id":9,"method":"update_rows","params":{
+    "connection_id":"c1","schema":"public","table":"users",
+    "changes":[{
+      "key": [{"column":"id",   "value":{"kind":"text","value":"7"}}],
+      "set": [{"column":"email","value":{"kind":"null"}}]}]}}
+← {"jsonrpc":"2.0","id":9,"result":{"updated":1}}
+```
+
+A value is `{"kind":"null"}` or `{"kind":"text","value":"…"}`: what the person
+typed, or what the key's cell displayed. Text is never an instruction to store
+NULL — an empty string is a value, and NULL is its own kind.
+
+Rules a driver must hold to:
+
+1. **Bind, never concatenate.** Values go in as parameters and are cast to the
+   column's real type by the engine. No value becomes part of a statement's text.
+   The engine applies its own *assignment* rules to the text, so a value that
+   does not fit the column (`varchar(5)`, `char(2)`, `bit(3)`, a domain over
+   them) is refused. A driver must never name a type of its own for the cast: an
+   explicit `CAST(x AS varchar(5))` truncates, and `CAST(x AS character)` is
+   `char(1)`.
+2. **Each change addresses one row by its whole key**, and must change exactly
+   one. Any change that touches zero or several rows answers `conflict`, with a
+   `detail` such as `row 3 matched 0 rows` and `data.change` set.
+3. **One transaction.** Every change in the call is applied or none is. A
+   `conflict`, an `invalid_value` or a lost connection leaves the table as it was.
+4. **A value the engine rejects** — a failed cast, a constraint — answers
+   `invalid_value` with the engine's words in `detail`, and `data.change` and
+   `data.column` when the driver can tell which.
+5. **An empty `changes` is `{ "updated": 0 }`** and opens no transaction.
+6. **`updated` is the number of changes** on success.
+7. **A connection opened read-only by policy answers `read_only`.** Nothing
+   ships that way today; the rule is here so the first one that does cannot be
+   made to write by this method.
+8. An unknown `connection_id` answers `unknown_connection`, as everywhere.
+9. **A binary column is never set.** The grid only knows the size of such a
+   cell, so text typed into one is refused as `invalid_value`, "binary columns
+   cannot be edited as text", with `data.column` set. SQLite, where any column
+   may hold a blob, also looks at what the cell holds before overwriting it.
+10. **At most 1000 changes per call** (`MAX_CHANGES_PER_CALL`). A larger call is
+    refused as `invalid_value`, "too many changes in one save", before the
+    driver sees it — `serve` does this for every driver. A client with more
+    saves them in several calls.
+11. **A write never waits for ever.** The connection is held while it waits, so
+    browsing waits too. The SQL drivers bound the wait (PostgreSQL
+    `lock_timeout` 5 s and `statement_timeout` 30 s for the transaction; MySQL
+    `innodb_lock_wait_timeout` 5 s for the call; SQLite's busy timeout 5 s) and
+    answer a lock that could not be had, or a deadlock, as `internal` with a
+    message that says nothing was saved. Not `conflict`, not `connection`.
+12. **A table that cannot roll back is not edited.** MySQL tables on MyISAM or
+    MEMORY answer `invalid_value` before anything is written, because rule 3
+    cannot be kept there.
+13. **A refusal says what kind it was.** `invalid_value` for what the engine
+    refused about the value or the target (a constraint, a failed cast, a view it
+    cannot update through), `read_only` for a missing privilege, `internal` for a
+    lock, a deadlock or a timeout, `conflict` only for the row-count rule.
+
+**MongoDB.** `schema` is the database and `table` the collection. A document is
+addressed by `_id` alone: the key's text is tried as an ObjectId (24 hex), then
+an integer, then a string, and must name exactly one document. Each value is
+converted to the type the field holds in that document; a field the document
+lacks, or holds as null, takes the type most of the first 20 documents of the
+collection give it, and a string where none of them holds it. Only top-level
+fields are editable. Every key and value is checked before the first write, so
+a missing document or an unconvertible value is refused with nothing changed on
+any server. Each write is filtered on the type every edited field had when it
+was read (`$type`, or `$exists: false` for a field the document lacked), so a
+field another client changed in between makes the save a `conflict` and not a
+value of the wrong type. The writes run in one transaction on a replica set or
+sharded cluster (`hello`, or `isMaster` on a server older than 4.4.2, says
+which). A standalone server has no transactions, so the changes are applied in
+order; if one of those writes fails, the changes before it stay saved and the
+error says how many. A refusal is sorted by the server's code: validation and
+duplicate-key codes are `invalid_value`, `Unauthorized` is `read_only`,
+`WriteConflict` is `conflict`, a primary changing hands is `connection`, and
+anything else is `internal`.
+
+Both directions of version skew are safe by construction. A Zode newer than the
+driver sees no `row_updates` and offers no editing; a driver newer than Zode is
+never sent the method, so its new error codes are never produced for a client
+that cannot read them.
+
 ## Cancelling
 
 `cancel` names a `request_id` the **caller** chose, because a query worth
@@ -211,6 +336,12 @@ driver must get right, and it is worth reading as one:
   pointed at.
 - A write comes back as `read_only` — **not** `syntax`, which is the mistake
   that tells the user to check SQL they wrote correctly.
+- `update_rows` is `unsupported` unless `row_updates` is claimed; a driver that
+  claims it takes an empty batch as `{ "updated": 0 }` and refuses an unknown
+  connection, and refuses a batch past `MAX_CHANGES_PER_CALL` as
+  `invalid_value`. `row_update_suite` additionally checks, against a writable
+  fixture, that an edit lands, that a batch with one bad change changes
+  nothing (`conflict`), and that a rejected value is `invalid_value`.
 - A null crosses as `{"kind":"null"}` and an empty string does not.
 - `limit`/`offset` really page: the second page is not the first one again, and
   a full page sets `truncated`.

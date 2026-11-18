@@ -82,6 +82,9 @@ extend-exclude = [
 extend-ignore-re = [
     # PNG is a file format, not a typo
     "PNG",
+    # SQLite's type-affinity rule matches these exact prefixes of FLOAT and DOUBLE
+    '`(FLOA|DOUB)`',
+    '"(floa|doub)"',
     # Hex key fingerprints in the team sharing test vectors, written whole or in groups of four
     '\b[0-9a-f]{16,}\b',
     '\b[0-9a-f]{4}( [0-9a-f]{4}){7}\b',

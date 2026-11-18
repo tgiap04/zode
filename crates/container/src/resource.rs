@@ -86,6 +86,12 @@ pub struct ComposeLabels {
     /// The directory `docker compose up` was run from, on the machine that ran
     /// it. `None` when the container carries compose labels but not this one.
     pub working_dir: Option<String>,
+    /// The compose files the project was brought up from
+    /// (`com.docker.compose.project.config_files`), in the order compose was
+    /// given them. Empty when the label is missing -- and then nothing may be
+    /// run against the project, because compose would look for a default file
+    /// and read a different model than the one that created these containers.
+    pub config_files: Vec<String>,
 }
 
 impl ComposeLabels {
@@ -124,6 +130,20 @@ impl ResourceAction {
             // backend's.
             ResourceAction::Unpause => "Resume",
         }
+    }
+}
+
+/// A key unique to one row of a list, for anything that has to tell rows apart
+/// (selection, focus, element ids).
+///
+/// The id for every kind but images. `docker images` prints one row per *tag*
+/// and every tag of an image shares its id, so an image's key is the id and the
+/// name, separated by a NUL that neither can contain.
+pub fn row_key(resource: &Resource) -> String {
+    if resource.kind == ResourceKind::Image {
+        format!("{}\u{0}{}", resource.id, resource.name)
+    } else {
+        resource.id.clone()
     }
 }
 

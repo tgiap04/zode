@@ -1,4 +1,6 @@
+use crate::safe_mode::SafetyLevel;
 use anyhow::Result;
+use collections::HashMap;
 use credentials_provider::CredentialsProvider;
 use gpui::{App, AsyncApp, Task};
 use settings::{RegisterSetting, Settings};
@@ -11,6 +13,10 @@ use std::sync::Arc;
 /// default -- a `#[default]` here would be overridden by that file, so this
 /// exists only for the path where settings are absent altogether (tests).
 const DEFAULT_PAGE_SIZE: u32 = 200;
+
+/// The most rows an export writes when the settings say nothing; see
+/// `DEFAULT_PAGE_SIZE` for why this repeats `default.json`.
+const DEFAULT_EXPORT_ROW_LIMIT: u64 = 1_000_000;
 
 /// One database, as configured. Holds no secret and no live connection.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,12 +42,31 @@ impl ConnectionConfig {
 pub struct DatabaseSettings {
     pub connections: Vec<ConnectionConfig>,
     pub page_size: u32,
+    /// A ceiling on one export, so an unbounded table cannot fill a disk.
+    pub export_row_limit: u64,
+    /// The safety level of each personal connection that sets one, by name.
+    /// Kept apart from `ConnectionConfig`, which is built for team and project
+    /// connections as well and has nowhere to put a level that is not theirs.
+    pub(crate) safety: HashMap<String, SafetyLevel>,
 }
 
 impl Settings for DatabaseSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
         let database = content.database.clone();
+        let safety = database
+            .as_ref()
+            .and_then(|database| database.connections.as_ref())
+            .into_iter()
+            .flatten()
+            .filter_map(|connection| {
+                Some((
+                    connection.name.clone()?,
+                    SafetyLevel::from(connection.safety?),
+                ))
+            })
+            .collect();
         Self {
+            safety,
             connections: database
                 .as_ref()
                 .and_then(|database| database.connections.clone())
@@ -59,10 +84,16 @@ impl Settings for DatabaseSettings {
                 })
                 .collect(),
             page_size: database
+                .as_ref()
                 .and_then(|database| database.page_size)
                 .unwrap_or(DEFAULT_PAGE_SIZE)
                 // A page of zero rows would page forever without ever showing
                 // anything, and settings are hand-written.
+                .max(1),
+            export_row_limit: database
+                .and_then(|database| database.export_row_limit)
+                .unwrap_or(DEFAULT_EXPORT_ROW_LIMIT)
+                // Zero would make every export an empty file.
                 .max(1),
         }
     }

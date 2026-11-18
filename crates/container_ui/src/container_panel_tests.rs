@@ -1142,7 +1142,7 @@ mod busy {
         let (gated, panel, cx) = gated_panel(cx);
         let release = gated.hold_next_list();
 
-        panel.update(cx, |panel, cx| panel.destroy(removal_of("c0ffee"), cx));
+        panel.update(cx, |panel, cx| panel.destroy_here(removal_of("c0ffee"), cx));
         panel.read_with(cx, |panel, _| {
             assert_eq!(panel.busy_for("c0ffee"), Some(Busy::Removing));
         });
@@ -1202,7 +1202,7 @@ mod busy {
         )
         .expect("a prune with targets is a plan");
 
-        panel.update(cx, |panel, cx| panel.destroy(plan, cx));
+        panel.update(cx, |panel, cx| panel.destroy_here(plan, cx));
         cx.run_until_parked();
         panel.read_with(cx, |panel, _| {
             for id in ["aaa", "bbb", "ccc"] {
@@ -1225,7 +1225,7 @@ mod busy {
             Arc::new(FakeBackend::docker().misbehaving(Misbehaviour::FailEveryList));
         let (panel, cx) = panel_over(backend, cx);
 
-        panel.update(cx, |panel, cx| panel.destroy(removal_of("c0ffee"), cx));
+        panel.update(cx, |panel, cx| panel.destroy_here(removal_of("c0ffee"), cx));
         panel.read_with(cx, |panel, _| {
             assert_eq!(panel.busy_for("c0ffee"), Some(Busy::Removing));
         });
@@ -1271,7 +1271,7 @@ mod busy {
         let (gated, panel, cx) = gated_panel(cx);
         let _held = gated.hold_next_list();
 
-        panel.update(cx, |panel, cx| panel.destroy(removal_of("c0ffee"), cx));
+        panel.update(cx, |panel, cx| panel.destroy_here(removal_of("c0ffee"), cx));
         cx.run_until_parked();
         panel.update(cx, |panel, cx| panel.choose_kind(ResourceKind::Image, cx));
         panel.read_with(cx, |panel, _| assert!(panel.in_flight.is_empty()));
@@ -1287,7 +1287,7 @@ mod busy {
 
         panel.update(cx, |panel, cx| {
             panel.act(ResourceAction::Stop, "c0ffee".into(), cx);
-            panel.destroy(removal_of("c0ffee"), cx);
+            panel.destroy_here(removal_of("c0ffee"), cx);
         });
         cx.run_until_parked();
         panel.read_with(cx, |panel, _| {
@@ -1316,7 +1316,7 @@ mod busy {
 
         panel.update(cx, |panel, cx| {
             panel.act(ResourceAction::Stop, "c0ffee".into(), cx);
-            panel.destroy(plan, cx);
+            panel.destroy_here(plan, cx);
         });
         cx.run_until_parked();
         panel.read_with(cx, |panel, _| {
@@ -1349,7 +1349,7 @@ mod busy {
 
         panel.update(cx, |panel, cx| {
             panel.act(ResourceAction::Stop, "c0ffee".into(), cx);
-            panel.destroy(removal_of("c0ffee"), cx);
+            panel.destroy_here(removal_of("c0ffee"), cx);
         });
         cx.run_until_parked();
         release_destroy.send(()).ok();
@@ -1372,7 +1372,7 @@ mod busy {
         assert!(cx.debug_bounds("container-busy:c0ffee").is_none());
 
         let _held = gated.hold_next_list();
-        panel.update(cx, |panel, cx| panel.destroy(removal_of("c0ffee"), cx));
+        panel.update(cx, |panel, cx| panel.destroy_here(removal_of("c0ffee"), cx));
         cx.run_until_parked();
         draw(cx);
 
@@ -1413,7 +1413,7 @@ mod busy {
         assert!(cx.debug_bounds("container-row-buttons:c0ffee").is_some());
 
         let _held = gated.hold_next_list();
-        panel.update(cx, |panel, cx| panel.destroy(removal_of("c0ffee"), cx));
+        panel.update(cx, |panel, cx| panel.destroy_here(removal_of("c0ffee"), cx));
         cx.run_until_parked();
         draw(cx);
 
@@ -1654,10 +1654,11 @@ mod detail {
         }
     }
 
-    /// A row opens onto its logs, so only a kind the engine can show logs for
-    /// reacts to a click at all.
+    /// A row opens onto its tabs, so a kind opens when the engine offers any
+    /// tab for it: an image has never run and has no logs, but it can be
+    /// inspected.
     #[gpui::test]
-    async fn only_a_kind_with_logs_opens_on_a_click(cx: &mut TestAppContext) {
+    async fn a_kind_with_any_tab_opens_on_a_click(cx: &mut TestAppContext) {
         init_test(cx);
         let backend: Arc<dyn ContainerBackend> = Arc::new(FakeBackend::docker());
         let (panel, cx) =
@@ -1668,8 +1669,8 @@ mod detail {
             assert!(panel.rows_open_a_detail(), "a container has a log");
             panel.choose_kind(ResourceKind::Image, cx);
             assert!(
-                !panel.rows_open_a_detail(),
-                "an image has never run, so a click on one would open nothing"
+                panel.rows_open_a_detail(),
+                "an image has no logs but it can be inspected"
             );
         });
     }
@@ -1899,18 +1900,22 @@ mod removal {
         panel.update(cx, |panel, cx| panel.reload(cx));
         cx.run_until_parked();
 
-        panel.read_with(cx, |panel, _| {
-            assert!(
-                panel.plan_removal("no-such-id").is_none(),
-                "an id that is not on screen cannot be planned, so it cannot be \
-                 removed"
-            );
-            let plan = panel
-                .plan_removal("c0ffee")
-                .expect("a row that is on screen can be planned");
-            assert_eq!(plan.targets().len(), 1);
-            assert_eq!(plan.confirmation(), "fake-postgres");
+        let ghost = panel.update(cx, |panel, cx| {
+            panel.plan_removal_of(&["no-such-id".to_string()], cx)
         });
+        assert!(
+            ghost.await.expect("planning").is_none(),
+            "an id that is not on screen cannot be planned, so it cannot be removed"
+        );
+        let plan = panel
+            .update(cx, |panel, cx| {
+                panel.plan_removal_of(&["c0ffee".to_string()], cx)
+            })
+            .await
+            .expect("planning")
+            .expect("a row that is on screen can be planned");
+        assert_eq!(plan.targets().len(), 1);
+        assert_eq!(plan.confirmation(), "fake-postgres");
 
         assert!(
             recorder.destroyed().is_empty(),
@@ -1931,7 +1936,11 @@ mod removal {
         cx.run_until_parked();
 
         let plan = panel
-            .read_with(cx, |panel, _| panel.plan_removal("c0ffee"))
+            .update(cx, |panel, cx| {
+                panel.plan_removal_of(&["c0ffee".to_string()], cx)
+            })
+            .await
+            .expect("planning")
             .expect("a plan");
 
         for wrong in ["", "yes", "FAKE-POSTGRES", "fake-postgre", "fake-postgres!"] {
@@ -1943,7 +1952,7 @@ mod removal {
         assert!(plan.is_confirmed_by("fake-postgres"));
 
         // Only now, with the confirmation given, may it run.
-        panel.update(cx, |panel, cx| panel.destroy(plan, cx));
+        panel.update(cx, |panel, cx| panel.destroy_here(plan, cx));
         cx.run_until_parked();
         assert_eq!(
             recorder.destroyed().len(),
@@ -2086,7 +2095,11 @@ mod removal {
         cx.run_until_parked();
 
         let plan = panel
-            .read_with(cx, |panel, _| panel.plan_removal("c0ffee"))
+            .update(cx, |panel, cx| {
+                panel.plan_removal_of(&["c0ffee".to_string()], cx)
+            })
+            .await
+            .expect("planning")
             .expect("a plan");
         assert_eq!(
             plan.targets()[0].id,
