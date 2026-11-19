@@ -7,23 +7,27 @@
 //! the write. MongoDB offers no equivalent: a connection is as privileged as
 //! its user, and the only server-side answer is a read-only role, which is the
 //! user's to grant and not this driver's to assume. So the guarantee here is
-//! that nothing but `find` and `aggregate` is ever sent, and that an
-//! aggregation carrying `$out` or `$merge` is refused before it leaves.
+//! that `query` sends nothing but `find` and `aggregate`, and refuses an
+//! aggregation carrying `$out` or `$merge` before it leaves. The one write is
+//! `update_rows` in [`update_rows`]: `updateOne` by `_id` with `$set`, over
+//! field names and values the driver built itself.
 //!
 //! Mapping onto the protocol, which has no MongoDB in it and should not:
 //! a schema is a database, a table is a collection, and a statement is a JSON
 //! command document rather than SQL. Nothing above this layer learns any of
 //! that.
 
+mod edit_values;
 mod introspect;
 mod query;
+mod update_rows;
 mod values;
 
 use database::protocol::{
     CancelParams, Capabilities, ConnectParams, ConnectResult, ConnectionField, ConnectionForm,
     ConnectionId, ConnectionRef, DescribeTableParams, DescribeTableResult, Empty, ErrorCode,
     InitializeResult, ListSchemasResult, ListTablesParams, ListTablesResult, NoParams,
-    PROTOCOL_VERSION, QueryParams, ResponseError, ResultColumn, ResultSet,
+    PROTOCOL_VERSION, QueryParams, ResponseError, ResultColumn, ResultSet, UpdateRowsParams,
 };
 use database::server::{Driver, serve, typed};
 use mongodb::bson::Document;
@@ -102,6 +106,7 @@ impl Driver for MongoDriver {
                     // quoting the protocol applies is the JSON string quote
                     // here, which is exactly what a command document wants.
                     read_table_template: Some(r#"{"find": {table}, "$db": {schema}}"#.into()),
+                    row_updates: true,
                 },
             })
         })
@@ -200,6 +205,13 @@ impl Driver for MongoDriver {
         typed(params, |params: QueryParams| {
             let live = self.live(&params.connection_id)?;
             run_page(&live, &params)
+        })
+    }
+
+    fn update_rows(&self, params: serde_json::Value) -> Result<serde_json::Value, ResponseError> {
+        typed(params, |params: UpdateRowsParams| {
+            let live = self.live(&params.connection_id)?;
+            update_rows::apply(&live, params)
         })
     }
 

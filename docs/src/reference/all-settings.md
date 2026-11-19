@@ -5287,7 +5287,7 @@ Float values between `0.0` and `0.9`, where:
 
 **Options**
 
-Float values between `0.0` (see-through) and `1.0` (solid). With vibrancy or a background image on, the backgrounds keep 88% of this (as opaque as Tabby looks), so the glass shows even at `1.0`.
+Float values between `0.0` (see-through) and `1.0` (solid). With vibrancy or a background image on, the backgrounds keep [`window_vibrancy_opacity`](#window-vibrancy-opacity) of this, so the glass shows even at `1.0`.
 
 ## Window Vibrancy
 
@@ -5298,6 +5298,16 @@ Float values between `0.0` (see-through) and `1.0` (solid). With vibrancy or a b
 **Options**
 
 `true` or `false`.
+
+## Window Vibrancy Opacity
+
+- Description: How much of `window_opacity` the window's backgrounds keep while vibrancy or a background image is on. Lower lets more of what is behind the window show through. It has no effect when neither is turned on.
+- Setting: `window_vibrancy_opacity`
+- Default: `0.8`
+
+**Options**
+
+Float values between `0.0` (backgrounds fully see-through) and `1.0` (backgrounds as opaque as `window_opacity`).
 
 ## Window Background Image
 
@@ -5315,6 +5325,7 @@ The path of an image file on this machine; `~/` is expanded. The image is read f
 {
   "window_opacity": 1.0,
   "window_vibrancy": true,
+  "window_vibrancy_opacity": 0.7,
   "window_background_image": "~/Pictures/wallpaper.jpg"
 }
 ```

@@ -6,16 +6,18 @@ use crate::driver_registry;
 use crate::panel_layout::{self, LAYOUT_KEY, Split};
 use crate::query::QueryState;
 use crate::session::Session;
+use crate::tree_filter::TreeFilter;
 use collections::HashMap;
 use database::protocol::{ColumnDef, SchemaRef, TableRef};
 use editor::Editor;
 use gpui::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Point, SharedString, Task,
-    WeakEntity, Window,
+    AbsoluteLength, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Pixels, Point,
+    SharedString, Task, WeakEntity, Window,
 };
 use settings::{Settings as _, SettingsStore};
 use std::sync::Arc;
 use ui::{ContextMenu, prelude::*};
+use ui_input::{ErasedEditorEvent, InputField};
 use workspace::Workspace;
 use workspace::dock::PanelEvent;
 
@@ -34,6 +36,9 @@ pub(crate) struct SchemaNode {
     /// `None` until asked for. A Postgres with a few thousand tables would
     /// stall the first click if this were filled in eagerly.
     pub(crate) tables: Option<Vec<TableRef>>,
+    /// The load whose answer this node is waiting for, `0` for none. See
+    /// [`DatabasePanel::next_load`].
+    pub(crate) tables_load: u64,
 }
 
 pub(crate) struct ConnectionNode {
@@ -52,6 +57,8 @@ pub(crate) struct ConnectionNode {
     /// Opened on its own rather than by a click, so a refusal for want of a
     /// password waits for one instead of raising a prompt.
     pub(crate) unattended: bool,
+    /// The list-of-schemas load this node is waiting for, `0` for none.
+    pub(crate) schemas_load: u64,
 }
 
 impl ConnectionNode {
@@ -80,6 +87,7 @@ impl ConnectionNode {
             team: None,
             from_project: false,
             unattended: false,
+            schemas_load: 0,
         }
     }
 }
@@ -91,12 +99,18 @@ pub(crate) struct Places {
 }
 
 /// Where a node came from, which tells two nodes of the same name apart.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum NodeOrigin {
     Personal,
     Project,
     Team,
 }
+
+/// What identifies a connection across a rebuild of the list: unlike its place
+/// in `connections`, it survives another connection being added or removed.
+/// Anything that waits -- an answer from a driver, a menu, a page that will be
+/// sorted -- holds this and looks the place up when it acts.
+pub(crate) type ConnectionKey = (String, NodeOrigin);
 
 /// The table whose columns are showing, if any.
 ///
@@ -109,6 +123,8 @@ pub(crate) struct OpenTable {
     pub(crate) table: String,
     /// `None` while `describe_table` is still out.
     pub(crate) columns: Option<Vec<ColumnDef>>,
+    /// The `describe_table` this is waiting for, `0` for none.
+    pub(crate) columns_load: u64,
 }
 
 pub struct DatabasePanel {
@@ -120,34 +136,75 @@ pub struct DatabasePanel {
     /// measurement costs and is invisible at this scale -- the layout only
     /// changes when the width crosses `SIDE_BY_SIDE_WIDTH`.
     pub(crate) measured_width: Option<Pixels>,
+    /// How wide each column of the results stands, and the names they were
+    /// sized for (see `result_columns`).
+    pub(crate) result_column_widths: Entity<ui::ResizableColumnsState>,
+    pub(crate) result_column_names: Vec<SharedString>,
+    /// The results' scroll position, sideways as well as down.
+    pub(crate) result_table: Entity<ui::TableInteractionState>,
     pub(crate) focus_handle: FocusHandle,
+    /// The result grid's own focus, and the key context it brings
+    /// (`DatabaseResults`): the arrow keys are bound there, because bound for
+    /// the whole panel they also reach a text box in it that hands them on.
+    pub(crate) results_focus: FocusHandle,
     pub(crate) workspace: WeakEntity<Workspace>,
     /// Whose drivers this panel's connections run on: this machine's, or the
     /// remote host's the project lives on. Found on first use, because the
     /// panel is built while its workspace is being updated and cannot read it.
     pub(crate) drivers: Option<driver_registry::DriverHost>,
     pub(crate) connections: Vec<ConnectionNode>,
+    /// A line under a connection saying what just failed without taking
+    /// anything away: a refresh that could not replace the rows still showing,
+    /// or a table whose columns could not be read. Cleared by the next attempt,
+    /// and kept by identity so it stays with its connection through a reload.
+    pub(crate) notices: HashMap<ConnectionKey, SharedString>,
     pub(crate) open_table: Option<OpenTable>,
     pub(crate) pinned: PinnedConnections,
+    /// The safety level of each team and project connection that has been given
+    /// one on this machine, keyed by `safe_mode::override_key` (name and origin).
+    pub(crate) safety_overrides: HashMap<String, crate::safe_mode::SafetyLevel>,
+    /// The Open Data waiting for its table to be described, `0` for none. See
+    /// [`DatabasePanel::next_load`].
+    pub(crate) pending_open: u64,
     /// Which connection a query would run against: whichever was last opened or
     /// clicked. One editor for the view rather than one per connection -- people
     /// write a query, then decide where to point it.
     pub(crate) active: Option<usize>,
     pub(crate) sql_editor: Entity<Editor>,
     pub(crate) query: QueryState,
+    /// What each connection ran, by connection name. See `query_history`.
+    pub(crate) history: HashMap<String, crate::query_history_popover::HistoryState>,
+    pub(crate) history_popover: Option<crate::query_history_popover::HistoryPopover>,
+    pub(crate) export: crate::export_results::Export,
+    /// Puts out the highlight on the statement that just ran.
+    pub(crate) flash_clear: Option<Task<()>>,
+    /// What the grid says about the save that just landed, for the page that
+    /// reads the table again to show. See `grid_edit_save`.
+    pub(crate) saved_note: Option<SharedString>,
+    /// The filter bar over a table opened with Open Data. See
+    /// `browse_filter_bar`.
+    pub(crate) browse_bar: crate::browse_filter_bar::BrowseFilterBar,
     /// The scratch text each connection was last left with, so switching away
     /// and back does not lose a half-written statement.
     pub(crate) scratch: HashMap<String, String>,
     /// One per connection being opened or expanded, dropped when the view is,
-    /// so closing the tab cancels whatever it had in flight.
+    /// so closing the tab cancels whatever it had in flight. Added to through
+    /// [`DatabasePanel::keep_task`], which lets go of the ones that finished.
     pub(crate) tasks: Vec<Task<()>>,
     /// Counted rather than random, so two queries in the same millisecond
     /// cannot share a request id and have `cancel` stop the wrong one.
     pub(crate) request_counter: u64,
+    /// See [`DatabasePanel::next_load`].
+    pub(crate) load_counter: u64,
     /// The open connection menu, its place on screen, and the subscription that
     /// clears it. Held by the panel rather than by a row: rows are recycled by
     /// the virtualised list, and a menu owned by one would vanish on scroll.
     pub(crate) context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, gpui::Subscription)>,
+    /// The box above the tree, and what was last typed into it. The query is
+    /// parsed when it is typed rather than when a row is drawn, and lives here
+    /// rather than on a node so a refresh or a settings reload keeps it.
+    pub(crate) tree_filter_input: Entity<InputField>,
+    pub(crate) tree_filter: TreeFilter,
     pub(crate) tree_height: Pixels,
     pub(crate) sql_height: Pixels,
     /// How wide the table list stands when it stands beside the data. Only read
@@ -161,6 +218,8 @@ pub struct DatabasePanel {
     /// The "Team" group: its header, and what it says when it lists nothing.
     pub(crate) team_group: crate::team_connections::TeamGroup,
     _settings_observer: gpui::Subscription,
+    _tree_filter_edited: gpui::Subscription,
+    _sql_edited: gpui::Subscription,
 }
 
 impl DatabasePanel {
@@ -212,34 +271,88 @@ impl DatabasePanel {
             editor
         });
         Self::apply_sql_language(&sql_editor, languages, cx);
+        // An edit moves the text out from under the highlight, so it goes with
+        // the edit rather than waiting for its timer.
+        let sql_edited = cx.subscribe(
+            &sql_editor,
+            |this, _editor, event: &editor::EditorEvent, cx| {
+                if matches!(event, editor::EditorEvent::BufferEdited) && this.flash_clear.is_some()
+                {
+                    this.clear_flash(cx);
+                }
+            },
+        );
+
+        let tree_filter_input = cx.new(|cx| {
+            InputField::new(window, cx, "Filter tables").start_icon(IconName::MagnifyingGlass)
+        });
+        let tree_filter_edited = tree_filter_input.read(cx).editor().clone().subscribe(
+            Box::new({
+                let panel = cx.weak_entity();
+                let input = tree_filter_input.downgrade();
+                move |event, _window, cx| {
+                    if event != ErasedEditorEvent::BufferEdited {
+                        return;
+                    }
+                    let Some(text) = input.read_with(cx, |input, cx| input.text(cx)).ok() else {
+                        return;
+                    };
+                    panel
+                        .update(cx, |panel, cx| panel.set_tree_filter(&text, cx))
+                        .ok();
+                }
+            }),
+            window,
+            cx,
+        );
 
         let mut panel = Self {
             measured_width: None,
+            result_column_widths: cx.new(|_| {
+                ui::ResizableColumnsState::new(0, Vec::<AbsoluteLength>::new(), Vec::new())
+            }),
+            result_column_names: Vec::new(),
+            result_table: cx.new(|cx| ui::TableInteractionState::new(cx)),
             focus_handle: cx.focus_handle(),
+            results_focus: cx.focus_handle(),
             workspace,
             drivers: None,
             connections: Vec::new(),
+            notices: HashMap::default(),
             open_table: None,
             pinned: PinnedConnections::default(),
+            safety_overrides: crate::safe_mode::read_overrides(cx),
+            pending_open: 0,
             active: None,
             sql_editor,
             query: QueryState::Idle,
+            history: HashMap::default(),
+            history_popover: None,
+            flash_clear: None,
+            saved_note: None,
+            export: Default::default(),
+            browse_bar: Default::default(),
             scratch: HashMap::default(),
             tasks: Vec::new(),
             request_counter: 0,
+            load_counter: 0,
             context_menu: None,
+            tree_filter_input,
+            tree_filter: TreeFilter::default(),
             tree_height: panel_layout::DEFAULT_TREE_HEIGHT,
             sql_height: panel_layout::DEFAULT_SQL_HEIGHT,
             tree_width: panel_layout::DEFAULT_TREE_WIDTH,
             split_drag: None,
             team_group: Default::default(),
             _settings_observer: settings_observer,
+            _tree_filter_edited: tree_filter_edited,
+            _sql_edited: sql_edited,
         };
         panel.reload_connections(cx);
         panel.watch_team(cx);
         // Not read here: the panel is built while its workspace is being
         // updated, and reading the project's files needs the workspace.
-        panel.tasks.push(cx.spawn_in(window, async move |this, cx| {
+        panel.keep_task(cx.spawn_in(window, async move |this, cx| {
             this.update_in(cx, |this, window, cx| {
                 this.load_project_connections(window, cx)
             })
@@ -338,6 +451,17 @@ impl DatabasePanel {
     pub(crate) fn reload_connections(&mut self, cx: &mut Context<Self>) {
         let configured = DatabaseSettings::get_global(cx).connections.clone();
         let wanted = visible_connections(&configured, &self.pinned);
+        // An entry of an open menu names its connection by its place, which is
+        // about to move. Dismissed rather than dropped, so focus goes back to
+        // the panel the way it does for any other way a menu closes. Deferred
+        // because a menu entry can be what reloads the list (pinning does), and
+        // the menu is being updated while its entry runs.
+        if let Some((menu, _, _)) = &self.context_menu {
+            let menu = menu.clone();
+            cx.defer(move |cx| {
+                menu.update(cx, |_, cx| cx.emit(gpui::DismissEvent));
+            });
+        }
         // `active` and the open table hold places in the list, and a removed
         // node shifts every place after it. Remembered by name across the
         // rebuild, or they would point at a different database than the one
@@ -369,6 +493,12 @@ impl DatabasePanel {
         self.connections
             .extend(existing.into_iter().filter(|node| !node.is_personal()));
         self.restore_places(places);
+        let connections = &self.connections;
+        self.notices.retain(|(name, origin), _| {
+            connections
+                .iter()
+                .any(|node| node.config.name == *name && node.origin() == *origin)
+        });
         cx.notify();
     }
 
@@ -395,7 +525,7 @@ impl DatabasePanel {
         if let Some(key) = active_key {
             self.active = self.index_of_key(&key);
             if self.active.is_none() {
-                self.query = QueryState::Idle;
+                self.clear_result_of(&key);
             }
         }
         if let Some(key) = open_key {
@@ -412,16 +542,24 @@ impl DatabasePanel {
 
     /// What identifies a node across a rebuild: its name, and whether it came
     /// from the team, since a team connection may share a personal one's name.
-    pub(crate) fn node_key(&self, index: usize) -> Option<(String, NodeOrigin)> {
+    pub(crate) fn node_key(&self, index: usize) -> Option<ConnectionKey> {
         self.connections
             .get(index)
             .map(|node| (node.config.name.clone(), node.origin()))
     }
 
-    pub(crate) fn index_of_key(&self, (name, origin): &(String, NodeOrigin)) -> Option<usize> {
+    pub(crate) fn index_of_key(&self, (name, origin): &ConnectionKey) -> Option<usize> {
         self.connections
             .iter()
             .position(|node| node.config.name == *name && node.origin() == *origin)
+    }
+
+    /// Holds a task for as long as the panel lives, letting go of the ones
+    /// that already finished -- a finished task has nothing left to cancel, and
+    /// kept for good they would add one per query to the end of the session.
+    pub(crate) fn keep_task(&mut self, task: Task<()>) {
+        self.tasks.retain(|kept| !kept.is_ready());
+        self.tasks.push(task);
     }
 
     /// Pins or unpins a connection for this project, and writes it down.
@@ -526,10 +664,31 @@ impl DatabasePanel {
         });
     }
 
+    pub(crate) fn set_tree_filter(&mut self, text: &str, cx: &mut Context<Self>) {
+        let filter = TreeFilter::new(text);
+        if filter != self.tree_filter {
+            self.tree_filter = filter;
+            cx.notify();
+        }
+    }
+
     /// Whether `name` is pinned. Read by the tree to mark the row, and by the
     /// context menu to name the action correctly.
     pub(crate) fn is_pinned(&self, name: &str) -> bool {
         self.pinned.is_pinned(name)
+    }
+
+    /// The statement builder for a connection, `None` until it is open: the
+    /// quote character is something the driver says once it has been asked.
+    pub(crate) fn dialect(&self, index: usize) -> Option<crate::sql_dialect::Dialect> {
+        let node = self.connections.get(index)?;
+        let NodeState::Connected(session) = &node.state else {
+            return None;
+        };
+        Some(crate::sql_dialect::Dialect::detect(
+            &node.config.driver,
+            &session.capabilities,
+        ))
     }
 
     /// Where a connection sits in the tree, by name.

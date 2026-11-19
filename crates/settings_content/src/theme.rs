@@ -165,8 +165,8 @@ pub struct ThemeSettingsContent {
     /// behind -- the desktop, or the background image -- to the same degree.
     /// On macOS text and icons stay solid (vibrancy); elsewhere, for now, the
     /// whole window fades, text included. With vibrancy or a background image
-    /// the backgrounds are faded further, to 90% of this, so the glass always
-    /// shows.
+    /// the backgrounds are faded further, to `window_vibrancy_opacity` of this,
+    /// so the glass always shows.
     ///
     /// Default: 1.0
     #[schemars(range(min = 0.0, max = 1.0))]
@@ -179,6 +179,14 @@ pub struct ThemeSettingsContent {
     ///
     /// Default: false
     pub window_vibrancy: Option<bool>,
+
+    /// How opaque the backgrounds stay while vibrancy or a background image is
+    /// on, as a share of `window_opacity`: lower lets more of what is behind
+    /// the window show through. Has no effect with neither turned on.
+    ///
+    /// Default: 0.8
+    #[schemars(range(min = 0.0, max = 1.0))]
+    pub window_vibrancy_opacity: Option<WindowOpacity>,
 
     /// An image to show behind the window's surfaces, by its path on this
     /// machine. The image is read from that path and never copied: moving or

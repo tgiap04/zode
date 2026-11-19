@@ -31,7 +31,7 @@ mod session_index;
 mod summary;
 pub mod wire;
 
-pub use claude::ClaudeProvider;
+pub use claude::{ClaudeProvider, last_permission_mode as last_claude_permission_mode};
 pub use codex::CodexProvider;
 pub use copilot::CopilotProvider;
 pub use opencode::OpenCodeProvider;

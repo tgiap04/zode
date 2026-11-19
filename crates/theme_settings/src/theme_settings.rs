@@ -549,6 +549,51 @@ mod tests {
         });
     }
 
+    /// How much glass shows is the person's to choose: the share of
+    /// `window_opacity` the backgrounds keep with vibrancy or an image on comes
+    /// from `window_vibrancy_opacity`, held to 0..1, and means nothing with
+    /// neither turned on.
+    #[gpui::test]
+    fn the_vibrancy_opacity_sets_how_much_glass_shows(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| init_settings(cx));
+        let set = |opacity: f32, vibrancy: bool, share: f32, cx: &mut gpui::TestAppContext| {
+            cx.update(|cx| {
+                SettingsStore::update_global(cx, |store, cx| {
+                    store.update_user_settings(cx, |settings| {
+                        settings.theme.window_opacity = Some(::settings::WindowOpacity(opacity));
+                        settings.theme.window_vibrancy = Some(vibrancy);
+                        settings.theme.window_vibrancy_opacity =
+                            Some(::settings::WindowOpacity(share));
+                    });
+                });
+            });
+            cx.update(|cx| ThemeSettings::get_global(cx).background_opacity())
+        };
+
+        assert_eq!(set(1.0, true, 0.5, cx), 0.5);
+        assert_eq!(
+            set(0.6, true, 0.5, cx),
+            0.3,
+            "a share of the opacity, not instead of it"
+        );
+        assert_eq!(
+            set(1.0, true, 1.0, cx),
+            1.0,
+            "1 keeps the backgrounds as opaque as set"
+        );
+        assert_eq!(set(1.0, true, 1.7, cx), 1.0, "values past 1 are held to 1");
+        assert_eq!(
+            set(1.0, true, -0.2, cx),
+            0.0,
+            "values below 0 are held to 0"
+        );
+        assert_eq!(
+            set(0.9, false, 0.5, cx),
+            0.9,
+            "with neither vibrancy nor an image the share does nothing"
+        );
+    }
+
     /// The settings UI draws an item only when the default settings give it a
     /// value; a `null` default left the image picker as a "NO DEFAULT" chip.
     #[gpui::test]
@@ -558,6 +603,11 @@ mod tests {
             let defaults = cx.global::<SettingsStore>().raw_default_settings();
             assert!(defaults.theme.window_opacity.is_some());
             assert!(defaults.theme.window_vibrancy.is_some());
+            assert_eq!(
+                defaults.theme.window_vibrancy_opacity,
+                Some(::settings::WindowOpacity(crate::GLASS_OPACITY)),
+                "the default the settings UI shows is the one the window uses"
+            );
             assert!(
                 defaults.theme.window_background_image.is_some(),
                 "an empty path, not null, so the picker has a value to show"

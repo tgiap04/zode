@@ -220,7 +220,7 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.25.1"
-source = "git+https://github.com/tgiap04/alacritty?rev=e13b2ea761dee4d58b16aa6c12827ea9448e731d#e13b2ea761dee4d58b16aa6c12827ea9448e731d"
+source = "git+https://github.com/tgiap04/alacritty?rev=27357e7701f8f68aa1ae564812e1b271de927c65#27357e7701f8f68aa1ae564812e1b271de927c65"
 dependencies = [
  "base64 0.22.1",
  "bitflags 2.10.0",
@@ -2385,6 +2385,7 @@ name = "container_ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "container",
  "dunce",
  "editor",
@@ -2393,6 +2394,7 @@ dependencies = [
  "gpui",
  "log",
  "menu",
+ "parking_lot",
  "picker",
  "project",
  "settings",
@@ -2407,6 +2409,7 @@ dependencies = [
  "util",
  "workspace",
  "zed_actions",
+ "zlog",
 ]
 
 [[package]]
@@ -3358,9 +3361,11 @@ name = "database_ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "collections",
  "credentials_provider",
  "database",
+ "db",
  "editor",
  "extension",
  "fs",
@@ -3372,10 +3377,12 @@ dependencies = [
  "menu",
  "multi_buffer",
  "paths",
+ "picker",
  "project",
  "remote",
  "roxmltree",
  "rpc",
+ "serde",
  "serde_json",
  "settings",
  "tempfile",
@@ -20196,7 +20203,7 @@ dependencies = [
 
 [[package]]
 name = "zode"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "activity_indicator",
  "agent_notify",
@@ -20374,6 +20381,7 @@ dependencies = [
 name = "zode-db-postgres"
 version = "0.1.0"
 dependencies = [
+ "bytes 1.11.1",
  "database",
  "postgres",
  "rustls",

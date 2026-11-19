@@ -48,6 +48,24 @@ pub fn paged(sql: &str, limit: u32, offset: u64) -> String {
 pub const BEGIN_READ_ONLY: &str = "START TRANSACTION READ ONLY";
 pub const END_READ_ONLY: &str = "ROLLBACK";
 
+/// `ER_UNSUPPORTED_PS`: the server parsed the text as one statement and will not
+/// prepare that kind (`HELP`, for one).
+const UNSUPPORTED_IN_PREPARED: u16 = 1295;
+
+/// Whether a failed `prepare` still proves the text is a single statement.
+///
+/// The `mysql` crate always asks for `CLIENT_MULTI_STATEMENTS`, and the option
+/// that adds capabilities cannot take it back, so a text query may carry
+/// several statements -- `COMMIT; UPDATE …` ends the read-only transaction and
+/// writes. A prepare is the one request the server will not take that way: it
+/// parses the text with multi-statement support off. So every statement is
+/// prepared (and the preparation dropped) before it is run as text, and only
+/// this one failure lets it through: the parse had already succeeded when the
+/// server decided it would not prepare that kind.
+pub fn is_single_but_unpreparable(code: u16) -> bool {
+    code == UNSUPPORTED_IN_PREPARED
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,6 +106,15 @@ mod tests {
     #[test]
     fn a_cte_is_left_alone() {
         assert!(!is_wrappable("WITH t AS (SELECT 1) SELECT * FROM t"));
+    }
+
+    #[test]
+    fn only_a_statement_the_server_parsed_but_will_not_prepare_skips_the_gate() {
+        assert!(is_single_but_unpreparable(1295));
+        // A syntax error is what a second statement produces.
+        for code in [1064, 1146, 1142, 1290, 1792] {
+            assert!(!is_single_but_unpreparable(code), "{code}");
+        }
     }
 
     #[test]

@@ -1,8 +1,10 @@
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use container::kubeconfig::ConfigTarget;
+use container::resource::row_key;
 use container::{
     BackendEvent, BackendKind, ContainerBackend, ContainerError, DestructivePlan, DockerBackend,
     KubernetesBackend, PruneScope, ResourceAction, ResourceKind,
@@ -43,6 +45,7 @@ use ui::prelude::*;
 use workspace::Workspace;
 use workspace::dock::PanelEvent;
 
+use crate::compose_actions::Plugin;
 use crate::search::Listing;
 
 /// What the panel knows about the list right now.
@@ -63,6 +66,9 @@ pub(crate) enum ListState {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Busy {
     Action(ResourceAction),
+    /// Asking the engine what a removal would take with it, before the dialog
+    /// that lists it can open.
+    Planning,
     Removing,
 }
 
@@ -74,6 +80,7 @@ impl Busy {
             Busy::Action(ResourceAction::Restart) => "Restarting\u{2026}",
             Busy::Action(ResourceAction::Pause) => "Pausing\u{2026}",
             Busy::Action(ResourceAction::Unpause) => "Resuming\u{2026}",
+            Busy::Planning => "Planning\u{2026}",
             Busy::Removing => "Removing\u{2026}",
         }
     }
@@ -267,6 +274,34 @@ pub struct ContainerPanel {
     /// Kept across engine and kind switches: somebody looking for one thing
     /// usually goes on looking for it after switching where they look.
     pub(crate) search: Option<crate::search::Search>,
+    /// The rows picked for a bulk action, and the one the keyboard is on.
+    ///
+    /// Reset with the list on a change of engine or kind, and trimmed to the
+    /// rows still there each time the list is read again.
+    pub(crate) selection: crate::row_selection::RowSelection,
+    /// Every container the engine lists, while the Compose tab is showing: the
+    /// services of a project are these grouped by their compose labels, and a
+    /// project's working directory is read off them.
+    pub(crate) compose_members: Vec<container::Resource>,
+    /// The projects whose services are drawn under their row.
+    pub(crate) compose_expanded: BTreeSet<String>,
+    /// Whether the compose tool answered when it was asked.
+    pub(crate) compose_plugin: crate::compose_actions::Plugin,
+    /// The one-click filters, per kind, so narrowing the containers does not
+    /// follow the user onto the images. Absent means "no filter".
+    pub(crate) filters: HashMap<ResourceKind, crate::quick_filters::QuickFilter>,
+    /// The right-click menu that is open, where, and what closes it.
+    pub(crate) context_menu: Option<(
+        Entity<ui::ContextMenu>,
+        gpui::Point<Pixels>,
+        gpui::Subscription,
+    )>,
+    /// Focus for the list alone. The keys that move through rows are bound
+    /// under `ContainerResults`, which wraps the list and nothing else, so the
+    /// search field and a log terminal never see them.
+    pub(crate) results_focus: FocusHandle,
+    /// Scrolling for the list, so the keyboard cursor can be brought into view.
+    pub(crate) list_scroll: Entity<ui::TableInteractionState>,
 }
 
 pub enum ContainerPanelEvent {}
@@ -411,6 +446,14 @@ impl ContainerPanel {
             resolve_host,
             pending_host_name,
             search: None,
+            selection: crate::row_selection::RowSelection::default(),
+            compose_members: Vec::new(),
+            compose_expanded: BTreeSet::new(),
+            compose_plugin: crate::compose_actions::Plugin::default(),
+            filters: HashMap::default(),
+            context_menu: None,
+            results_focus: cx.focus_handle(),
+            list_scroll: cx.new(|cx| ui::TableInteractionState::new(cx)),
         };
         panel.wait_for_host(cx);
         panel
@@ -622,6 +665,8 @@ impl ContainerPanel {
         self.active_backend = index;
         self.state = ListState::Loading;
         self.in_flight.clear();
+        self.selection.clear();
+        self.forget_compose();
         // Whatever file and targets were found belonged to the old engine's
         // picker. Leaving them would let a context chosen for one engine be
         // offered as though it belonged to another.
@@ -781,22 +826,6 @@ impl ContainerPanel {
             })
     }
 
-    /// Builds the plan for removing one row, or `None` when there is nothing to
-    /// remove.
-    ///
-    /// The **only** way a removal starts. It returns a plan and runs nothing:
-    /// whoever holds the plan still has to get it past the confirmation.
-    pub(crate) fn plan_removal(&self, id: &str) -> Option<DestructivePlan> {
-        if !self.removable() {
-            return None;
-        }
-        let ListState::Ready(resources) = &self.state else {
-            return None;
-        };
-        let target = resources.iter().find(|resource| resource.id == id)?;
-        DestructivePlan::remove(self.active_kind, vec![target.clone()])
-    }
-
     /// Goes and finds what a prune would delete, then builds the plan.
     ///
     /// Asynchronous because the finding is: `docker system prune` has no
@@ -822,21 +851,49 @@ impl ContainerPanel {
         })
     }
 
+    /// Whether `engine` is the one the panel is asking right now.
+    ///
+    /// Compared by identity: switching engine, and aiming the Kubernetes one at
+    /// another context, both replace the `Arc` the panel holds.
+    pub(crate) fn is_active_engine(&self, engine: &Arc<dyn ContainerBackend>) -> bool {
+        self.backend()
+            .is_some_and(|active| Arc::ptr_eq(active, engine))
+    }
+
+    /// Says why a plan built for an engine the panel has since left was dropped.
+    pub(crate) fn refuse_stale_plan(&mut self, cx: &mut Context<Self>) {
+        self.last_error = Some(ContainerError::Invalid {
+            detail: "the engine changed while the removal was being confirmed, so nothing \
+                     was removed"
+                .to_string(),
+        });
+        cx.notify();
+    }
+
     /// Carries out a plan whose confirmation has already been given.
     ///
-    /// Takes a plan and nothing else, so it cannot be called about something
-    /// that was never enumerated and shown.
-    pub(crate) fn destroy(&mut self, plan: DestructivePlan, cx: &mut Context<Self>) {
-        let Some(backend) = self.backend().cloned() else {
+    /// Takes the plan and the engine it was built for, and nothing else: it
+    /// cannot be called about something that was never enumerated and shown,
+    /// and it does not run a plan on an engine other than the one that listed
+    /// it. The panel may have switched engine, or context, while the dialog was
+    /// open; the same ids on another engine could name something else.
+    pub(crate) fn destroy(
+        &mut self,
+        engine: Arc<dyn ContainerBackend>,
+        plan: DestructivePlan,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.is_active_engine(&engine) {
+            self.refuse_stale_plan(cx);
             return;
-        };
+        }
+        let backend = engine;
         let action_id = self.next_action_id;
         self.next_action_id += 1;
-        let ids: Vec<String> = plan
-            .targets()
-            .iter()
-            .map(|target| target.id.clone())
-            .collect();
+        let mut ids: Vec<String> = plan.targets().iter().map(row_key).collect();
+        // A project is not among its own targets, but it is the row that is
+        // going away, and the one somebody is looking at.
+        ids.extend(plan.compose_target().map(|target| target.project.clone()));
         self.mark_busy(ids.iter().cloned(), Busy::Removing, action_id);
         self.last_error = None;
         cx.notify();
@@ -865,6 +922,15 @@ impl ContainerPanel {
         );
     }
 
+    /// [`Self::destroy`] on whichever engine the panel is on, for tests that
+    /// are about the removal and not about which engine it was built for.
+    #[cfg(test)]
+    pub(crate) fn destroy_here(&mut self, plan: DestructivePlan, cx: &mut Context<Self>) {
+        if let Some(engine) = self.backend().cloned() {
+            self.destroy(engine, plan, cx);
+        }
+    }
+
     pub(crate) fn dismiss_error(&mut self, cx: &mut Context<Self>) {
         self.last_error = None;
         cx.notify();
@@ -884,6 +950,7 @@ impl ContainerPanel {
         // "Images" heading is a lie for as long as the command takes.
         self.state = ListState::Loading;
         self.in_flight.clear();
+        self.selection.clear();
         self.close_detail(cx);
         self.reload(cx);
         cx.notify();
@@ -943,6 +1010,8 @@ impl ContainerPanel {
         self.backends[self.active_backend] = aimed;
         self.state = ListState::Loading;
         self.in_flight.clear();
+        self.selection.clear();
+        self.forget_compose();
         self.close_detail(cx);
         self.reload(cx);
         self.start_watching(cx);
@@ -987,9 +1056,38 @@ impl ContainerPanel {
             return;
         };
         let kind = self.active_kind;
+        // Asked again until it answers yes: installing the plugin while the
+        // panel is open is an ordinary thing to do, and a yes does not change.
+        let probe_compose = kind == ResourceKind::ComposeProject
+            && backend.offers(container::Op::Compose)
+            && self.compose_plugin != Plugin::Present;
         self.reloading = true;
         self.load = Some(cx.spawn(async move |this, cx| {
             let listed = backend.list(kind).await;
+            // The containers a project's services are made of, read together
+            // with the projects so the two never disagree on screen.
+            let members = if kind == ResourceKind::ComposeProject && listed.is_ok() {
+                match backend.list(ResourceKind::Container).await {
+                    Ok(members) => Some(members),
+                    Err(error) => {
+                        log::debug!(
+                            "could not list the containers of the compose projects: {error}"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let plugin = if probe_compose && listed.is_ok() {
+                Some(if backend.compose_available().await {
+                    Plugin::Present
+                } else {
+                    Plugin::Missing
+                })
+            } else {
+                None
+            };
             let state = match listed {
                 Ok(resources) => ListState::Ready(Listing::new(resources)),
                 Err(error) => ListState::Failed(error),
@@ -998,6 +1096,19 @@ impl ContainerPanel {
                 let ready = matches!(state, ListState::Ready(_));
                 if let ListState::Ready(resources) = &state {
                     this.refresh_detail(resources);
+                    let present: Vec<String> = resources.iter().map(row_key).collect();
+                    let present: Vec<&str> = present.iter().map(String::as_str).collect();
+                    this.selection.keep_only(&present);
+                    if kind == ResourceKind::ComposeProject {
+                        this.compose_expanded
+                            .retain(|project| present.contains(&project.as_str()));
+                    }
+                }
+                if let Some(members) = members {
+                    this.compose_members = members;
+                }
+                if let Some(plugin) = plugin {
+                    this.compose_plugin = plugin;
                 }
                 this.state = state;
                 if ready {
@@ -1014,6 +1125,14 @@ impl ContainerPanel {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// Drops what was learned about compose from the engine that has just been
+    /// replaced: its plugin, its containers, which projects were open.
+    fn forget_compose(&mut self) {
+        self.compose_members.clear();
+        self.compose_expanded.clear();
+        self.compose_plugin = Plugin::Unknown;
     }
 }
 

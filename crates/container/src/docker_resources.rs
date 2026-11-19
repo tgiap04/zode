@@ -84,6 +84,18 @@ impl DockerImage {
     }
 }
 
+/// The `repo:tag` an image row names, or `None` for a row that names none: a
+/// dangling image (`<none> (id)`), or one pulled by digest, whose row is just
+/// its repository.
+///
+/// Read back from the row's name, which [`DockerImage::into_resource`] builds
+/// as `repo:tag`. The tag is what follows the last `/`: a registry's port
+/// (`localhost:5000/app`) is not one.
+pub(crate) fn tagged_reference(image: &Resource) -> Option<&str> {
+    let last_segment = image.name.rsplit('/').next().unwrap_or(&image.name);
+    (!image.name.starts_with(NONE) && last_segment.contains(':')).then_some(image.name.as_str())
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub(crate) struct DockerVolume {

@@ -59,6 +59,24 @@ const WSL_ONLY_VARIABLES: &[&str] = &["SSH_AUTH_SOCK"];
 pub(crate) const DEFAULT_LINUX_PATH: &str =
     "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+/// Where a browser on this machine reaches a port published on the host.
+///
+/// An SSH host is the address the connection dials, never the nickname it is
+/// shown under. WSL forwards its distro's ports to `localhost`. A dev
+/// container's published ports sit on a machine this one has no route to, and
+/// another Zode's host is known by name only, so those have none.
+///
+/// An IPv6 literal comes back bracketed, so `http://{address}:{port}` is a URL.
+pub(crate) fn reachable_address_of(options: &RemoteConnectionOptions) -> Option<String> {
+    match options {
+        RemoteConnectionOptions::Ssh(ssh) => {
+            Some(ssh.host.to_bracketed_string()).filter(|host| !host.is_empty())
+        }
+        RemoteConnectionOptions::Wsl(_) => Some("localhost".to_string()),
+        _ => None,
+    }
+}
+
 /// The host of a project opened over a remote server.
 pub struct RemoteCommandHost {
     /// The connection commands are built through right now; `None` while it
@@ -67,6 +85,7 @@ pub struct RemoteCommandHost {
     /// connection that replaces it does not share.
     connection: RwLock<Option<Arc<dyn RemoteConnection>>>,
     host_name: String,
+    reachable_address: Option<String>,
     path_style: PathStyle,
     environment: HashMap<String, String>,
     forwarded: HashMap<String, String>,
@@ -81,6 +100,7 @@ impl RemoteCommandHost {
     ) -> Self {
         let options = connection.connection_options();
         let host_name = options.display_name();
+        let reachable_address = reachable_address_of(&options);
         // Same rule as locating an agent CLI: WSL appends the Windows `PATH`,
         // and a `docker.exe` or `gh.exe` found under `/mnt/c` would act on the
         // Windows machine the user asked to keep out of this project.
@@ -107,6 +127,7 @@ impl RemoteCommandHost {
             path_style: connection.path_style(),
             connection: RwLock::new(Some(connection)),
             host_name,
+            reachable_address,
             environment,
             forwarded,
         }
@@ -168,6 +189,10 @@ impl CommandHost for RemoteCommandHost {
 
     fn environment_variable(&self, name: &str) -> Option<String> {
         self.environment.get(name).cloned()
+    }
+
+    fn reachable_address(&self) -> Option<String> {
+        self.reachable_address.clone()
     }
 }
 
@@ -352,6 +377,65 @@ mod tests {
             .expect("a local project always has a host");
 
         assert_eq!(host.remote_name(), None);
+    }
+
+    #[test]
+    fn a_browser_reaches_a_published_port_at_the_real_ssh_host_not_its_nickname() {
+        let ssh = |host: &str, nickname: Option<&str>| {
+            RemoteConnectionOptions::Ssh(remote::SshConnectionOptions {
+                host: host.into(),
+                nickname: nickname.map(str::to_string),
+                ..Default::default()
+            })
+        };
+        assert_eq!(
+            reachable_address_of(&ssh("build.example.com", Some("Build box"))).as_deref(),
+            Some("build.example.com")
+        );
+        assert_eq!(
+            reachable_address_of(&ssh("10.0.0.7", None)).as_deref(),
+            Some("10.0.0.7")
+        );
+        assert_eq!(
+            reachable_address_of(&ssh("fd00::7", None)).as_deref(),
+            Some("[fd00::7]"),
+            "a URL needs the brackets"
+        );
+        assert_eq!(reachable_address_of(&ssh("", Some("Unnamed"))), None);
+    }
+
+    #[test]
+    fn wsl_is_reached_through_localhost_and_what_cannot_be_reached_has_no_address() {
+        let wsl = RemoteConnectionOptions::Wsl(WslConnectionOptions {
+            distro_name: "Ubuntu-22.04".to_string(),
+            user: None,
+        });
+        assert_eq!(reachable_address_of(&wsl).as_deref(), Some("localhost"));
+
+        let dev_container = RemoteConnectionOptions::Docker(remote::DockerConnectionOptions {
+            name: "app".to_string(),
+            container_id: "abc".to_string(),
+            remote_user: "vscode".to_string(),
+            upload_binary_over_docker_exec: false,
+            use_podman: false,
+            remote_env: Default::default(),
+        });
+        assert_eq!(reachable_address_of(&dev_container), None);
+
+        let relay = RemoteConnectionOptions::Relay(remote::RelayConnectionOptions {
+            host_device_id: "device".to_string(),
+            host_name: "Studio".to_string(),
+        });
+        assert_eq!(reachable_address_of(&relay), None);
+    }
+
+    #[test]
+    fn the_host_reports_the_address_of_its_connection() {
+        let wsl = RemoteCommandHost::new(
+            Arc::new(RecordingConnection::wsl("Ubuntu-22.04")),
+            HashMap::default(),
+        );
+        assert_eq!(wsl.reachable_address().as_deref(), Some("localhost"));
     }
 
     #[test]

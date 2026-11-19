@@ -1,0 +1,15 @@
+[
+  {
+    "Name": "pgdata",
+    "Driver": "local",
+    "Mountpoint": "/home/dev/.local/share/containers/storage/volumes/pgdata/_data",
+    "CreatedAt": "2026-10-20T09:00:00.1+01:00",
+    "Labels": { "io.podman.compose.project": "app" },
+    "Scope": "local",
+    "Options": { "type": "tmpfs" },
+    "MountCount": 1,
+    "NeedsCopyUp": true,
+    "NeedsChown": true,
+    "LockNumber": 3
+  }
+]

@@ -227,6 +227,9 @@ impl DatabasePanel {
         else {
             return;
         };
+        let Some(key) = self.node_key(index) else {
+            return;
+        };
         let Some(team) = TeamVaultSession::global(cx) else {
             return;
         };
@@ -236,7 +239,7 @@ impl DatabasePanel {
         cx.notify();
 
         let pulled = team.update(cx, |team, cx| team.pull(entry, cx));
-        self.tasks.push(cx.spawn_in(window, async move |this, cx| {
+        self.keep_task(cx.spawn_in(window, async move |this, cx| {
             let shared = pulled
                 .await
                 .map_err(|error| error.to_string())
@@ -244,10 +247,15 @@ impl DatabasePanel {
                     ConnectionEntry::from_json(&pulled.payload).map_err(|error| error.to_string())
                 });
             this.update_in(cx, |this, window, cx| {
+                // Found again by identity: the list may have been rebuilt while
+                // the pull was out, and the place the node had is another's.
+                let Some(index) = this.index_of_key(&key) else {
+                    return;
+                };
                 let Some(node) = this.connections.get_mut(index) else {
                     return;
                 };
-                // A sync while this was out may have put another node here.
+                // A sync while this was out may have put another entry here.
                 let Some(origin) = node.team.as_mut().filter(|team| team.entry == entry) else {
                     return;
                 };
@@ -283,6 +291,9 @@ impl DatabasePanel {
         let Some(entry) = node.team.as_ref().map(|team| team.entry) else {
             return;
         };
+        let Some(key) = self.node_key(index) else {
+            return;
+        };
         let written = write_secret(
             zed_credentials_provider::global(cx),
             node.config.credential_key().to_string(),
@@ -290,15 +301,17 @@ impl DatabasePanel {
             password.to_string(),
             cx,
         );
-        self.tasks.push(cx.spawn(async move |this, cx| {
+        self.keep_task(cx.spawn(async move |this, cx| {
             if let Err(error) = written.await {
                 log::warn!("could not keep a shared database password in the keychain: {error:#}");
                 return;
             }
             this.update(cx, |this, _cx| {
+                // By identity, for the same reason as the pull: the node may
+                // have moved while the keychain was being written.
                 if let Some(origin) = this
-                    .connections
-                    .get_mut(index)
+                    .index_of_key(&key)
+                    .and_then(|index| this.connections.get_mut(index))
                     .and_then(|node| node.team.as_mut())
                     .filter(|team| team.entry == entry)
                 {
@@ -363,6 +376,7 @@ fn team_node(entry: EntryId, name: String, revision: String) -> ConnectionNode {
         }),
         from_project: false,
         unattended: false,
+        schemas_load: 0,
     }
 }
 

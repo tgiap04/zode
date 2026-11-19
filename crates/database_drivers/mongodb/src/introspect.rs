@@ -112,6 +112,19 @@ mod tests {
     use super::*;
     use mongodb::bson::doc;
 
+    /// Editing names a document by `_id` alone: any other field marked as a
+    /// key would let an edit match several documents.
+    #[test]
+    fn only_the_id_field_is_a_key() {
+        let sample = vec![doc! { "_id": 1, "tenant": "a", "code": 7 }];
+        let keys: Vec<_> = describe_sample(&sample)
+            .into_iter()
+            .filter(|column| column.primary_key)
+            .map(|column| column.name)
+            .collect();
+        assert_eq!(keys, ["_id"]);
+    }
+
     /// The inference this whole module is: no catalogue exists, so the field
     /// list is what the documents happen to carry.
     #[test]

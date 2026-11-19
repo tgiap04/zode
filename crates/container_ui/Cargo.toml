@@ -17,6 +17,7 @@ path = "src/container_ui.rs"
 [dependencies]
 anyhow.workspace = true
 container.workspace = true
+editor.workspace = true
 # Direct rather than through an action that `crates/zed` wires up: `agent_ui`,
 # `debugger_ui` and `repl` all take it the same way, and an action carrying a
 # command as payload would be a second, weaker copy of what this trait already
@@ -45,10 +46,11 @@ zed_actions.workspace = true
 # it directly: `project/test-support` brings `RemoteConnectionIdentity::Mock`
 # into being, and the arm that handles it lives behind this feature. Without
 # both, `workspace` fails to compile with a non-exhaustive match.
+async-trait.workspace = true
 container = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
+parking_lot.workspace = true
 dunce.workspace = true
-editor.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }
 settings = { workspace = true, features = ["test-support"] }
@@ -57,3 +59,4 @@ tempfile.workspace = true
 theme.workspace = true
 theme_settings.workspace = true
 workspace = { workspace = true, features = ["test-support"] }
+zlog.workspace = true

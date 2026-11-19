@@ -1,4 +1,4 @@
-use super::types::{Capabilities, ColumnDef, ResultSet, SchemaRef, TableRef};
+use super::types::{Capabilities, ColumnDef, ResultSet, RowChange, SchemaRef, TableRef};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -121,6 +121,29 @@ pub struct CancelParams {
     pub request_id: String,
 }
 
+/// The most changes one `update_rows` call may carry.
+///
+/// Enforced where requests are dispatched, so every driver refuses a larger
+/// call the same way and none of them has to hold a transaction open over an
+/// unbounded batch. A client with more edits than this saves them in several
+/// calls.
+pub const MAX_CHANGES_PER_CALL: usize = 1000;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct UpdateRowsParams {
+    pub connection_id: ConnectionId,
+    pub schema: String,
+    pub table: String,
+    pub changes: Vec<RowChange>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateRowsResult {
+    /// Rows changed. On success this is the number of changes, because a
+    /// change that touched anything else rolls the whole batch back.
+    pub updated: u64,
+}
+
 method!(Initialize, "initialize", NoParams, InitializeResult);
 method!(Connect, "connect", ConnectParams, ConnectResult);
 method!(Disconnect, "disconnect", ConnectionRef, Empty);
@@ -144,12 +167,18 @@ method!(
 );
 method!(Query, "query", QueryParams, ResultSet);
 method!(Cancel, "cancel", CancelParams, Empty);
+method!(
+    UpdateRows,
+    "update_rows",
+    UpdateRowsParams,
+    UpdateRowsResult
+);
 
 /// Every method name that crosses the wire.
 ///
 /// Exists so a driver can be checked against the full set at build time rather
 /// than discovering a missing arm on the first click that needs it.
-pub const METHOD_NAMES: [&str; 8] = [
+pub const METHOD_NAMES: [&str; 9] = [
     Initialize::NAME,
     Connect::NAME,
     Disconnect::NAME,
@@ -158,4 +187,5 @@ pub const METHOD_NAMES: [&str; 8] = [
     DescribeTable::NAME,
     Query::NAME,
     Cancel::NAME,
+    UpdateRows::NAME,
 ];

@@ -5,8 +5,12 @@
 //! [`database`]. Nothing here names an engine -- a driver formats its own
 //! values and describes its own schema, so adding one costs this crate nothing.
 //! That is the invariant phase 07 checks by bringing PostgreSQL up without
-//! touching a line in here.
+//! touching a line in here. The exception is `sql_dialect`, the one module the
+//! UI builds statements in: it is told which engine it is talking to, and the
+//! quoting rule still comes from the driver.
 
+mod browse_filter_bar;
+mod cell_validation;
 mod connection_modal;
 mod connection_modal_download;
 mod connection_modal_render;
@@ -15,19 +19,37 @@ mod connection_store;
 mod connection_tree;
 mod database_panel;
 mod driver_registry;
+mod export_results;
+mod grid_actions;
+mod grid_cell;
+mod grid_edit_bar;
+mod grid_edit_save;
+mod grid_editing;
+mod grid_selection;
 mod panel_connections;
 mod panel_credentials;
 mod panel_layout;
 mod panel_queries;
+mod panel_refresh;
 mod password_prompt;
 mod project_connections;
 mod query;
+mod query_history;
+mod query_history_popover;
 mod render;
+mod result_columns;
 mod result_grid;
 mod row_detail;
+mod row_identity;
+mod row_serializers;
+mod safe_mode;
 mod session;
+mod sql_dialect;
 mod standalone;
+mod statement_split;
 mod team_connections;
+mod tree_filter;
+mod tree_menus;
 
 pub use connection_store::{ConnectionConfig, DatabaseSettings};
 pub use database_panel::DatabasePanel;

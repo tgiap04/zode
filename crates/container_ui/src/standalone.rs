@@ -62,6 +62,15 @@ impl Item for ContainerPanel {
     fn telemetry_event_text(&self) -> Option<&'static str> {
         Some("Containers Opened")
     }
+
+    /// Another tab came forward: nobody is looking at the Stats numbers, so
+    /// the sampling stops now rather than at its next tick. A frame that draws
+    /// the tab again starts it.
+    fn deactivated(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
+        if let Some(detail) = self.detail.as_mut() {
+            detail.stats.stop_polling();
+        }
+    }
 }
 
 impl ContainerPanel {

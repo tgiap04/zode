@@ -165,6 +165,7 @@ jobs:
         repo: ribru17/ts_query_ls
         version: tags/v3.15.1
         file: ts_query_ls-x86_64-unknown-linux-gnu.tar.gz
+        token: ${{ secrets.GITHUB_TOKEN }}
     - name: run_tests::run_ts_query_ls
       run: |-
         tar -xf "$GITHUB_WORKSPACE/ts_query_ls-x86_64-unknown-linux-gnu.tar.gz" -C "$GITHUB_WORKSPACE"

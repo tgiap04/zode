@@ -1,0 +1,3 @@
+{"BlockIO":"195MB / 308MB","CPUPerc":"0.61%","Container":"f7c1ce96988d88eb5f469862408f05933d611bcad10185515e7764056b39643e","ID":"f7c1ce96988d","MemPerc":"6.07%","MemUsage":"481.4MiB / 7.748GiB","Name":"shop-auth-1","NetIO":"4.45MB / 11.7MB","PIDs":"47"}
+{"BlockIO":"210MB / 33.1MB","CPUPerc":"2.78%","Container":"5e30a51dff80ccc3714e7508424578e67d7e9ad6f00b5880c5984549e8335f88","ID":"5e30a51dff80","MemPerc":"8.11%","MemUsage":"124.6MiB / 1.5GiB","Name":"shop-ai-1","NetIO":"2.92kB / 252B","PIDs":"27"}
+{"BlockIO":"0B / 0B","CPUPerc":"--","Container":"aaaaaaaaaaaa00000000000000000000000000000000000000000000000000ff","ID":"aaaaaaaaaaaa","MemPerc":"--","MemUsage":"-- / --","Name":"shop-stopped-1","NetIO":"-- / --","PIDs":"--"}

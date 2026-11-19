@@ -410,6 +410,10 @@ pub(crate) fn fetch_ts_query_ls() -> Step<Use> {
     .add_with(("repo", "ribru17/ts_query_ls"))
     .add_with(("version", CI_TS_QUERY_RELEASE))
     .add_with(("file", TS_QUERY_LS_FILE))
+    // Without a token the release lookup is an anonymous API call, which
+    // shares its rate limit with every job on the runner's IP and fails the
+    // step with "Could not find asset id" once that limit is spent.
+    .add_with(("token", vars::GITHUB_TOKEN))
 }
 
 pub(crate) fn run_ts_query_ls() -> Step<Run> {

@@ -641,6 +641,7 @@ impl Filled {
             name: Some(self.name.clone()),
             driver: Some(self.driver.clone()),
             url: Some(self.url.clone()),
+            safety: None,
         };
         // Taken from the project rather than from a global, which is also what
         // keeps this crate off a direct dependency on `fs`.

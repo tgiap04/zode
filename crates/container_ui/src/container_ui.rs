@@ -9,11 +9,27 @@
 mod branch_switch;
 mod branch_switch_modals;
 mod branch_switch_picker;
+mod bulk_actions;
+mod compose_actions;
 mod compose_checkout;
+mod compose_panel;
+mod compose_render;
 mod confirm_modal;
 mod container_panel;
 mod detail;
+mod detail_history;
+mod detail_inspect;
+mod detail_stats;
+mod detail_tabs;
+mod network_membership;
+mod published_ports;
+mod quick_filters;
 mod render;
+mod resource_form;
+mod resource_modals;
+mod row_menu;
+mod row_selection;
+mod run_container;
 mod search;
 mod standalone;
 mod terminal;
@@ -188,4 +204,14 @@ pub fn use_fake_engines_for_test(cx: &mut App) {
 #[cfg(test)]
 mod branch_switch_tests;
 #[cfg(test)]
+mod bulk_actions_tests;
+#[cfg(test)]
+mod compose_tests;
+#[cfg(test)]
 mod container_panel_tests;
+#[cfg(test)]
+mod detail_tests;
+#[cfg(test)]
+mod resource_tests;
+#[cfg(test)]
+mod row_menu_tests;

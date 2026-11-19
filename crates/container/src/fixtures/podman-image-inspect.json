@@ -1,0 +1,28 @@
+[
+  {
+    "Id": "9a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4f5061728394a5b6c7d8e9f",
+    "RepoTags": ["docker.io/library/postgres:16"],
+    "RepoDigests": ["docker.io/library/postgres@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"],
+    "Parent": "",
+    "Comment": "",
+    "Created": "2026-10-20T00:00:00Z",
+    "Config": {
+      "Env": ["PATH=/usr/local/bin:/usr/bin:/bin", "PG_MAJOR=16", "POSTGRES_HOST_AUTH_TOKEN=img-not-real"],
+      "Entrypoint": ["docker-entrypoint.sh"],
+      "Cmd": ["postgres"],
+      "WorkingDir": "/",
+      "ExposedPorts": { "5432/tcp": {} },
+      "Labels": null,
+      "StopSignal": "SIGINT"
+    },
+    "Version": "",
+    "Author": "",
+    "Architecture": "amd64",
+    "Os": "linux",
+    "Size": 456000000,
+    "VirtualSize": 456000000,
+    "RootFS": { "Type": "layers", "Layers": ["sha256:aa", "sha256:bb", "sha256:cc"] },
+    "Labels": { "maintainer": "PostgreSQL Docker Community" },
+    "NamesHistory": []
+  }
+]

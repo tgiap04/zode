@@ -5,8 +5,11 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use util::command::{Command, CommandHost};
 
+use crate::inspect::Inspection;
 use crate::kubeconfig::{ConfigSource, ConfigTarget};
+use crate::operations::{ComposeOp, ComposeTarget, ImageLayer, Op, RunSpec};
 use crate::resource::{Resource, ResourceAction, ResourceKind};
+use crate::stats::Stats;
 
 /// Which engine is answering.
 ///
@@ -64,6 +67,12 @@ pub enum ContainerError {
     /// project whose connection cannot start a command there. Never answered
     /// by running the engine on this machine instead.
     HostUnavailable { detail: String },
+    /// A value was refused before any command was built: a name that would be
+    /// read as an option, a reference with a space in it. Nothing ran.
+    Invalid { detail: String },
+    /// This engine has no such operation. Reaching it means the caller did not
+    /// ask [`ContainerBackend::offers`] first.
+    NotOffered { operation: String },
 }
 
 impl std::fmt::Display for ContainerError {
@@ -83,6 +92,10 @@ impl std::fmt::Display for ContainerError {
             }
             ContainerError::Parse { detail } => write!(f, "could not read the output: {detail}"),
             ContainerError::HostUnavailable { detail } => write!(f, "{detail}"),
+            ContainerError::Invalid { detail } => write!(f, "refused: {detail}"),
+            ContainerError::NotOffered { operation } => {
+                write!(f, "{operation} is not offered by this engine")
+            }
         }
     }
 }
@@ -276,4 +289,227 @@ pub trait ContainerBackend: Send + Sync {
     /// Same argument-splitting rule as [`Self::logs_command`], and it matters
     /// more here: this one is interactive and long-lived.
     fn exec_command(&self, kind: ResourceKind, id: &str) -> Option<(String, Vec<String>)>;
+
+    /// What forcing the removal of a `kind` does on this engine, as the
+    /// sentence the confirmation shows -- or `None` when forcing does nothing
+    /// there, in which case the view must not offer it.
+    ///
+    /// Asked per engine and kind because the same flag means different things:
+    /// Podman's `--force` removes the containers that use an image, volume or
+    /// network, while Docker's `volume rm -f` and `network rm -f` still refuse
+    /// what is in use. Use the answer as the plan's warning with
+    /// [`crate::DestructivePlan::forced_with_effect`]; [`Self::destroy`]
+    /// refuses a forced plan for a kind that answers `None`.
+    fn force_effect(&self, kind: ResourceKind) -> Option<String> {
+        let _ = kind;
+        None
+    }
+
+    /// Whether [`Self::inspect`] answers for this kind. What the view asks to
+    /// decide whether to draw an Inspect tab, so it never has to call and read
+    /// `None` as "no".
+    fn supports_inspect(&self, kind: ResourceKind) -> bool {
+        let _ = kind;
+        false
+    }
+
+    /// The full description of one resource, as sections plus the engine's own
+    /// JSON. `Ok(None)` when [`Self::supports_inspect`] says no.
+    ///
+    /// Secret-looking environment values come back masked; see
+    /// [`crate::Inspection`].
+    async fn inspect(
+        &self,
+        kind: ResourceKind,
+        id: &str,
+    ) -> Result<Option<Inspection>, ContainerError> {
+        let _ = (kind, id);
+        Ok(None)
+    }
+
+    /// Whether [`Self::stats`] answers at all.
+    fn supports_stats(&self) -> bool {
+        false
+    }
+
+    /// One sample of resource usage for each of `ids`, taken now rather than
+    /// streamed: the view polls while the tab is visible and stops when it is
+    /// not. `Ok(None)` when this engine cannot say -- Kubernetes without a
+    /// metrics server, for one. An id the engine reports nothing for is simply
+    /// absent from the answer.
+    async fn stats(&self, ids: &[String]) -> Result<Option<Vec<Stats>>, ContainerError> {
+        let _ = ids;
+        Ok(None)
+    }
+
+    /// Whether [`Self::usages`] answers for this kind.
+    fn supports_usages(&self, kind: ResourceKind) -> bool {
+        let _ = kind;
+        false
+    }
+
+    /// The containers that use a volume or a network, or were created from an
+    /// image -- the "used by" list a removal should be weighed against.
+    /// `Ok(None)` when [`Self::supports_usages`] says no.
+    async fn usages(
+        &self,
+        kind: ResourceKind,
+        id: &str,
+    ) -> Result<Option<Vec<Resource>>, ContainerError> {
+        let _ = (kind, id);
+        Ok(None)
+    }
+
+    /// Whether this engine has `op` at all -- what the view asks before it
+    /// draws the entry point. Static: it says what the engine *can* do, not
+    /// whether a tool it needs is installed (see [`Self::compose_available`]).
+    fn offers(&self, op: Op) -> bool {
+        let _ = op;
+        false
+    }
+
+    /// Whether the compose tool is there: `docker compose` as the v2 plugin,
+    /// `podman compose` only if some provider answers. Asked, not assumed,
+    /// because an engine without it fails in a way that reads as the project
+    /// being broken. Always false when [`Self::offers`] says no.
+    async fn compose_available(&self) -> bool {
+        false
+    }
+
+    /// A compose verb to run in a terminal, so its output streams. `None` when
+    /// compose is not offered or a value was refused (a project, file or
+    /// service that would be read as an option).
+    ///
+    /// `services` limits the verb to those services; empty means all of them.
+    fn compose_command(
+        &self,
+        project: &ComposeTarget,
+        op: ComposeOp,
+        services: &[String],
+    ) -> Option<(String, Vec<String>)> {
+        let _ = (project, op, services);
+        None
+    }
+
+    /// What `compose down` would remove for `project`, listed one by one, or
+    /// `Ok(None)` when there is nothing to take down or compose is not offered.
+    /// `with_volumes` is the `--volumes` choice and lists the project's volumes
+    /// too. Run it through [`Self::destroy`].
+    async fn compose_down_plan(
+        &self,
+        project: &ComposeTarget,
+        with_volumes: bool,
+    ) -> Result<Option<crate::DestructivePlan>, ContainerError> {
+        let _ = (project, with_volumes);
+        Ok(None)
+    }
+
+    /// A plan for removing `targets`, with what depends on each of them
+    /// attached when the engine can say (see [`Self::usages`]). The way to
+    /// build a removal plan: it is `DestructivePlan::remove` plus the lookup the
+    /// dialog needs to say "these containers use it".
+    ///
+    /// Dependents are looked up by each target's `id`. For an image row that is
+    /// the id every tag of the image shares, so two rows of one image list the
+    /// same containers: the list is what would block removing the image's last
+    /// tag, which is the conservative thing to show. The rows themselves are
+    /// told apart by [`crate::row_key`].
+    async fn removal_plan(
+        &self,
+        kind: ResourceKind,
+        targets: Vec<Resource>,
+    ) -> Result<Option<crate::DestructivePlan>, ContainerError> {
+        let Some(mut plan) = crate::DestructivePlan::remove(kind, targets) else {
+            return Ok(None);
+        };
+        if !self.supports_usages(kind) {
+            return Ok(Some(plan));
+        }
+        let mut dependents = Vec::new();
+        for target in plan.targets() {
+            let users = self.usages(kind, &target.id).await?.unwrap_or_default();
+            if !users.is_empty() {
+                dependents.push(crate::destructive::Dependents {
+                    target_id: target.id.clone(),
+                    containers: users,
+                });
+            }
+        }
+        plan = plan.with_dependents(dependents);
+        Ok(Some(plan))
+    }
+
+    /// `pull <reference>` in a terminal, for its progress output.
+    fn pull_command(&self, reference: &str) -> Option<(String, Vec<String>)> {
+        let _ = reference;
+        None
+    }
+
+    /// Pulls an image and waits. Prefer [`Self::pull_command`] when somebody
+    /// is watching.
+    async fn pull(&self, reference: &str) -> Result<(), ContainerError> {
+        let _ = reference;
+        Err(not_offered("pulling an image"))
+    }
+
+    async fn tag(&self, source: &str, target: &str) -> Result<(), ContainerError> {
+        let _ = (source, target);
+        Err(not_offered("tagging an image"))
+    }
+
+    /// The layers an image was built from, newest first.
+    async fn history(&self, id: &str) -> Result<Vec<ImageLayer>, ContainerError> {
+        let _ = id;
+        Err(not_offered("an image's history"))
+    }
+
+    /// `run` for `spec`, to start in a terminal. Every value is its own
+    /// argument; an error names the value that was refused.
+    fn run_command(&self, spec: &RunSpec) -> Result<(String, Vec<String>), ContainerError> {
+        let _ = spec;
+        Err(not_offered("running an image"))
+    }
+
+    async fn create_volume(
+        &self,
+        name: &str,
+        driver: Option<&str>,
+        labels: &[(String, String)],
+    ) -> Result<(), ContainerError> {
+        let _ = (name, driver, labels);
+        Err(not_offered("creating a volume"))
+    }
+
+    async fn create_network(
+        &self,
+        name: &str,
+        driver: Option<&str>,
+        subnet: Option<&str>,
+    ) -> Result<(), ContainerError> {
+        let _ = (name, driver, subnet);
+        Err(not_offered("creating a network"))
+    }
+
+    async fn connect(
+        &self,
+        network: &str,
+        container: &str,
+        alias: Option<&str>,
+    ) -> Result<(), ContainerError> {
+        let _ = (network, container, alias);
+        Err(not_offered("connecting a container to a network"))
+    }
+
+    /// Detaches a container from a network. Loses no data, so it is a plain
+    /// call; the view still confirms it.
+    async fn disconnect(&self, network: &str, container: &str) -> Result<(), ContainerError> {
+        let _ = (network, container);
+        Err(not_offered("disconnecting a container from a network"))
+    }
+}
+
+pub(crate) fn not_offered(operation: &str) -> ContainerError {
+    ContainerError::NotOffered {
+        operation: operation.to_string(),
+    }
 }

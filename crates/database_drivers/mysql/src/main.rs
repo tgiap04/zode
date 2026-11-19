@@ -8,15 +8,18 @@
 
 mod introspect;
 mod paging;
+mod update;
 mod values;
 
 use database::protocol::{
     CancelParams, Capabilities, ConnectParams, ConnectResult, ConnectionField, ConnectionForm,
     ConnectionId, ConnectionRef, DescribeTableParams, DescribeTableResult, Empty, ErrorCode,
     InitializeResult, ListSchemasResult, ListTablesParams, ListTablesResult, NoParams,
-    PROTOCOL_VERSION, QueryParams, ResponseError, ResultColumn, ResultSet,
+    PROTOCOL_VERSION, QueryParams, ResponseError, ResultColumn, ResultSet, UpdateRowsParams,
+    UpdateRowsResult,
 };
 use database::server::{Driver, serve, typed};
+use mysql::consts::CapabilityFlags;
 use mysql::prelude::Queryable as _;
 use mysql::{Conn, Opts, OptsBuilder};
 use std::collections::HashMap;
@@ -77,6 +80,7 @@ impl Driver for MysqlDriver {
                     // Absent: `SELECT * FROM {schema}.{table}` is exactly what
                     // this engine wants, and the default says so.
                     read_table_template: None,
+                    row_updates: true,
                 },
             })
         })
@@ -92,6 +96,14 @@ impl Driver for MysqlDriver {
                 Some(secret) => Opts::from(OptsBuilder::from_opts(opts).pass(Some(secret))),
                 None => opts,
             };
+            // Report rows an UPDATE *matched* rather than rows it changed. Only
+            // `update_rows` reads the count, and without this a cell saved with
+            // the value it already held would look like a row that had vanished.
+            let opts = Opts::from(
+                OptsBuilder::from_opts(opts.clone()).additional_capabilities(
+                    opts.get_additional_capabilities() | CapabilityFlags::CLIENT_FOUND_ROWS,
+                ),
+            );
 
             let mut conn = Conn::new(opts.clone()).map_err(values::error)?;
             let connection_id = conn.connection_id();
@@ -174,6 +186,17 @@ impl Driver for MysqlDriver {
         })
     }
 
+    fn update_rows(&self, params: serde_json::Value) -> Result<serde_json::Value, ResponseError> {
+        typed(params, |params: UpdateRowsParams| {
+            let live = self.live(&params.connection_id)?;
+            if params.changes.is_empty() {
+                return Ok(UpdateRowsResult { updated: 0 });
+            }
+            let mut conn = live.conn.lock().map_err(poisoned)?;
+            update::apply(&mut conn, &params)
+        })
+    }
+
     fn cancel(&self, params: serde_json::Value) -> Result<serde_json::Value, ResponseError> {
         typed(params, |params: CancelParams| {
             let live = self.live(&params.connection_id)?;
@@ -218,8 +241,27 @@ fn run_page(conn: &mut Conn, params: &QueryParams) -> Result<ResultSet, Response
     })
 }
 
+/// Refuses a statement that is really several, before any of it runs.
+///
+/// Asked of the server's own parser by preparing the text: see
+/// `paging::is_single_but_unpreparable` for why that is the only check that
+/// cannot be argued with. Applied to the *wrapped* statement, because a user
+/// can close the wrapper themselves (`SELECT 1) AS x; COMMIT; …`).
+fn ensure_single_statement(conn: &mut Conn, sql: &str) -> Result<(), ResponseError> {
+    match conn.prep(sql) {
+        Ok(statement) => conn.close(statement).map_err(values::error),
+        Err(mysql::Error::MySqlError(server))
+            if paging::is_single_but_unpreparable(server.code) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(values::error(error)),
+    }
+}
+
 fn read_page(conn: &mut Conn, params: &QueryParams) -> Result<ResultSet, ResponseError> {
     let sql = paging::paged(&params.sql, params.limit, params.offset);
+    ensure_single_statement(conn, &sql)?;
     let mut result = conn.query_iter(&sql).map_err(values::error)?;
 
     let columns = result.columns();
@@ -354,3 +396,6 @@ mod crypto_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod update_tests;

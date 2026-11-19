@@ -7,11 +7,13 @@
 use crate::connection_store::read_secret;
 use crate::database_panel::{DatabasePanel, NodeState, OpenTable, SchemaNode};
 use crate::driver_registry::{self, DriverHost};
+use crate::panel_refresh::schema_expanded;
+use crate::query::TableBrowse;
 use crate::session::Session;
 use crate::team_connections::choose_secret;
 use anyhow::Context as _;
 use database::client::DriverError;
-use database::protocol::ErrorCode;
+use database::protocol::{ColumnDef, ErrorCode};
 use gpui::{App, Context, Task, Window};
 use std::sync::Arc;
 
@@ -110,6 +112,9 @@ impl DatabasePanel {
             return;
         }
         let config = node.config.clone();
+        // What finds this node again when the answer lands: the list may have
+        // been rebuilt around it by then.
+        let key = (config.name.clone(), node.origin());
         let shared_password = node
             .team
             .as_ref()
@@ -161,7 +166,7 @@ impl DatabasePanel {
         cx.notify();
 
         let secret = read_secret(credentials, config.credential_key().to_string(), cx);
-        self.tasks.push(cx.spawn_in(window, async move |this, cx| {
+        self.keep_task(cx.spawn_in(window, async move |this, cx| {
             let opened = async {
                 let descriptor = resolved.await?.with_context(|| {
                     format!(
@@ -177,8 +182,19 @@ impl DatabasePanel {
             .await;
 
             this.update_in(cx, |this, window, cx| {
+                // The list may have been rebuilt while this was connecting, and
+                // the node with it: found again by name, and only taken if it is
+                // still waiting for this. One that was replaced is idle, for a
+                // url this session was not opened for.
+                let Some(index) = this.index_of_key(&key) else {
+                    return;
+                };
                 let outcome = {
-                    let Some(node) = this.connections.get_mut(index) else {
+                    let Some(node) = this
+                        .connections
+                        .get_mut(index)
+                        .filter(|node| matches!(node.state, NodeState::Connecting))
+                    else {
                         return;
                     };
                     let unattended = std::mem::take(&mut node.unattended);
@@ -233,26 +249,54 @@ impl DatabasePanel {
         if let Some(node) = self.connections.get_mut(index) {
             node.state = NodeState::Idle;
             node.schemas.clear();
+            node.schemas_load = 0;
             node.expanded = false;
         }
         self.toggle_connection(index, window, cx);
     }
 
-    fn load_schemas(&mut self, index: usize, cx: &mut Context<Self>) {
+    /// Reads a connection's schemas for the first time.
+    pub(crate) fn load_schemas(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.read_schemas(index, false, cx);
+    }
+
+    /// `refreshing` is for a tree that is already showing: a failure then
+    /// leaves the rows and the session as they are and says so, where a failure
+    /// of the first read has nothing to keep and fails the connection.
+    pub(crate) fn read_schemas(&mut self, index: usize, refreshing: bool, cx: &mut Context<Self>) {
+        let Some(key) = self.node_key(index) else {
+            return;
+        };
         let Some(NodeState::Connected(session)) =
             self.connections.get(index).map(|node| &node.state)
         else {
             return;
         };
         let session = session.clone();
+        let load = self.next_load();
+        if let Some(node) = self.connections.get_mut(index) {
+            node.schemas_load = load;
+        }
 
-        self.tasks.push(cx.spawn(async move |this, cx| {
+        self.keep_task(cx.spawn(async move |this, cx| {
             let schemas = session.schemas().await;
             this.update(cx, |this, cx| {
+                // By name: another connection added or removed since this was
+                // asked has moved the node, and the place it had is now another's.
+                let Some(index) = this.index_of_key(&key) else {
+                    return;
+                };
                 let opened_schemas: Vec<usize> = {
                     let Some(node) = this.connections.get_mut(index) else {
                         return;
                     };
+                    // A refresh, a disconnect or a newer load has named another
+                    // load since this one started: its answer is about a tree
+                    // that is no longer the one on screen.
+                    if node.schemas_load != load {
+                        return;
+                    }
+                    node.schemas_load = 0;
                     match schemas {
                         Ok(schemas) => {
                             // One schema, from a driver that says it will never
@@ -260,12 +304,30 @@ impl DatabasePanel {
                             // spending a level on a node nobody would collapse.
                             let collapse = schemas.len() == 1;
                             node.collapse_schema_level = collapse;
+                            let mut previous = std::mem::take(&mut node.schemas);
                             node.schemas = schemas
                                 .into_iter()
-                                .map(|schema| SchemaNode {
-                                    expanded: schema.is_default || collapse,
-                                    schema,
-                                    tables: None,
+                                .map(|schema| {
+                                    let before = previous
+                                        .iter()
+                                        .position(|old| old.schema.name == schema.name)
+                                        .map(|position| previous.swap_remove(position));
+                                    let expanded = schema_expanded(
+                                        before.as_ref().map(|old| old.expanded),
+                                        schema.is_default,
+                                        collapse,
+                                    );
+                                    SchemaNode {
+                                        expanded,
+                                        schema,
+                                        // Kept for an open schema until its
+                                        // reload lands, so a refresh does not
+                                        // blank the list it is replacing.
+                                        tables: before
+                                            .and_then(|old| old.tables)
+                                            .filter(|_| expanded),
+                                        tables_load: 0,
+                                    }
                                 })
                                 .collect();
                             node.schemas
@@ -274,6 +336,17 @@ impl DatabasePanel {
                                 .filter(|(_, schema)| schema.expanded)
                                 .map(|(schema_index, _)| schema_index)
                                 .collect()
+                        }
+                        Err(error) if refreshing => {
+                            log::warn!(
+                                "could not read the schemas of `{}` again: {error:#}",
+                                node.config.name
+                            );
+                            this.notices.insert(
+                                key.clone(),
+                                format!("Could not refresh: {error:#}").into(),
+                            );
+                            Vec::new()
                         }
                         Err(error) => {
                             node.state = NodeState::Failed(format!("{error:#}").into());
@@ -314,7 +387,9 @@ impl DatabasePanel {
     /// Shows a table's columns, or hides them if they are already showing.
     ///
     /// The columns are what tells you whether this is the table you meant --
-    /// names alone rarely do.
+    /// names alone rarely do. The tree opens them through `click_table`, which
+    /// shares one description with the rows; this reads them on their own.
+    #[cfg(test)]
     pub(crate) fn toggle_table(
         &mut self,
         index: usize,
@@ -322,12 +397,44 @@ impl DatabasePanel {
         table: &str,
         cx: &mut Context<Self>,
     ) {
+        if self.show_table(index, schema, table, cx) {
+            self.load_columns(false, cx);
+        }
+    }
+
+    /// A click on a table row: its columns open under it and its rows open in
+    /// the grid.
+    ///
+    /// Open Data describes the table for its key, and that answer is what the
+    /// columns are drawn from -- reading them here as well would ask the driver
+    /// the same question twice for one click.
+    pub(crate) fn click_table(
+        &mut self,
+        index: usize,
+        schema: &str,
+        table: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_table(index, schema, table, cx);
+        self.open_table_data(index, schema, table, window, cx);
+    }
+
+    /// Opens a table's columns, or closes them if they are already showing.
+    /// Whether they are open now. Asking for them is up to the caller.
+    fn show_table(
+        &mut self,
+        index: usize,
+        schema: &str,
+        table: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.open_table.as_ref().is_some_and(|open| {
             open.connection == index && open.schema == schema && open.table == table
         }) {
             self.open_table = None;
             cx.notify();
-            return;
+            return false;
         }
 
         self.open_table = Some(OpenTable {
@@ -335,33 +442,108 @@ impl DatabasePanel {
             schema: schema.to_string(),
             table: table.to_string(),
             columns: None,
+            columns_load: 0,
         });
         cx.notify();
+        true
+    }
 
-        let Some(node) = self.connections.get(index) else {
+    /// Gives the columns a describe came back with to the open table, if it is
+    /// the table the describe was for and is still waiting for them. A table
+    /// that could not be described closes, and the connection says why.
+    pub(crate) fn offer_columns(
+        &mut self,
+        browse: &TableBrowse,
+        described: &anyhow::Result<Vec<ColumnDef>>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.index_of_key(&browse.connection) else {
             return;
         };
-        let NodeState::Connected(session) = &node.state else {
+        let waiting = self.open_table.as_ref().is_some_and(|open| {
+            open.connection == index
+                && open.schema == browse.schema
+                && open.table == browse.table
+                && open.columns.is_none()
+        });
+        if !waiting {
+            return;
+        }
+        match described {
+            Ok(columns) => {
+                if let Some(open) = self.open_table.as_mut() {
+                    open.columns = Some(columns.clone());
+                    // Names no load, so the one still out, if any, is dropped
+                    // rather than landing the same columns again.
+                    open.columns_load = 0;
+                }
+            }
+            Err(error) => {
+                log::warn!(
+                    "could not read the columns of `{}`.`{}`: {error:#}",
+                    browse.schema,
+                    browse.table
+                );
+                self.open_table = None;
+                self.set_notice(
+                    index,
+                    Some(format!(
+                        "Could not read the columns of {}: {error:#}",
+                        browse.table
+                    )),
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    /// Asks for the open table's columns, replacing what is showing when they
+    /// arrive.
+    ///
+    /// `refreshing` is for a table that was already open: a table dropped
+    /// since then closes its columns and says so in the log, rather than
+    /// failing the whole connection the way a click on a broken one does.
+    pub(crate) fn load_columns(&mut self, refreshing: bool, cx: &mut Context<Self>) {
+        let Some(open) = self.open_table.as_ref() else {
             return;
         };
-        let (session, schema, table) = (session.clone(), schema.to_string(), table.to_string());
+        let Some(NodeState::Connected(session)) = self
+            .connections
+            .get(open.connection)
+            .map(|node| &node.state)
+        else {
+            return;
+        };
+        let (session, schema, table) = (session.clone(), open.schema.clone(), open.table.clone());
+        let load = self.next_load();
+        if let Some(open) = self.open_table.as_mut() {
+            open.columns_load = load;
+        }
 
-        self.tasks.push(cx.spawn(async move |this, cx| {
+        self.keep_task(cx.spawn(async move |this, cx| {
             let described = session.describe(&schema, &table).await;
             this.update(cx, |this, cx| {
                 // Checked against what is open *now*: two quick clicks would
                 // otherwise land the first table's columns under the second.
+                // Every load names itself, so this also covers a refresh
+                // asked for while an earlier answer was still out.
                 let Some(open) = this.open_table.as_mut() else {
                     return;
                 };
-                if open.connection != index || open.schema != schema || open.table != table {
+                if open.columns_load != load {
                     return;
                 }
+                open.columns_load = 0;
                 match described {
                     Ok(columns) => open.columns = Some(columns),
-                    Err(error) => {
+                    Err(error) if refreshing => {
+                        log::warn!("could not read `{schema}`.`{table}` again: {error:#}");
                         this.open_table = None;
-                        if let Some(node) = this.connections.get_mut(index) {
+                    }
+                    Err(error) => {
+                        let connection = open.connection;
+                        this.open_table = None;
+                        if let Some(node) = this.connections.get_mut(connection) {
                             node.state = NodeState::Failed(format!("{error:#}").into());
                         }
                     }
@@ -378,6 +560,9 @@ impl DatabasePanel {
         schema_index: usize,
         cx: &mut Context<Self>,
     ) {
+        let Some(key) = self.node_key(index) else {
+            return;
+        };
         let Some(node) = self.connections.get(index) else {
             return;
         };
@@ -388,18 +573,42 @@ impl DatabasePanel {
             return;
         };
         let (session, name) = (session.clone(), schema.schema.name.clone());
+        let load = self.next_load();
+        if let Some(schema) = self
+            .connections
+            .get_mut(index)
+            .and_then(|node| node.schemas.get_mut(schema_index))
+        {
+            schema.tables_load = load;
+        }
 
-        self.tasks.push(cx.spawn(async move |this, cx| {
+        self.keep_task(cx.spawn(async move |this, cx| {
             let tables = session.tables(&name).await;
             this.update(cx, |this, cx| {
+                // By name, for the reason given in `read_schemas`.
+                let Some(index) = this.index_of_key(&key) else {
+                    return;
+                };
                 let Some(node) = this.connections.get_mut(index) else {
                     return;
                 };
+                // The name as well as the load: a schema list that was replaced
+                // since may have a different schema at this position.
+                let Some(schema) = node
+                    .schemas
+                    .get_mut(schema_index)
+                    .filter(|schema| schema.tables_load == load && schema.schema.name == name)
+                else {
+                    return;
+                };
+                schema.tables_load = 0;
                 match tables {
-                    Ok(tables) => {
-                        if let Some(schema) = node.schemas.get_mut(schema_index) {
-                            schema.tables = Some(tables);
-                        }
+                    Ok(tables) => schema.tables = Some(tables),
+                    // Tables are on screen, so this is a refresh: they stay.
+                    Err(error) if schema.tables.is_some() => {
+                        log::warn!("could not read the tables of `{name}` again: {error:#}");
+                        this.notices
+                            .insert(key.clone(), format!("Could not refresh: {error:#}").into());
                     }
                     Err(error) => node.state = NodeState::Failed(format!("{error:#}").into()),
                 }
@@ -430,7 +639,9 @@ impl DatabasePanel {
         node.state = NodeState::Idle;
         node.expanded = false;
         node.schemas.clear();
+        node.schemas_load = 0;
         node.collapse_schema_level = false;
+        self.set_notice(index, None);
         self.forget_connection_state(index);
         cx.notify();
     }
@@ -450,7 +661,10 @@ impl DatabasePanel {
         }
         if self.active == Some(index) {
             self.active = None;
-            self.query = crate::query::QueryState::Idle;
+            match self.node_key(index) {
+                Some(key) => self.clear_result_of(&key),
+                None => self.query = crate::query::QueryState::Idle,
+            }
         }
     }
 

@@ -9,13 +9,15 @@
 //! switch off by typing is not one.
 
 mod introspect;
+mod update;
 mod values;
 
 use database::protocol::{
     CancelParams, Capabilities, ConnectParams, ConnectResult, ConnectionField, ConnectionForm,
     ConnectionId, ConnectionRef, DescribeTableParams, DescribeTableResult, Empty, ErrorCode,
     InitializeResult, ListSchemasResult, ListTablesParams, ListTablesResult, NoParams,
-    PROTOCOL_VERSION, QueryParams, ResponseError, ResultColumn, ResultSet,
+    PROTOCOL_VERSION, QueryParams, ResponseError, ResultColumn, ResultSet, UpdateRowsParams,
+    UpdateRowsResult,
 };
 use database::server::{Driver, serve, typed};
 use postgres::{Client, Config};
@@ -78,6 +80,7 @@ impl Driver for PostgresDriver {
                     // Absent: `SELECT * FROM {schema}.{table}` is exactly what
                     // this engine wants, and the default says so.
                     read_table_template: None,
+                    row_updates: true,
                 },
             })
         })
@@ -183,6 +186,17 @@ impl Driver for PostgresDriver {
         })
     }
 
+    fn update_rows(&self, params: serde_json::Value) -> Result<serde_json::Value, ResponseError> {
+        typed(params, |params: UpdateRowsParams| {
+            let live = self.live(&params.connection_id)?;
+            if params.changes.is_empty() {
+                return Ok(UpdateRowsResult { updated: 0 });
+            }
+            let mut client = live.client.lock().map_err(poisoned)?;
+            update::apply(&mut client, &params)
+        })
+    }
+
     fn cancel(&self, params: serde_json::Value) -> Result<serde_json::Value, ResponseError> {
         typed(params, |params: CancelParams| {
             let live = self.live(&params.connection_id)?;
@@ -208,11 +222,21 @@ impl Driver for PostgresDriver {
 /// that produces rows, entirely server-side.
 fn run_page(client: &mut Client, params: &QueryParams) -> Result<ResultSet, ResponseError> {
     let started = Instant::now();
-    let script = paging::cursor_script(&params.sql, params.limit, params.offset);
+    client
+        .batch_execute(paging::BEGIN_READ_ONLY)
+        .map_err(values::error)?;
+    declare_cursor(client, &params.sql)?;
 
-    // One `simple_query` for the whole script: values come back as the server's
-    // own text, which is what keeps `numeric` exact.
-    let messages = client.simple_query(&script).map_err(values::error)?;
+    // One `simple_query` for the rest, which holds nothing the user typed:
+    // values come back as the server's own text, which is what keeps `numeric`
+    // exact.
+    let messages = match client.simple_query(&paging::page_script(params.limit, params.offset)) {
+        Ok(messages) => messages,
+        Err(error) => {
+            abandon_transaction(client);
+            return Err(values::error(error));
+        }
+    };
     let (columns, rows, truncated) = paging::collect(&messages, params.limit);
 
     // Types come from a separate `prepare`, which is the only way to learn them
@@ -261,6 +285,51 @@ fn run_page(client: &mut Client, params: &QueryParams) -> Result<ResultSet, Resp
     })
 }
 
+/// Declares the page's cursor over the user's statement, which must be exactly
+/// one.
+///
+/// Prepared before it is run so the server's own parser decides: a string with
+/// a second statement in it is refused with "cannot insert multiple commands
+/// into a prepared statement", which is the whole of the read-only guarantee
+/// for what the user types. See `paging::declare_cursor`.
+fn declare_cursor(client: &mut Client, sql: &str) -> Result<(), ResponseError> {
+    let statement = match client.prepare(&paging::declare_cursor(sql)) {
+        Ok(statement) => statement,
+        Err(error) => {
+            abandon_transaction(client);
+            return Err(values::error(error));
+        }
+    };
+    // Nothing here can supply a value for `$1`, and running it anyway would fail
+    // on the client with an error that reads as a lost connection.
+    if !statement.params().is_empty() {
+        abandon_transaction(client);
+        return Err(ResponseError::new(
+            ErrorCode::Syntax,
+            "a query cannot take parameters ($1, $2, ...)",
+        ));
+    }
+    if let Err(error) = client.execute(&statement, &[]) {
+        abandon_transaction(client);
+        return Err(values::error(error));
+    }
+    Ok(())
+}
+
+/// Ends whatever transaction the paging script left open when it failed.
+///
+/// The script's own `ROLLBACK` is its last statement, and PostgreSQL stops a
+/// multi-statement string at the first error -- so a runtime error (`1/0`, a
+/// cancelled query) leaves the session in an aborted transaction block, where
+/// every later call, browsing and editing alike, fails with "current transaction
+/// is aborted". Nothing is lifted by this: it only closes the transaction that
+/// was already refusing writes.
+fn abandon_transaction(client: &mut Client) {
+    if let Err(error) = client.batch_execute("ROLLBACK") {
+        eprintln!("could not roll back after a failed query: {error}");
+    }
+}
+
 /// Host, port, user, database -- and a password that goes to the keychain, not
 /// into the URL this builds.
 fn connection_form() -> ConnectionForm {
@@ -302,3 +371,6 @@ fn main() -> std::io::Result<()> {
     let driver = Arc::new(PostgresDriver::default());
     serve(driver, std::io::stdin().lock(), std::io::stdout())
 }
+
+#[cfg(test)]
+mod update_tests;

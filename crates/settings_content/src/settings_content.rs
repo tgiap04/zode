@@ -923,6 +923,32 @@ pub struct DatabaseConnectionContent {
     /// connection editor; a password written here would sit in plain text in a
     /// file people share and back up.
     pub url: Option<String>,
+    /// What the editor does with a statement that changes data on this
+    /// connection: ask first, refuse it, or send it without asking.
+    ///
+    /// This decides what the editor sends, not whether a write succeeds: the
+    /// driver or the database user may still refuse it. It guards against
+    /// mistakes, not against anyone: it reads the statement the editor is about
+    /// to send. For a database nobody must write to, connect as a database user
+    /// that has no write privileges.
+    ///
+    /// Default: confirm_writes
+    pub safety: Option<DatabaseSafety>,
+}
+
+/// How a connection treats statements that change data.
+#[derive(
+    Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DatabaseSafety {
+    /// Sends everything without asking.
+    Unrestricted,
+    /// Asks, showing the statement, before running one that changes data.
+    #[default]
+    ConfirmWrites,
+    /// Does not send a statement that changes data.
+    ReadOnly,
 }
 
 /// Settings for the database column.
@@ -939,6 +965,11 @@ pub struct DatabaseSettingsContent {
     ///
     /// Default: 200
     pub page_size: Option<u32>,
+    /// The most rows one export to a file writes, so a table of unbounded size
+    /// cannot fill a disk.
+    ///
+    /// Default: 1000000
+    pub export_row_limit: Option<u64>,
 }
 
 /// Settings specific to journaling

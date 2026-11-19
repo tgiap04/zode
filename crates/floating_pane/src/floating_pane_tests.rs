@@ -9,6 +9,9 @@ fn init_test(cx: &mut TestAppContext) {
         cx.set_global(settings_store);
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         project::DisableAiSettings::register(cx);
+        // The app has always run this by the time a pane opens; text inputs in
+        // the panels this pane hosts build their editor through it.
+        editor::init(cx);
         crate::init(cx);
     });
 }
