@@ -52,11 +52,11 @@ fn publish_job() -> NamedJob {
 
 fn update_sha_in_zed(publish_job: &NamedJob) -> NamedJob {
     let (generate_token, generated_token) =
-        generate_token(vars::ZED_ZIPPY_APP_ID, vars::ZED_ZIPPY_APP_PRIVATE_KEY).into();
+        generate_token(vars::ZODE_ZIPPY_APP_ID, vars::ZODE_ZIPPY_APP_PRIVATE_KEY).into();
 
     fn replace_sha() -> Step<Run> {
         named::bash!(indoc! {r#"
-            sed -i "s/ZED_EXTENSION_CLI_SHA: &str = \"[a-f0-9]*\"/ZED_EXTENSION_CLI_SHA: \&str = \"$GITHUB_SHA\"/" \
+            sed -i "s/ZODE_EXTENSION_CLI_SHA: &str = \"[a-f0-9]*\"/ZODE_EXTENSION_CLI_SHA: \&str = \"$GITHUB_SHA\"/" \
                 tooling/xtask/src/tasks/workflows/extension_tests.rs
         "#})
     }
@@ -118,7 +118,7 @@ fn create_pull_request_zed(generated_token: &StepOutput, short_sha: &StepOutput)
 fn update_sha_in_extensions(publish_job: &NamedJob) -> NamedJob {
     let extensions_repo = RepositoryTarget::new("zed-industries", &["extensions"]);
     let (generate_token, generated_token) =
-        generate_token(vars::ZED_ZIPPY_APP_ID, vars::ZED_ZIPPY_APP_PRIVATE_KEY)
+        generate_token(vars::ZODE_ZIPPY_APP_ID, vars::ZODE_ZIPPY_APP_PRIVATE_KEY)
             .for_repository(extensions_repo)
             .into();
 
@@ -134,7 +134,7 @@ fn update_sha_in_extensions(publish_job: &NamedJob) -> NamedJob {
 
     fn replace_sha() -> Step<Run> {
         named::bash!(indoc! {r#"
-            sed -i "s/ZED_EXTENSION_CLI_SHA: [a-f0-9]*/ZED_EXTENSION_CLI_SHA: $GITHUB_SHA/" \
+            sed -i "s/ZODE_EXTENSION_CLI_SHA: [a-f0-9]*/ZODE_EXTENSION_CLI_SHA: $GITHUB_SHA/" \
                 .github/workflows/ci.yml
         "#})
     }

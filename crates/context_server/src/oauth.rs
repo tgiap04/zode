@@ -33,8 +33,9 @@ use std::time::{Duration, SystemTime};
 use url::Url;
 use util::ResultExt as _;
 
-/// The CIMD URL where Zed's OAuth client metadata document is hosted.
-pub const CIMD_URL: &str = "https://zed.dev/oauth/client-metadata.json";
+/// The CIMD URL where Zode's OAuth client metadata document is hosted. Auth servers
+/// fetch it and check the loopback redirect against the `redirect_uris` listed there.
+pub const CIMD_URL: &str = "https://zodekit.com/oauth/client-metadata.json";
 
 /// Validate that a URL is safe to use as an OAuth endpoint.
 ///
@@ -66,7 +67,7 @@ fn require_https_or_loopback(url: &Url) -> Result<()> {
 /// protections against private/reserved IP ranges.
 ///
 /// This wraps [`require_https_or_loopback`] and adds IP-range checks to prevent
-/// an attacker-controlled MCP server from directing Zed to fetch internal
+/// an attacker-controlled MCP server from directing Zode to fetch internal
 /// network resources via metadata URLs.
 ///
 /// **Known limitation:** Domain-name URLs that resolve to private IPs are *not*
@@ -1809,7 +1810,7 @@ mod tests {
         };
         let url = build_authorization_url(
             &metadata,
-            "https://zed.dev/oauth/client-metadata.json",
+            "https://zodekit.com/oauth/client-metadata.json",
             "http://127.0.0.1:12345/callback",
             &["files:read".into(), "files:write".into()],
             "https://mcp.example.com",
@@ -1821,7 +1822,7 @@ mod tests {
         assert_eq!(pairs.get("response_type").unwrap(), "code");
         assert_eq!(
             pairs.get("client_id").unwrap(),
-            "https://zed.dev/oauth/client-metadata.json"
+            "https://zodekit.com/oauth/client-metadata.json"
         );
         assert_eq!(
             pairs.get("redirect_uri").unwrap(),
@@ -2249,7 +2250,11 @@ mod tests {
                     .await
                     .unwrap();
 
-            assert_eq!(registration.client_id, CIMD_URL);
+            // Must match the document zodekit.com serves, whose own `client_id` is this URL.
+            assert_eq!(
+                registration.client_id,
+                "https://zodekit.com/oauth/client-metadata.json"
+            );
             assert_eq!(registration.client_secret, None);
             assert_eq!(discovery.scopes, vec!["mcp:read"]);
         });

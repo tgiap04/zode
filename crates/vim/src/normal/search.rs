@@ -369,7 +369,7 @@ impl Vim {
             self.push_operator(operator, window, cx);
         };
         self.search_motion(
-            Motion::ZedSearchResult {
+            Motion::ZodeSearchResult {
                 prior_selections,
                 new_selections,
             },
@@ -409,7 +409,7 @@ impl Vim {
 
         let new_selections = self.editor_selections(window, cx);
         self.search_motion(
-            Motion::ZedSearchResult {
+            Motion::ZodeSearchResult {
                 prior_selections,
                 new_selections,
             },
@@ -476,7 +476,7 @@ impl Vim {
                         vim.update(cx, |vim, cx| {
                             let new_selections = vim.editor_selections(window, cx);
                             vim.search_motion(
-                                Motion::ZedSearchResult {
+                                Motion::ZodeSearchResult {
                                     prior_selections,
                                     new_selections,
                                 },
@@ -1212,7 +1212,7 @@ mod test {
     async fn test_replace_gdefault(cx: &mut gpui::TestAppContext) {
         let mut cx = NeovimBackedTestContext::new(cx).await;
 
-        // Set the `gdefault` option in both Zed and Neovim.
+        // Set the `gdefault` option in both Zode and Neovim.
         cx.simulate_shared_keystrokes(": s e t space g d e f a u l t")
             .await;
         cx.simulate_shared_keystrokes("enter").await;

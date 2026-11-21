@@ -183,7 +183,7 @@ fn build_and_show(
 
     // No-argument `CreateToastNotifier` takes the process's implicit AUMID
     // from the shortcut it was launched from. The AUMID string itself lives
-    // in exactly one place -- `zed.iss`, fed from `bundle-windows.ps1` --
+    // in exactly one place -- `zode.iss`, fed from `bundle-windows.ps1` --
     // and stays there; hardcoding it here would create a second definition
     // that drifts from the installer.
     let notifier = ToastNotificationManager::CreateToastNotifier()?;

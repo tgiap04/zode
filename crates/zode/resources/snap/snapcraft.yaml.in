@@ -1,0 +1,59 @@
+name: zode
+title: Zode
+base: core24
+version: "$RELEASE_VERSION"
+summary: Fast, private, local-first code editor
+description: |
+  Zode is a privacy-first code editor built in Rust with a GPU-accelerated
+  renderer. No telemetry, no sign-in, works offline.
+grade: stable
+confinement: classic
+compression: lzo
+website: https://zodekit.com/
+source-code: https://github.com/tgiap04/zode
+issues: https://github.com/tgiap04/zode/issues
+contact: https://github.com/tgiap04/zode/issues
+
+parts:
+  zode:
+    plugin: dump
+    source: "https://github.com/tgiap04/zode/releases/download/v$RELEASE_VERSION/zode-linux-x86_64.tar.gz"
+
+    organize:
+      # These renames seem to not be necessary, but it's tidier.
+      bin: usr/bin
+      libexec: usr/libexec
+
+    stage-packages:
+      - libasound2t64
+      # snapcraft has a lint that this is unused, but without it Zode exits with
+      # "Missing Vulkan entry points: LibraryLoadFailure" in wgpu.
+      - libvulkan1
+      # snapcraft has a lint that this is unused, but without it Zode exits with
+      # "NoWaylandLib" when run with Wayland.
+      - libwayland-client0
+      - libxcb1
+      - libxkbcommon-x11-0
+      - libxkbcommon0
+
+    build-attributes:
+      - enable-patchelf
+
+    prime:
+      # Omit unneeded files from the tarball
+      - -lib
+      - -licenses.md
+      - -share
+
+      # Omit unneeded files from stage-packages
+      - -etc
+      - -usr/share/doc
+      - -usr/share/lintian
+      - -usr/share/man
+
+apps:
+  zode:
+    command: usr/bin/zode
+    common-id: io.github.tgiap04.zode
+    environment:
+      ZODE_BUNDLE_TYPE: snap

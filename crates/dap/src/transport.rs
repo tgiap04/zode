@@ -652,7 +652,7 @@ pub struct StdioTransport {
 }
 
 impl StdioTransport {
-    // #[allow(dead_code, reason = "This is used in non test builds of Zed")]
+    // #[allow(dead_code, reason = "This is used in non test builds of Zode")]
     async fn start(
         binary: &DebugAdapterBinary,
         log_handlers: LogHandlers,

@@ -1145,7 +1145,7 @@ fn keymap_page() -> SettingsPage {
                     original_window
                         .update(cx, |_workspace, original_window, cx| {
                             original_window
-                                .dispatch_action(zed_actions::OpenKeymap.boxed_clone(), cx);
+                                .dispatch_action(zode_actions::OpenKeymap.boxed_clone(), cx);
                             original_window.activate_window();
                         })
                         .ok();
@@ -6972,7 +6972,7 @@ fn network_page() -> SettingsPage {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Server URL",
-                description: "The URL of the Zed server to connect to.",
+                description: "The URL of the server Zode fetches extensions from.",
                 field: Box::new(SettingField {
                     json_path: Some("server_url"),
                     pick: |settings_content| settings_content.server_url.as_ref(),
@@ -8016,7 +8016,7 @@ fn language_settings_data() -> Box<[SettingsPageItem]> {
             }),
             SettingsPageItem::SettingItem(SettingItem {
                 title: "Prefer LSP",
-                description: "Use LSP tasks over Zed language extension tasks.",
+                description: "Use LSP tasks over language extension tasks.",
                 field: Box::new(SettingField {
                     json_path: Some("languages.$(language).tasks.prefer_lsp"),
                     pick: |settings_content| {

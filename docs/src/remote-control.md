@@ -2,8 +2,8 @@
 
 Remote control lets you watch and type into the agents and terminals running in
 one Zode (call it **A**) from another device: a browser at
-`zodekit.site/remote`, or Zode on another machine. The two devices talk through
-the zodekit.site relay, and everything they exchange is end-to-end encrypted;
+`zodekit.com/remote`, or Zode on another machine. The two devices talk through
+the zodekit.com relay, and everything they exchange is end-to-end encrypted;
 the relay only forwards bytes it cannot read. For what that does and does not
 protect, see [Remote control security](./remote-control-security.md).
 
@@ -52,7 +52,7 @@ each side the other's key and makes the two people at the two screens check
 that nobody sits in between.
 
 1. On the controlling device, choose the Zode to pair with. In a browser, open
-   `zodekit.site/remote`, pick the Zode from the list (it must be online, with
+   `zodekit.com/remote`, pick the Zode from the list (it must be online, with
    remote control on and signed in to the same account) and choose **Pair**.
 2. A shows a prompt: "wants to control this Zode", with six digits.
 3. The controlling device shows six digits too. **If they are the same**, choose
@@ -77,7 +77,7 @@ under the old key.
 
 ## Control A from a browser
 
-Open `zodekit.site/remote`, sign in, pick a paired Zode and choose **Connect**.
+Open `zodekit.com/remote`, sign in, pick a paired Zode and choose **Connect**.
 
 | You get                | Notes                                                                                          |
 | ---------------------- | ---------------------------------------------------------------------------------------------- |
@@ -182,11 +182,11 @@ remote control off or manage trusted devices.
 
 ## Revoke a device
 
-| Where                                                                                  | What it does                                                                                                                   |
-| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| On A: **Manage Trusted Devices…** then **Forget**                                      | Ends that device's session and removes its key; it cannot come back without pairing again.                                     |
-| The web devices page, `zodekit.site/account/devices` (**Browsers**, then **Sign out**) | Removes that browser from your account. A's connection to it is closed and the browser deletes its key.                        |
-| Signing the device out of your account (**Sign out** on the same devices page)         | The relay closes its connections as `device_revoked`; the device deletes its own key and every pairing, so it must pair again. |
+| Where                                                                                 | What it does                                                                                                                   |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| On A: **Manage Trusted Devices…** then **Forget**                                     | Ends that device's session and removes its key; it cannot come back without pairing again.                                     |
+| The web devices page, `zodekit.com/account/devices` (**Browsers**, then **Sign out**) | Removes that browser from your account. A's connection to it is closed and the browser deletes its key.                        |
+| Signing the device out of your account (**Sign out** on the same devices page)        | The relay closes its connections as `device_revoked`; the device deletes its own key and every pairing, so it must pair again. |
 
 If a device is lost or stolen, revoke it first and ask questions afterwards.
 

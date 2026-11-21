@@ -11,7 +11,7 @@ use workspace::{
         simple_message_notification::MessageNotification,
     },
 };
-use zed_actions::ShowUpdateNotification;
+use zode_actions::ShowUpdateNotification;
 
 actions!(
     auto_update,

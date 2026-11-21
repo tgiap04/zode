@@ -74,7 +74,7 @@ ifneq ($(MACOS_SDK),)
   export SDKROOT ?= $(MACOS_SDK)
 endif
 
-# zode watches this directory at runtime (crates/zed/src/main.rs watch_themes)
+# zode watches this directory at runtime (crates/zode/src/main.rs watch_themes)
 # and reloads on any change — that is what makes theme edits rebuild-free.
 THEME := assets/themes/vscode-2026/vscode-2026.json
 THEMES_DIR := $(ZODE_CONFIG)/themes

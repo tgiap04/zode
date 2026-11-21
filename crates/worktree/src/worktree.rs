@@ -82,11 +82,11 @@ pub const FS_WATCH_LATENCY: Duration = Duration::from_millis(100);
 /// Responsible for tracking related FS (for local)/collab (for remote) events and corresponding updates.
 /// Stores git repositories data and the diagnostics for the file(s).
 ///
-/// Has an absolute path, and may be set to be visible in Zed UI or not.
+/// Has an absolute path, and may be set to be visible in Zode UI or not.
 /// May correspond to a directory or a single file.
 /// Possible examples:
 /// * a drag and dropped file — may be added as an invisible, "ephemeral" entry to the current worktree
-/// * a directory opened in Zed — may be added as a visible entry to the current worktree
+/// * a directory opened in Zode — may be added as a visible entry to the current worktree
 ///
 /// Uses [`Entry`] to track the state of each file/directory, can look up absolute paths for entries.
 pub enum Worktree {
@@ -200,7 +200,7 @@ pub struct Snapshot {
 }
 
 /// This path corresponds to the 'content path' of a repository in relation
-/// to Zed's project root.
+/// to Zode's project root.
 /// In the majority of the cases, this is the folder that contains the .git folder.
 /// But if a sub-folder of a git repository is opened, this corresponds to the
 /// project root and the .git folder is located in a parent directory.
@@ -4500,8 +4500,8 @@ impl BackgroundScanner {
             events = Self::normalized_events_for_worktree(&state, &root_canonical_path, events);
         }
 
-        // Certain directories may have FS changes, but do not lead to git data changes that Zed cares about.
-        // Ignore these, to avoid Zed unnecessarily rescanning git metadata.
+        // Certain directories may have FS changes, but do not lead to git data changes that Zode cares about.
+        // Ignore these, to avoid Zode unnecessarily rescanning git metadata.
         let skipped_files_in_dot_git = [COMMIT_MESSAGE, INDEX_LOCK];
         let skipped_dirs_in_dot_git = [FSMONITOR_DAEMON, LFS_DIR];
 

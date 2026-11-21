@@ -1,0 +1,114 @@
+//! Holds the test harness's init list against the one the app actually runs.
+//!
+//! These are two separate lists in two separate files, and a crate registered in
+//! only one of them is invisible: every test passes, and the shipped app has a
+//! button wired to an action nothing handles. That is not hypothetical -- it is
+//! how `container_ui` shipped a dead rail button, caught by a person clicking it
+//! rather than by any test here.
+//!
+//! Scans source text on purpose. The two lists are code, not data, so there is
+//! nothing to compare at runtime; the only place they can be held together is
+//! where they are written.
+
+use std::collections::BTreeSet;
+
+/// Crates whose `init` genuinely belongs to only one of the two lists.
+///
+/// Each needs a reason. "It was already like that" is not one -- an entry here
+/// is a claim that the app or the harness is right to differ.
+const ALLOWED_TO_DIFFER: &[(&str, &str)] = &[
+    // Initialised one level below the flat startup list, which the scan below
+    // follows only as literal text.
+    (
+        "agent_notify",
+        "initialised inside `initialize_workspace`, which main.rs calls",
+    ),
+    // Initialised one level below the flat startup list, like `agent_notify`.
+    // Once switched on and signed in it opens a connection and watches
+    // terminals, which a test must not do behind its own back.
+    (
+        "remote_control",
+        "initialised inside `initialize_workspace`, which main.rs calls",
+    ),
+    // Initialised one level below the flat startup list, like `agent_notify`,
+    // and gated the same way: on the platform being able to hold the display.
+    (
+        "keep_awake",
+        "initialised inside `initialize_workspace`, which main.rs calls",
+    ),
+    // The harness builds its own `AppState` and drives windows itself, so the
+    // app's startup-only wiring has no counterpart in it.
+    (
+        "auto_update",
+        "reaches the network when asked; a test must not",
+    ),
+    (
+        "auto_update_ui",
+        "surfaces auto_update, which the harness omits",
+    ),
+    (
+        "reliability",
+        "installs panic hooks around the real process",
+    ),
+    ("session", "restores windows from disk"),
+    ("zlog_settings", "reconfigures the process logger"),
+];
+
+fn init_calls(source: &str) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    for line in source.lines() {
+        let line = line.trim();
+        if line.starts_with("//") {
+            continue;
+        }
+        // `foo::init(cx);` and `foo_ui::init(cx);`, but not `foo::bar::init(..)`
+        // -- the second segment is what makes it a crate-level init.
+        let Some(rest) = line.strip_suffix("::init(cx);") else {
+            continue;
+        };
+        if rest.contains("::") || rest.is_empty() {
+            continue;
+        }
+        if rest
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        {
+            found.insert(rest.to_string());
+        }
+    }
+    found
+}
+
+#[test]
+fn every_ui_crate_the_harness_initialises_is_also_initialised_by_the_app() {
+    let app = init_calls(include_str!("../main.rs"));
+    let harness = init_calls(include_str!("../zode.rs"));
+
+    assert!(
+        app.len() > 10,
+        "only found {} init calls in main.rs; the scanner is not matching the \
+         real list and would pass no matter what",
+        app.len()
+    );
+    assert!(
+        harness.len() > 10,
+        "only found {} init calls in zode.rs; the scanner is not matching the \
+         harness list and would pass no matter what",
+        harness.len()
+    );
+
+    let excused: BTreeSet<&str> = ALLOWED_TO_DIFFER.iter().map(|(name, _)| *name).collect();
+
+    let harness_only: Vec<&String> = harness
+        .difference(&app)
+        .filter(|name| !excused.contains(name.as_str()))
+        .collect();
+    assert!(
+        harness_only.is_empty(),
+        "these crates are initialised by the test harness in zode.rs but not by \
+         the app in main.rs: {harness_only:?}\n\
+         Every test touching them passes while the shipped app never registers \
+         their actions -- a button wired to nothing. Add them to main.rs, or to \
+         ALLOWED_TO_DIFFER with a reason."
+    );
+}

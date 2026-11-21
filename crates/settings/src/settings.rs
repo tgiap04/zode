@@ -238,7 +238,7 @@ mod tests {
 
         // Whatever `default.json` names, run it through the same resolver `gpui`
         // uses and require the answer to be a font whose files ship. Deliberately
-        // not pinned to `.ZedSans`: the default has been both a literal family
+        // not pinned to `.ZodeSans`: the default has been both a literal family
         // name and an alias, `font_name_with_fallbacks` passes a plain name
         // straight through, and a test that pinned the *shape* would go red on a
         // change that broke nothing.
@@ -274,7 +274,7 @@ mod tests {
             &defaults["buffer_font_fallbacks"],
             &defaults["terminal"]["font_fallbacks"],
         ] {
-            assert_eq!(fallbacks, &serde_json::json!([".ZedMono"]));
+            assert_eq!(fallbacks, &serde_json::json!([".ZodeMono"]));
         }
     }
 

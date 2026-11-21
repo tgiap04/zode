@@ -7,7 +7,7 @@ use crate::grid_editing::changes_label;
 use crate::query::QueryState;
 use gpui::Context;
 use ui::{Tooltip, prelude::*};
-use zed_actions::database as actions;
+use zode_actions::database as actions;
 
 impl DatabasePanel {
     pub(crate) fn render_edit_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {

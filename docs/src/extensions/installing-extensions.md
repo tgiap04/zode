@@ -7,7 +7,7 @@ description: "Browse, install, and manage extensions from the Zode Extension Gal
 
 Extensions add functionality to Zode, including languages, themes, and AI tools. Browse and install them from the Extension Gallery.
 
-Open the Extension Gallery with {#kb zed::Extensions}, or select "Zode > Extensions" from the menu bar.
+Open the Extension Gallery with {#kb zode::Extensions}, or select "Zode > Extensions" from the menu bar.
 
 ## Installation Location
 

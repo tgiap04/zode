@@ -626,7 +626,7 @@ impl Filled {
 
         if let Some(secret) = &self.secret {
             write_secret(
-                zed_credentials_provider::global(cx),
+                zode_credentials_provider::global(cx),
                 self.url.clone(),
                 self.name.clone(),
                 secret.clone(),

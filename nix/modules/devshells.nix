@@ -5,14 +5,14 @@
     let
       # NOTE: Duplicated because this is in a separate flake-parts partition
       # than ./packages.nix
-      mkZed = import ../toolchain.nix { inherit inputs; };
-      zed-editor = mkZed pkgs;
+      mkZode = import ../toolchain.nix { inherit inputs; };
+      zode-editor = mkZode pkgs;
 
       rustBin = inputs.rust-overlay.lib.mkRustBin { } pkgs;
       rustToolchain = rustBin.fromRustupToolchainFile ../../rust-toolchain.toml;
 
       baseEnv =
-        (zed-editor.overrideAttrs (attrs: {
+        (zode-editor.overrideAttrs (attrs: {
           passthru.env = attrs.env;
         })).env; # exfil `env`; it's not in drvAttrs
 
@@ -33,9 +33,9 @@
       };
     in
     {
-      devShells.default = (pkgs.mkShell.override { inherit (zed-editor) stdenv; }) {
-        name = "zed-editor-dev";
-        inputsFrom = [ zed-editor ];
+      devShells.default = (pkgs.mkShell.override { inherit (zode-editor) stdenv; }) {
+        name = "zode-editor-dev";
+        inputsFrom = [ zode-editor ];
 
         packages = with pkgs; [
           wrappedCargo # must be first, to shadow the `cargo` provided by `rustToolchain`
@@ -47,7 +47,7 @@
           # TODO: package protobuf-language-server for editing zed.proto
           # TODO: add other tools used in our scripts
 
-          # `build.nix` adds this to the `zed-editor` wrapper (see `postFixup`)
+          # `build.nix` adds this to the `zode-editor` wrapper (see `postFixup`)
           # we'll just put it on `$PATH`:
           nodejs_22
           zig
@@ -56,7 +56,7 @@
         env =
           (removeAttrs baseEnv [
             "LK_CUSTOM_WEBRTC" # download the staticlib during the build as usual
-            "ZED_UPDATE_EXPLANATION" # allow auto-updates
+            "ZODE_UPDATE_EXPLANATION" # allow auto-updates
             "CARGO_PROFILE" # let you specify the profile
             "TARGET_DIR"
           ])
@@ -70,7 +70,7 @@
               ];
             };
             PROTOC = "${pkgs.protobuf}/bin/protoc";
-            ZED_ZSTD_MUSL_LIB = "${pkgs.pkgsCross.musl64.pkgsStatic.zstd.out}/lib";
+            ZODE_ZSTD_MUSL_LIB = "${pkgs.pkgsCross.musl64.pkgsStatic.zstd.out}/lib";
             # For aws-lc-sys musl cross-compilation
             CC_x86_64_unknown_linux_musl = "${muslCross.stdenv.cc}/bin/x86_64-unknown-linux-musl-gcc";
           };

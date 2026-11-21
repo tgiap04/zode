@@ -16,7 +16,7 @@ use settings::{
     MinimumContrast, WindowOpacity,
 };
 use ui::prelude::*;
-use zed_actions::editor::{MoveDown, MoveUp};
+use zode_actions::editor::{MoveDown, MoveUp};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NumberFieldMode {

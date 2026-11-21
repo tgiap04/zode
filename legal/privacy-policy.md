@@ -48,9 +48,9 @@ exception and is described as such:
 4. **Checking for updates, and signing in.** *Check for Updates* reads this repository's
    published releases from `api.github.com` when you trigger it; nothing checks in the
    background. Signing in and enabling sync uploads your encrypted settings to
-   `api.zodekit.site` — see the next section. The sign-in request also carries this
+   `api.zodekit.com` — see the next section. The sign-in request also carries this
    machine's name, so that the account's device list can show you which machine it was.
-   While signed in, the editor also reads your account's plan from `api.zodekit.site`:
+   While signed in, the editor also reads your account's plan from `api.zodekit.com`:
    when you sign in, when you open the account menu or a sync window, and right after a
    request your plan refused — never at startup and never on a timer. The answer holds the
    plan's tier, its limits and your team's name; the request carries your session and
@@ -94,7 +94,7 @@ The consequence is worth stating plainly: **lose the recovery key and the data i
 Nobody can reset it for you, because nobody else ever had it.
 
 Signing in uses a device-code flow — Zode shows you a code, you approve it in your browser
-at `zodekit.site/activate`. Your password is never typed into the editor.
+at `zodekit.com/activate`. Your password is never typed into the editor.
 
 ## Coding agents
 
@@ -120,7 +120,7 @@ record it keeps, because it keeps none.
   receives your code from Zode itself (see "Coding agents" above for what your own CLI
   tools do).
 - No payment processing in the editor. Paid plans for the hosted sync service are bought
-  on the website, `zodekit.site`, where the payment is handled by Polar, our payment
+  on the website, `zodekit.com`, where the payment is handled by Polar, our payment
   provider and merchant of record. The editor never sees a card, an invoice or any billing
   detail; it only reads which plan your account has, as described above.
 - No advertising, no profiling, no data sold or shared with anyone.
@@ -139,7 +139,7 @@ What you should find: the extension-registry path, the account and sync code und
 the quota read in `crates/agent_usage`, and click-through documentation links.
 
 Two matches deserve a word so they don't mislead you. `MINIDUMP` matches only the name of
-a `ZED_GENERATE_MINIDUMPS` environment variable in the remote and dev-container transports'
+a `ZODE_GENERATE_MINIDUMPS` environment variable in the remote and dev-container transports'
 pass-through lists — there is no minidump or crash-reporter code behind it. And
 `anthropic` matches three things: the quota read in `crates/agent_usage`, a settings-schema
 remnant in `crates/settings_content`, and settings-migration code in `crates/migrator`. The

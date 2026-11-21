@@ -202,7 +202,7 @@ async fn the_toggle_action_opens_the_tab_and_puts_it_away(cx: &mut TestAppContex
     );
 
     cx.update(|window, cx| {
-        window.dispatch_action(Box::new(zed_actions::container::ToggleContainer), cx)
+        window.dispatch_action(Box::new(zode_actions::container::ToggleContainer), cx)
     });
     cx.run_until_parked();
 
@@ -228,7 +228,7 @@ async fn the_toggle_action_opens_the_tab_and_puts_it_away(cx: &mut TestAppContex
     // A second press with nothing else in the pane leaves it exactly as it is:
     // closing the tab would end the listener over a button press.
     cx.update(|window, cx| {
-        window.dispatch_action(Box::new(zed_actions::container::ToggleContainer), cx)
+        window.dispatch_action(Box::new(zode_actions::container::ToggleContainer), cx)
     });
     cx.run_until_parked();
     assert_eq!(
@@ -256,7 +256,7 @@ async fn the_toggle_action_never_opens_a_second_tab(cx: &mut TestAppContext) {
 
     for _ in 0..3 {
         cx.update(|window, cx| {
-            window.dispatch_action(Box::new(zed_actions::container::ToggleContainer), cx)
+            window.dispatch_action(Box::new(zode_actions::container::ToggleContainer), cx)
         });
         cx.run_until_parked();
     }
@@ -518,7 +518,7 @@ mod engines {
         // A *second* tab, deliberately: `OpenInEditorTab` always opens one, where
         // `ToggleContainer` brings the existing one forward.
         cx.update(|window, cx| {
-            window.dispatch_action(Box::new(zed_actions::container::OpenInEditorTab), cx)
+            window.dispatch_action(Box::new(zode_actions::container::OpenInEditorTab), cx)
         });
         cx.run_until_parked();
 
@@ -693,7 +693,7 @@ mod watching {
         let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
         cx.update(|window, cx| {
-            window.dispatch_action(Box::new(zed_actions::container::ToggleContainer), cx)
+            window.dispatch_action(Box::new(zode_actions::container::ToggleContainer), cx)
         });
         cx.run_until_parked();
 
@@ -1503,7 +1503,7 @@ mod terminals {
         cx.run_until_parked();
 
         cx.update(|window, cx| {
-            window.dispatch_action(Box::new(zed_actions::container::OpenInEditorTab), cx)
+            window.dispatch_action(Box::new(zode_actions::container::OpenInEditorTab), cx)
         });
         cx.run_until_parked();
 

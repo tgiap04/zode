@@ -361,7 +361,7 @@ async fn the_toggle_action_shows_the_panel_without_aborting(cx: &mut TestAppCont
         "the other panel is the one up before the toggle"
     );
 
-    cx.dispatch_action(zed_actions::agent::ToggleHistory);
+    cx.dispatch_action(zode_actions::agent::ToggleHistory);
     cx.run_until_parked();
 
     assert!(
@@ -1163,7 +1163,7 @@ fn tab_running(
     let view = cx.new(|cx| {
         crate::AgentView::test_new(
             project::AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
-            zed_actions::agent::AgentViewMode::Terminal,
+            zode_actions::agent::AgentViewMode::Terminal,
             project,
             gpui::WeakEntity::new_invalid(),
             crate::SessionOrigin::new(crate::agent_view::SessionIntent::Tracked(id.into()), None),
@@ -1403,7 +1403,7 @@ fn tab_in_workspace(
         let view = cx.new(|cx| {
             crate::AgentView::test_new(
                 project::AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
-                zed_actions::agent::AgentViewMode::Terminal,
+                zode_actions::agent::AgentViewMode::Terminal,
                 project,
                 weak_workspace,
                 crate::SessionOrigin::new(intent, None),

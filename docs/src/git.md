@@ -116,7 +116,7 @@ Zode displays diffs in two modes: **split** (side-by-side comparison) or **unifi
 
 #### Changing the diff view
 
-Open the Settings Editor ({#kb zed::OpenSettings}) and search for "diff view style". Select either **Split** or **Unified**.
+Open the Settings Editor ({#kb zode::OpenSettings}) and search for "diff view style". Select either **Split** or **Unified**.
 
 To change the default, add this to your `settings.json`:
 
@@ -126,7 +126,7 @@ To change the default, add this to your `settings.json`:
 }
 ```
 
-See [Configuring Zode](./configuring-zed.md) for more about the Settings Editor.
+See [Configuring Zode](./configuring-zode.md) for more about the Settings Editor.
 
 #### Split vs unified
 

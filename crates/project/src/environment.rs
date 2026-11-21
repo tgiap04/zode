@@ -66,7 +66,7 @@ impl ProjectEnvironment {
         }
     }
 
-    /// Returns the inherited CLI environment, if this project was opened from the Zed CLI.
+    /// Returns the inherited CLI environment, if this project was opened from the Zode CLI.
     pub(crate) fn get_cli_environment(&self) -> Option<HashMap<String, String>> {
         if cfg!(any(test, feature = "test-support")) {
             return Some(HashMap::default());
@@ -291,10 +291,10 @@ impl ProjectEnvironment {
 }
 
 fn set_origin_marker(env: &mut HashMap<String, String>, origin: EnvironmentOrigin) {
-    env.insert(ZED_ENVIRONMENT_ORIGIN_MARKER.to_string(), origin.into());
+    env.insert(ZODE_ENVIRONMENT_ORIGIN_MARKER.to_string(), origin.into());
 }
 
-const ZED_ENVIRONMENT_ORIGIN_MARKER: &str = "ZED_ENVIRONMENT";
+const ZODE_ENVIRONMENT_ORIGIN_MARKER: &str = "ZODE_ENVIRONMENT";
 
 enum EnvironmentOrigin {
     Cli,

@@ -37,7 +37,7 @@ fn zed_prompt_renderer(
     cx: &mut App,
 ) -> RenderablePromptHandle {
     let renderer = cx.new({
-        |cx| ZedPromptRenderer {
+        |cx| ZodePromptRenderer {
             _level: level,
             message: cx.new(|cx| Markdown::new(SharedString::new(message), None, None, cx)),
             actions: actions.iter().map(|a| a.label().to_string()).collect(),
@@ -52,7 +52,7 @@ fn zed_prompt_renderer(
     handle.with_view(renderer, window, cx)
 }
 
-pub struct ZedPromptRenderer {
+pub struct ZodePromptRenderer {
     _level: PromptLevel,
     message: Entity<Markdown>,
     actions: Vec<String>,
@@ -61,7 +61,7 @@ pub struct ZedPromptRenderer {
     detail: Option<Entity<Markdown>>,
 }
 
-impl ZedPromptRenderer {
+impl ZodePromptRenderer {
     fn confirm(&mut self, _: &menu::Confirm, _window: &mut Window, cx: &mut Context<Self>) {
         cx.emit(PromptResponse(self.active_action_id));
     }
@@ -107,7 +107,7 @@ impl ZedPromptRenderer {
     }
 }
 
-impl Render for ZedPromptRenderer {
+impl Render for ZodePromptRenderer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = ThemeSettings::get_global(cx);
 
@@ -196,9 +196,9 @@ fn markdown_style(main_message: bool, window: &Window, cx: &App) -> MarkdownStyl
     }
 }
 
-impl EventEmitter<PromptResponse> for ZedPromptRenderer {}
+impl EventEmitter<PromptResponse> for ZodePromptRenderer {}
 
-impl Focusable for ZedPromptRenderer {
+impl Focusable for ZodePromptRenderer {
     fn focus_handle(&self, _: &crate::App) -> FocusHandle {
         self.focus.clone()
     }

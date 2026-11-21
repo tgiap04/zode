@@ -19,7 +19,7 @@ We also offer a nightly build of Zode. You can install it with:
 curl -f https://raw.githubusercontent.com/tgiap04/zode/develop/script/install.sh | ZODE_CHANNEL=nightly sh
 ```
 
-To install a specific version, set `ZODE_VERSION`, for example `ZODE_VERSION=0.1.6`. Preview builds are not published. The older `ZED_VERSION` and `ZED_CHANNEL` variable names are still accepted.
+To install a specific version, set `ZODE_VERSION`, for example `ZODE_VERSION=0.1.6`. Preview builds are not published. The older `ZODE_VERSION` and `ZODE_CHANNEL` variable names are still accepted.
 
 The Zode installed by the script works best on systems that:
 
@@ -76,7 +76,7 @@ Zode 0.1.5 on Linux installed into `~/.local/zed.app` (`~/.local/zed-nightly.app
 
 The scripts never remove the old directory. `~/.local/zed.app` and `~/.local/bin/zed` are also what upstream Zed uses, so check before deleting them: a Zode 0.1.5 install has `~/.local/zed.app/share/applications/io.github.tgiap04.zode.desktop` (`~/.local/zed-nightly.app/share/applications/io.github.tgiap04.zode.nightly.desktop` on the nightly channel), and upstream Zed does not. Remove them only if that file exists.
 
-Do not run `--uninstall` from the leftover 0.1.5 binary (`zed --uninstall`, `~/.local/bin/zed --uninstall` or `~/.local/zed.app/bin/zed --uninstall`). Zode 0.1.5 embeds the old uninstall script, which deletes `~/.local/share/zed`, `~/.config/zed` and `~/.zed_server`: the directories upstream Zed keeps its own data in. Delete the old app directory by hand after the check above, and use `zode --uninstall` only once you are on 0.1.6 or later.
+Do not run `--uninstall` from the leftover 0.1.5 binary (`zed --uninstall`, `~/.local/bin/zed --uninstall` or `~/.local/zed.app/bin/zed --uninstall`). Zode 0.1.5 embeds the old uninstall script, which deletes `~/.local/share/zed`, `~/.config/zed` and `~/.zode_server`: the directories upstream Zed keeps its own data in. Delete the old app directory by hand after the check above, and use `zode --uninstall` only once you are on 0.1.6 or later.
 
 ## Uninstalling Zode
 
@@ -154,7 +154,7 @@ There are a few different ways to force Zode to use a specific GPU:
 
 ##### Option A
 
-You can use the `ZED_DEVICE_ID={device_id}` environment variable to specify the device ID of the GPU you wish to have Zode use.
+You can use the `ZODE_DEVICE_ID={device_id}` environment variable to specify the device ID of the GPU you wish to have Zode use.
 
 You can obtain the device ID of your GPU by running `lspci -nn | grep VGA` which will output each GPU on one line like:
 
@@ -165,7 +165,7 @@ You can obtain the device ID of your GPU by running `lspci -nn | grep VGA` which
 where the device ID here is `2484`. This value is in hexadecimal, so to force Zode to use this specific GPU you would set the environment variable like so:
 
 ```
-ZED_DEVICE_ID=0x2484 zode
+ZODE_DEVICE_ID=0x2484 zode
 ```
 
 Make sure to export the variable if you choose to define it globally in a `.bashrc` or similar.
@@ -180,9 +180,9 @@ Using [vkdevicechooser](https://github.com/jiriks74/vkdevicechooser).
 
 #### Reporting graphics issues
 
-If Vulkan is configured correctly, and Zode is still not working for you, please [file an issue](https://github.com/zed-industries/zed) with as much information as possible.
+If Vulkan is configured correctly, and Zode is still not working for you, please [file an issue](https://github.com/tgiap04/zode/issues) with as much information as possible.
 
-When reporting issues where Zode fails to start due to graphics initialization errors on GitHub, it can be impossible to run the `zed: copy system specs into clipboard` command like we instruct you to in our issue template. We provide an alternative way to collect the system specs specifically for this situation.
+When reporting issues where Zode fails to start due to graphics initialization errors on GitHub, it can be impossible to run the `zode: copy system specs into clipboard` command like we instruct you to in our issue template. We provide an alternative way to collect the system specs specifically for this situation.
 
 Passing the `--system-specs` flag to Zode like
 
@@ -196,7 +196,7 @@ Additionally, it is extremely beneficial to provide the contents of your Zode lo
 
 ```sh
 truncate -s 0 ~/.local/share/zode/logs/Zode.log # Clear the log file
-ZED_LOG=wgpu=info zode .
+ZODE_LOG=wgpu=info zode .
 cat ~/.local/share/zode/logs/Zode.log
 # copy the output
 ```
@@ -204,7 +204,7 @@ cat ~/.local/share/zode/logs/Zode.log
 Or, if you have the Zode cli setup, you can do
 
 ```sh
-ZED_LOG=wgpu=info zode --foreground .
+ZODE_LOG=wgpu=info zode --foreground .
 # copy the output
 ```
 
@@ -216,7 +216,7 @@ It is also highly recommended when pasting the log into a github issue, to do so
 <details><summary>Zode Log</summary>
 
 ```
-{zed log contents}
+{zode log contents}
 ```
 
 </details>
@@ -364,12 +364,12 @@ Replace `192` with your desired DPI value. This affects the system globally and 
 
 ### Font rendering parameters
 
-On Linux, Zode reads `ZED_FONTS_GAMMA` and `ZED_FONTS_GRAYSCALE_ENHANCED_CONTRAST` environment variables for the values to use for font rendering.
+On Linux, Zode reads `ZODE_FONTS_GAMMA` and `ZODE_FONTS_GRAYSCALE_ENHANCED_CONTRAST` environment variables for the values to use for font rendering.
 
-`ZED_FONTS_GAMMA` corresponds to [getgamma](https://learn.microsoft.com/en-us/windows/win32/api/dwrite/nf-dwrite-idwriterenderingparams-getgamma) values.
+`ZODE_FONTS_GAMMA` corresponds to [getgamma](https://learn.microsoft.com/en-us/windows/win32/api/dwrite/nf-dwrite-idwriterenderingparams-getgamma) values.
 Allowed range [1.0, 2.2], other values are clipped.
 Default: 1.8
 
-`ZED_FONTS_GRAYSCALE_ENHANCED_CONTRAST` corresponds to [getgrayscaleenhancedcontrast](https://learn.microsoft.com/en-us/windows/win32/api/dwrite_1/nf-dwrite_1-idwriterenderingparams1-getgrayscaleenhancedcontrast) values.
+`ZODE_FONTS_GRAYSCALE_ENHANCED_CONTRAST` corresponds to [getgrayscaleenhancedcontrast](https://learn.microsoft.com/en-us/windows/win32/api/dwrite_1/nf-dwrite_1-idwriterenderingparams1-getgrayscaleenhancedcontrast) values.
 Allowed range: [0.0, ..), other values are clipped.
 Default: 1.0

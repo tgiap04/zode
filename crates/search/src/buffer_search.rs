@@ -33,7 +33,7 @@ use project::{
 use fs::Fs;
 use settings::{DiffViewStyle, Settings, update_settings_file};
 use std::{any::TypeId, sync::Arc};
-use zed_actions::{
+use zode_actions::{
     OpenSettingsAt, outline::ToggleOutline, workspace::CopyPath, workspace::CopyRelativePath,
 };
 
@@ -56,7 +56,7 @@ use registrar::{ForDeployed, ForDismissed, SearchActionsRegistrar};
 
 const MAX_BUFFER_SEARCH_HISTORY_SIZE: usize = 50;
 
-pub use zed_actions::buffer_search::{
+pub use zode_actions::buffer_search::{
     Deploy, DeployReplace, Dismiss, FocusEditor, UseSelectionForFind,
 };
 

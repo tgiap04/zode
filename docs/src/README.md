@@ -11,7 +11,7 @@
 - [command-palette.md](command-palette.md) — command palette
 - [completions.md](completions.md) — completions
 - [configuring-languages.md](configuring-languages.md) — configuring languages
-- [configuring-zed.md](configuring-zed.md) — configuring zed
+- [configuring-zode.md](configuring-zode.md) — configuring Zode
 - [debugger.md](debugger.md) — debugger
 - [dev-containers.md](dev-containers.md) — dev containers
 - [development.md](development.md) — development

@@ -12,5 +12,5 @@ Emmet support is available through the [Emmet extension](https://github.com/zed-
 - Language Server: [olrtg/emmet-language-server](https://github.com/olrtg/emmet-language-server)
 
 <!--
-TBD: Document Emmet usage in zed with: HTML, PHP, ERB, Javascript, TSX, CSS
+TBD: Document Emmet usage in Zode with: HTML, PHP, ERB, Javascript, TSX, CSS
 -->

@@ -9,7 +9,7 @@ Zode's key binding system is fully customizable. You can rebind any action, crea
 
 ## Predefined Keymaps
 
-If you're used to a specific editor's defaults, you can change your `base_keymap` through the settings window ({#kb zed::OpenSettings}) or directly through your `settings.json` file ({#kb zed::OpenSettingsFile}).
+If you're used to a specific editor's defaults, you can change your `base_keymap` through the settings window ({#kb zode::OpenSettings}) or directly through your `settings.json` file ({#kb zode::OpenSettingsFile}).
 We currently support:
 
 - VS Code (default)
@@ -21,14 +21,14 @@ We currently support:
 - Cursor
 - None (disables _all_ key bindings)
 
-This setting can also be changed via the command palette through the `zed: toggle base keymap selector` action.
+This setting can also be changed via the command palette through the `zode: toggle base keymap selector` action.
 
 You can also enable `vim_mode` or `helix_mode`, which add modal bindings.
 For more information, see the documentation for [Vim mode](./vim.md) and [Helix mode](./helix.md).
 
 ## Keymap Editor
 
-You can access the keymap editor through the {#kb zed::OpenKeymap} action or by running {#action zed::OpenKeymap} action from the command palette. You can easily add or change a keybind for an action with the `Change Keybinding` or `Add Keybinding` button on the command pallets left bottom corner.
+You can access the keymap editor through the {#kb zode::OpenKeymap} action or by running {#action zode::OpenKeymap} action from the command palette. You can easily add or change a keybind for an action with the `Change Keybinding` or `Add Keybinding` button on the command pallets left bottom corner.
 
 In there, you can see all of the existing actions in Zode as well as the associated keybindings set to them by default.
 
@@ -43,7 +43,7 @@ The keymap file is stored in the following locations for each platform:
 - macOS/Linux: `~/.config/zode/keymap.json`
 - Windows: `~\AppData\Roaming\Zode/keymap.json`
 
-You can open the keymap with the {#action zed::OpenKeymapFile} action from the command palette.
+You can open the keymap with the {#action zode::OpenKeymapFile} action from the command palette.
 
 This file contains a JSON array of objects with `"bindings"`.
 If no `"context"` is set, the bindings are always active.
@@ -75,12 +75,12 @@ For example:
 
 You can see all of Zode's default bindings for each platform in the default keymaps files:
 
-- [macOS](https://github.com/zed-industries/zed/blob/main/assets/keymaps/default-macos.json)
-- [Windows](https://github.com/zed-industries/zed/blob/main/assets/keymaps/default-windows.json)
-- [Linux](https://github.com/zed-industries/zed/blob/main/assets/keymaps/default-linux.json).
+- [macOS](https://github.com/tgiap04/zode/blob/develop/assets/keymaps/default-macos.json)
+- [Windows](https://github.com/tgiap04/zode/blob/develop/assets/keymaps/default-windows.json)
+- [Linux](https://github.com/tgiap04/zode/blob/develop/assets/keymaps/default-linux.json).
 
 If you want to debug problems with custom keymaps, you can use `dev: Open Key Context View` from the command palette.
-Please file [an issue](https://github.com/zed-industries/zed) if you run into something you think should work but isn't.
+Please file [an issue](https://github.com/tgiap04/zode/issues) if you run into something you think should work but isn't.
 
 ### Keybinding Syntax
 
@@ -102,7 +102,7 @@ A few examples:
 ```json [keymap]
 {
   "bindings": {
-    "cmd-k cmd-s": "zed::OpenKeymap", // matches ⌘-k then ⌘-s
+    "cmd-k cmd-s": "zode::OpenKeymap", // matches ⌘-k then ⌘-s
     "space e": "editor::ShowCompletions", // type space then e
     "ç": "editor::ShowCompletions", // matches ⌥-c
     "shift shift": "file_finder::Toggle" // matches pressing and releasing shift twice
@@ -159,7 +159,7 @@ If you're using Vim mode, we have information on how [vim modes influence the co
 ### Actions
 
 Almost all of Zode's functionality is exposed as actions.
-Although there is no explicitly documented list, you can find most of them by searching in the command palette, by looking in the default keymaps for [macOS](https://github.com/zed-industries/zed/blob/main/assets/keymaps/default-macos.json), [Windows](https://github.com/zed-industries/zed/blob/main/assets/keymaps/default-windows.json) or [Linux](https://github.com/zed-industries/zed/blob/main/assets/keymaps/default-linux.json), or by using Zode's autocomplete in your keymap file.
+Although there is no explicitly documented list, you can find most of them by searching in the command palette, by looking in the default keymaps for [macOS](https://github.com/tgiap04/zode/blob/develop/assets/keymaps/default-macos.json), [Windows](https://github.com/tgiap04/zode/blob/develop/assets/keymaps/default-windows.json) or [Linux](https://github.com/tgiap04/zode/blob/develop/assets/keymaps/default-linux.json), or by using Zode's autocomplete in your keymap file.
 
 Most actions do not require any arguments, and so you can bind them as strings: `"ctrl-a": "language_selector::Toggle"`. Some require a single argument and must be bound as an array: `"cmd-1": ["workspace::ActivatePane", 0]`. Some actions require multiple arguments and are bound as an array of a string and an object: `"ctrl-a": ["pane::DeploySearch", { "replace_enabled": true }]`.
 

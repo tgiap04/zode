@@ -1,5 +1,5 @@
 {
-  description = "Zed is a minimal code editor crafted for speed and collaboration with humans and AI.";
+  description = "Zode is a fast, private, local-first code editor built in Rust.";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -30,11 +30,9 @@
 
   nixConfig = {
     extra-substituters = [
-      "https://zed.cachix.org"
       "https://cache.garnix.io"
     ];
     extra-trusted-public-keys = [
-      "zed.cachix.org-1:/pHQ6dpMsAZk2DiP4WCL0p9YDNKWj2Q5FL20bNmw1cU="
       "cache.garnix.io:CTFPyKSLcx5RMJKfLo5EEPUObbA78b0YQ2DTCJXqr9g="
     ];
   };

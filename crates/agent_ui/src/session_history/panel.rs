@@ -443,7 +443,7 @@ impl Panel for AgentHistoryPanel {
     }
 
     fn toggle_action(&self) -> Box<dyn gpui::Action> {
-        Box::new(zed_actions::agent::ToggleHistory)
+        Box::new(zode_actions::agent::ToggleHistory)
     }
 
     /// Closed until asked for. Opening it is what makes it read the disk.

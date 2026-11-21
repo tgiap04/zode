@@ -74,8 +74,8 @@ Keep `"use_new_terminal": false` and set `"allow_concurrent_runs": true` to allo
 
 Tasks can be defined:
 
-- in the global `tasks.json` file; such tasks are available in all Zode projects you work on. This file is usually located in `~/.config/zode/tasks.json`. You can edit them by using the `zed: open tasks` action.
-- in the worktree-specific (local) `.zed/tasks.json` file; such tasks are available only when working on a project with that worktree included. You can edit worktree-specific tasks by using the `zed: open project tasks` action.
+- in the global `tasks.json` file; such tasks are available in all Zode projects you work on. This file is usually located in `~/.config/zode/tasks.json`. You can edit them by using the `zode: open tasks` action.
+- in the worktree-specific (local) `.zode/tasks.json` file; such tasks are available only when working on a project with that worktree included. You can edit worktree-specific tasks by using the `zode: open project tasks` action.
 - on the fly with [oneshot tasks](#oneshot-tasks). These tasks are project-specific and do not persist across sessions.
 - by language extension.
 
@@ -84,30 +84,30 @@ Tasks can be defined:
 Zode tasks act just like your shell; that also means that you can reference environmental variables via sh-esque `$VAR_NAME` syntax. A couple of additional environmental variables are set for your convenience.
 These variables allow you to pull information from the current editor and use it in your tasks. The following variables are available:
 
-- `ZED_COLUMN`: current line column
-- `ZED_ROW`: current line row
-- `ZED_FILE`: absolute path of the currently opened file (e.g. `/Users/my-user/path/to/project/src/main.rs`)
-- `ZED_FILENAME`: filename of the currently opened file (e.g. `main.rs`)
-- `ZED_DIRNAME`: absolute path of the currently opened file with file name stripped (e.g. `/Users/my-user/path/to/project/src`)
-- `ZED_RELATIVE_FILE`: path of the currently opened file, relative to `ZED_WORKTREE_ROOT` (e.g. `src/main.rs`)
-- `ZED_RELATIVE_DIR`: path of the currently opened file's directory, relative to `ZED_WORKTREE_ROOT` (e.g. `src`)
-- `ZED_STEM`: stem (filename without extension) of the currently opened file (e.g. `main`)
-- `ZED_SYMBOL`: currently selected symbol; should match the last symbol shown in a symbol breadcrumb (e.g. `mod tests > fn test_task_contexts`)
-- `ZED_SELECTED_TEXT`: currently selected text
-- `ZED_LANGUAGE`: language of the currently opened buffer (e.g. `Rust`, `Python`, `Shell Script`)
-- `ZED_WORKTREE_ROOT`: absolute path to the root of the current worktree. (e.g. `/Users/my-user/path/to/project`)
-- `ZED_CUSTOM_RUST_PACKAGE`: (Rust-specific) name of the parent package of $ZED_FILE source file.
+- `ZODE_COLUMN`: current line column
+- `ZODE_ROW`: current line row
+- `ZODE_FILE`: absolute path of the currently opened file (e.g. `/Users/my-user/path/to/project/src/main.rs`)
+- `ZODE_FILENAME`: filename of the currently opened file (e.g. `main.rs`)
+- `ZODE_DIRNAME`: absolute path of the currently opened file with file name stripped (e.g. `/Users/my-user/path/to/project/src`)
+- `ZODE_RELATIVE_FILE`: path of the currently opened file, relative to `ZODE_WORKTREE_ROOT` (e.g. `src/main.rs`)
+- `ZODE_RELATIVE_DIR`: path of the currently opened file's directory, relative to `ZODE_WORKTREE_ROOT` (e.g. `src`)
+- `ZODE_STEM`: stem (filename without extension) of the currently opened file (e.g. `main`)
+- `ZODE_SYMBOL`: currently selected symbol; should match the last symbol shown in a symbol breadcrumb (e.g. `mod tests > fn test_task_contexts`)
+- `ZODE_SELECTED_TEXT`: currently selected text
+- `ZODE_LANGUAGE`: language of the currently opened buffer (e.g. `Rust`, `Python`, `Shell Script`)
+- `ZODE_WORKTREE_ROOT`: absolute path to the root of the current worktree. (e.g. `/Users/my-user/path/to/project`)
+- `ZODE_CUSTOM_RUST_PACKAGE`: (Rust-specific) name of the parent package of $ZODE_FILE source file.
 
 To use a variable in a task, prefix it with a dollar sign (`$`):
 
 ```json [tasks]
 {
   "label": "echo current file's path",
-  "command": "echo $ZED_FILE"
+  "command": "echo $ZODE_FILE"
 }
 ```
 
-You can also use verbose syntax that allows specifying a default if a given variable is not available: `${ZED_FILE:default_value}`
+You can also use verbose syntax that allows specifying a default if a given variable is not available: `${ZODE_FILE:default_value}`
 
 These environmental variables can also be used in tasks' `cwd`, `args`, and `label` fields.
 
@@ -120,7 +120,7 @@ For example, instead of this (which will fail if the path has a space):
 ```json [tasks]
 {
   "label": "stat current file",
-  "command": "stat $ZED_FILE"
+  "command": "stat $ZODE_FILE"
 }
 ```
 
@@ -130,7 +130,7 @@ Provide the following:
 {
   "label": "stat current file",
   "command": "stat",
-  "args": ["$ZED_FILE"]
+  "args": ["$ZODE_FILE"]
 }
 ```
 
@@ -139,7 +139,7 @@ Or explicitly include escaped quotes like so:
 ```json [tasks]
 {
   "label": "stat current file",
-  "command": "stat \"$ZED_FILE\""
+  "command": "stat \"$ZODE_FILE\""
 }
 ```
 
@@ -151,7 +151,7 @@ For example, the following task will appear in the spawn modal only if there is 
 ```json [tasks]
 {
   "label": "selected text",
-  "command": "echo \"$ZED_SELECTED_TEXT\""
+  "command": "echo \"$ZODE_SELECTED_TEXT\""
 }
 ```
 
@@ -160,7 +160,7 @@ Set default values to such variables to have such tasks always displayed:
 ```json [tasks]
 {
   "label": "selected text with default",
-  "command": "echo \"${ZED_SELECTED_TEXT:no text selected}\""
+  "command": "echo \"${ZODE_SELECTED_TEXT:no text selected}\""
 }
 ```
 
@@ -212,7 +212,7 @@ This could be useful for launching a terminal application that you want to use i
 // In tasks.json
 {
   "label": "start lazygit",
-  "command": "lazygit -p $ZED_WORKTREE_ROOT"
+  "command": "lazygit -p $ZODE_WORKTREE_ROOT"
 }
 ```
 
@@ -271,7 +271,7 @@ To tag a task, add the runnable tag name to the `tags` field on the task templat
 ```json [tasks]
 {
   "label": "echo current file's path",
-  "command": "echo $ZED_FILE",
+  "command": "echo $ZODE_FILE",
   "tags": ["rust-test"]
 }
 ```
@@ -280,7 +280,7 @@ In doing so, you can change which task is shown in the runnables indicator.
 
 ## Keybindings to run tasks bound to runnables
 
-When you have a task definition that is bound to the runnable, you can quickly run it using [Code Actions](https://zed.dev/docs/configuring-languages?#code-actions) that you can trigger either via `editor: Toggle Code Actions` command or by the `cmd-.`/`ctrl-.` shortcut. Your task will be the first in the dropdown. The task will run immediately if there are no additional Code Actions for this line.
+When you have a task definition that is bound to the runnable, you can quickly run it using [Code Actions](https://zodekit.com/docs/configuring-languages?#code-actions) that you can trigger either via `editor: Toggle Code Actions` command or by the `cmd-.`/`ctrl-.` shortcut. Your task will be the first in the dropdown. The task will run immediately if there are no additional Code Actions for this line.
 
 ## Running Bash Scripts
 
@@ -294,7 +294,7 @@ To run a bash script:
 
 Bash scripts are tagged with `bash-script`, allowing you to filter or reference them in task configurations.
 
-If you need to pass arguments or customize the execution environment, add a task configuration in your `.zed/tasks.json`:
+If you need to pass arguments or customize the execution environment, add a task configuration in your `.zode/tasks.json`:
 
 ```json
 [

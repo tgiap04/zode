@@ -23,7 +23,7 @@ reachable from the command palette; nothing is hardwired to one specific key. A 
 namespace of actions exists solely for Vim emulation (motions, text objects, operator-pending
 state, ex-commands, Helix-mode variants), reflecting that Vim mode is a first-class, deeply
 modeled sub-system rather than a thin remap layer on top of the normal editor commands. A separate
-shared-action crate (`zed_actions`) exists purely so leaf UI crates can reference common actions
+shared-action crate (`zode_actions`) exists purely so leaf UI crates can reference common actions
 (open settings, change font size, open a URL) without creating circular crate dependencies — this
 is an internal engineering rule, not a user-visible behavior, but it explains why some actions
 appear to "belong" to no specific feature crate.

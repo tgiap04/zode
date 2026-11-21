@@ -29,7 +29,7 @@ On your local machine, Zode runs its UI, uses Tree-sitter to parse and syntax-hi
 1. Once the Zode server is running, you will be prompted to choose a path to open on the remote server.
    > **Note:** Zode does not currently handle opening very large directories (for example, `/` or `~` that may have >100,000 files) very well. We are working on improving this, but suggest in the meantime opening only specific projects, or subfolders of very large mono-repos.
 
-For simple cases where you don't need any SSH arguments, you can run `zode ssh://[<user>@]<host>[:<port>]/<path>` to open a remote folder/file directly. If you'd like to hotlink into an SSH project, use a link of the format: `zed://ssh/[<user>@]<host>[:<port>]/<path>`.
+For simple cases where you don't need any SSH arguments, you can run `zode ssh://[<user>@]<host>[:<port>]/<path>` to open a remote folder/file directly. If you'd like to hotlink into an SSH project, use a link of the format: `zode://ssh/[<user>@]<host>[:<port>]/<path>`.
 
 ## Supported platforms
 
@@ -41,7 +41,7 @@ The remote machine must be able to run Zode's server. The following platforms sh
 
 ## Configuration
 
-The list of remote servers is stored in your settings file {#kb zed::OpenSettings}. You can edit this list using the Remote Projects dialog {#kb projects::OpenRemote}, which provides some robustness - for example it checks that the connection can be established before writing it to the settings file.
+The list of remote servers is stored in your settings file {#kb zode::OpenSettings}. You can edit this list using the Remote Projects dialog {#kb projects::OpenRemote}, which provides some robustness - for example it checks that the connection can be established before writing it to the settings file.
 
 ```json [settings]
 {
@@ -213,9 +213,9 @@ These ports also default to the `localhost` interface on the remote host. If you
 
 When opening a remote project there are three relevant settings locations:
 
-- The local Zode settings (in `~/.zed/settings.json` on macOS or `~/.config/zode/settings.json` on Linux) on your local machine.
+- The local Zode settings (in `~/.zode/settings.json` on macOS or `~/.config/zode/settings.json` on Linux) on your local machine.
 - The server Zode settings (in the same place) on the remote server.
-- The project settings (in `.zed/settings.json` or `.editorconfig` of your project)
+- The project settings (in `.zode/settings.json` or `.editorconfig` of your project)
 
 Both the local Zode and the server Zode read the project settings, but they are not aware of the other's main settings file.
 
@@ -241,7 +241,7 @@ export https_proxy="http://proxy.example.com:8080"
 export no_proxy="localhost,127.0.0.1"
 ```
 
-Alternatively, you can configure the proxy in the remote machine's `~/.config/zode/settings.json` (Linux) or `~/.zed/settings.json` (macOS):
+Alternatively, you can configure the proxy in the remote machine's `~/.config/zode/settings.json` (Linux) or `~/.zode/settings.json` (macOS):
 
 ```json
 {
@@ -257,11 +257,11 @@ Once you provide the SSH options, Zode shells out to `ssh` on your local machine
 
 Any prompts that SSH needs will be shown in the UI, so you can verify host keys, type key passwords, etc.
 
-Once the master connection is established, Zode will check to see if the remote server binary is present in `~/.zed_server` on the remote, and that its version matches the current version of Zode that you're using.
+Once the master connection is established, Zode will check to see if the remote server binary is present in `~/.zode_server` on the remote, and that its version matches the current version of Zode that you're using.
 
-If it is not there or the version mismatches, Zode will try to download the latest version. By default, it will download from `https://zed.dev` directly, but if you set: `{"upload_binary_over_ssh":true}` in your settings for that server, it will download the binary to your local machine and then upload it to the remote server.
+If it is not there or the version mismatches, Zode will try to download the latest version. By default, it will download it from the [GitHub releases](https://github.com/tgiap04/zode/releases) of Zode directly, but if you set: `{"upload_binary_over_ssh":true}` in your settings for that server, it will download the binary to your local machine and then upload it to the remote server.
 
-If you'd like to maintain the server binary yourself you can. You can either download our prebuilt versions from [GitHub](https://github.com/zed-industries/zed/releases), or [build your own](https://zed.dev/docs/development) with `cargo build -p remote_server --release`. If you do this, you must upload it to `~/.zed_server/zed-remote-server-{RELEASE_CHANNEL}-{VERSION}` on the server, for example `~/.zed_server/zed-remote-server-stable-0.217.3+stable.105.80433cb239e868271457ac376673a5f75bc4adb1`. The version must exactly match the version of Zode itself you are using.
+If you'd like to maintain the server binary yourself you can. You can either download our prebuilt versions from [GitHub](https://github.com/tgiap04/zode/releases), or [build your own](https://zodekit.com/docs/development) with `cargo build -p remote_server --release`. If you do this, you must upload it to `~/.zode_server/zode-remote-server-{RELEASE_CHANNEL}-{VERSION}` on the server, for example `~/.zode_server/zode-remote-server-stable-0.217.3+stable.105.80433cb239e868271457ac376673a5f75bc4adb1`. The version must exactly match the version of Zode itself you are using.
 
 ## Maintaining the SSH connection
 
@@ -271,7 +271,7 @@ Each connection tries to run the development server in proxy mode. This mode wil
 
 In the case that reconnecting fails, the daemon will not be re-used. That said, unsaved changes are by default persisted locally, so that you do not lose work. You can always reconnect to the project at a later date and Zode will restore unsaved changes.
 
-If you are struggling with connection issues, you should be able to see more information in the Zode log `cmd-shift-p Open Log`. If you are seeing things that are unexpected, please file a [GitHub issue](https://github.com/zed-industries/zed/issues/new) or reach out in the #remoting-feedback channel in the [Zode Discord](https://zed.dev/community-links).
+If you are struggling with connection issues, you should be able to see more information in the Zode log `cmd-shift-p Open Log`. If you are seeing things that are unexpected, please file a [GitHub issue](https://github.com/tgiap04/zode/issues/new/choose).
 
 ## Supported SSH Options
 
@@ -297,13 +297,13 @@ Note that we deliberately disallow some options (for example `-t` or `-T`) that 
 
 ## Feedback
 
-Please join the #remoting-feedback channel in the [Zode Discord](https://zed.dev/community-links).
+Please share remote development feedback by opening an issue in the [Zode repository](https://github.com/tgiap04/zode/issues).
 
 ## See also
 
 - [Running & Testing](./running-testing.md): Run tasks, terminal commands, and
   debugger sessions while you work remotely.
-- [Configuring Zode](./configuring-zed.md): Manage shared and project settings,
-  including `.zed/settings.json`.
-- [Remote Development on zed.dev](https://zed.dev/remote-development): Product
+- [Configuring Zode](./configuring-zode.md): Manage shared and project settings,
+  including `.zode/settings.json`.
+- [Remote Development](https://zodekit.com/docs/remote-development): Overview
   overview and release updates.

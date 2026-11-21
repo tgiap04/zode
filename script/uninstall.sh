@@ -3,7 +3,7 @@ set -eu
 
 # Uninstalls Zode that was installed using the install.sh script.
 # It never touches Zed's own paths (zed*.app, ~/.config/zed, ~/.local/share/zed,
-# ~/.zed_server, Application Support/Zed).
+# ~/.zode_server, Application Support/Zed).
 
 check_remaining_installations() {
     platform="$(uname -s)"
@@ -45,7 +45,7 @@ prompt_remove_preferences() {
 
 main() {
     platform="$(uname -s)"
-    channel="${ZODE_CHANNEL:-${ZED_CHANNEL:-stable}}"
+    channel="${ZODE_CHANNEL:-${ZODE_CHANNEL:-stable}}"
 
     if [ "$platform" = "Darwin" ]; then
         platform="macos"
@@ -107,8 +107,8 @@ linux() {
     # Remove the database directory for this channel
     rm -rf "$data_dir/db/0-$db_suffix"
 
-    # Remove socket file
-    rm -f "$data_dir/zed-$db_suffix.sock"
+    # Remove socket files: zode-* now, zed-* from installs before the rename
+    rm -f "$data_dir/zode-$db_suffix.sock" "$data_dir/zed-$db_suffix.sock"
 
     # Remove the entire Zode directory if no installations remain
     if check_remaining_installations; then
@@ -119,7 +119,7 @@ linux() {
 
 macos() {
     # The bundle identifiers here must match the `[package.metadata.bundle-*]`
-    # sections in crates/zed/Cargo.toml -- they are what macOS keys caches,
+    # sections in crates/zode/Cargo.toml -- they are what macOS keys caches,
     # preferences and saved state on, so a stale one leaves all of it behind.
     app="Zode.app"
     db_suffix="stable"

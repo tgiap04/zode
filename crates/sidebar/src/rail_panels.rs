@@ -48,7 +48,7 @@ impl Sidebar {
     ///
     /// Entries come straight from `Panel::icon`, so a panel registered later
     /// turns up here without this module knowing it exists. Panels only: VS Code
-    /// also lists Search and Extensions, which in Zed are pane items rather than
+    /// also lists Search and Extensions, which in Zode are pane items rather than
     /// panels and would each need wiring of their own.
     pub(crate) fn render_rail_panels(
         &self,

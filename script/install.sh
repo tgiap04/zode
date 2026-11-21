@@ -8,10 +8,10 @@ set -eu
 main() {
     platform="$(uname -s)"
     arch="$(uname -m)"
-    channel="${ZODE_CHANNEL:-${ZED_CHANNEL:-stable}}"
-    version="${ZODE_VERSION:-${ZED_VERSION:-latest}}"
+    channel="${ZODE_CHANNEL:-${ZODE_CHANNEL:-stable}}"
+    version="${ZODE_VERSION:-${ZODE_VERSION:-latest}}"
     version="${version#v}"
-    bundle="${ZODE_BUNDLE_PATH:-${ZED_BUNDLE_PATH:-}}"
+    bundle="${ZODE_BUNDLE_PATH:-${ZODE_BUNDLE_PATH:-}}"
     # Use TMPDIR if available (for environments with non-standard temp directories)
     if [ -n "${TMPDIR:-}" ] && [ -d "${TMPDIR}" ]; then
         temp="$(mktemp -d "$TMPDIR/zode-XXXXXX")"

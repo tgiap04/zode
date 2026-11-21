@@ -304,7 +304,7 @@ For languages with closures, these typically should not count as functions in Zo
 
 For languages with declarations like C, provide queries that match `@class.around` or `@function.around`. The `if` and `ic` text objects will default to these if there is no inside.
 
-If you are not sure what to put in textobjects.scm, both [nvim-treesitter-textobjects](https://github.com/nvim-treesitter/nvim-treesitter-textobjects), and the [Helix editor](https://github.com/helix-editor/helix) have queries for many languages. You can refer to the Zode [built-in languages](https://github.com/zed-industries/zed/tree/main/crates/languages/src) to see how to adapt these.
+If you are not sure what to put in textobjects.scm, both [nvim-treesitter-textobjects](https://github.com/nvim-treesitter/nvim-treesitter-textobjects), and the [Helix editor](https://github.com/helix-editor/helix) have queries for many languages. You can refer to the Zode [built-in languages](https://github.com/tgiap04/zode/tree/develop/crates/languages/src) to see how to adapt these.
 
 | Capture          | Description                                                             | Vim mode                                         |
 | ---------------- | ----------------------------------------------------------------------- | ------------------------------------------------ |
@@ -381,7 +381,7 @@ Here's an example from a `runnables.scm` file for JSON:
 
 This query detects runnable scripts in package.json and composer.json files.
 
-The `@run` capture specifies where the run button should appear in the editor. Other captures, except those prefixed with an underscore, are exposed as environment variables with a prefix of `ZED_CUSTOM_$(capture_name)` when running the code.
+The `@run` capture specifies where the run button should appear in the editor. Other captures, except those prefixed with an underscore, are exposed as environment variables with a prefix of `ZODE_CUSTOM_$(capture_name)` when running the code (templates written for Zed may also use `ZED_CUSTOM_`).
 
 | Capture | Description                                            |
 | ------- | ------------------------------------------------------ |
@@ -408,13 +408,13 @@ languages = ["My Language"]
 Then, in the Rust code for your extension, implement the `language_server_command` method on your extension:
 
 ```rust
-impl zed::Extension for MyExtension {
+impl zode::Extension for MyExtension {
     fn language_server_command(
         &mut self,
         language_server_id: &LanguageServerId,
-        worktree: &zed::Worktree,
-    ) -> Result<zed::Command> {
-        Ok(zed::Command {
+        worktree: &zode::Worktree,
+    ) -> Result<zode::Command> {
+        Ok(zode::Command {
             command: get_path_to_language_server_executable()?,
             args: get_args_for_language_server()?,
             env: get_env_for_language_server()?,

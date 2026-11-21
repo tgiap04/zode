@@ -1,6 +1,6 @@
 #![allow(rustdoc::private_intra_doc_links)]
 //! This is the place where everything editor-related is stored (data-wise) and displayed (ui-wise).
-//! The main point of interest in this crate is [`Editor`] type, which is used in every other Zed part as a user input element.
+//! The main point of interest in this crate is [`Editor`] type, which is used in every other Zode part as a user input element.
 //! It comes in different flavors: single line, multiline and a fixed height one.
 //!
 //! Editor contains of multiple large submodules:
@@ -92,7 +92,7 @@ use aho_corasick::{AhoCorasick, AhoCorasickBuilder, BuildError};
 use anyhow::{Context as _, Result, anyhow, bail};
 use blink_manager::BlinkManager;
 use buffer_diff::DiffHunkStatus;
-use client::{Collaborator, ParticipantIndex, parse_zed_link};
+use client::{Collaborator, ParticipantIndex, parse_zode_link};
 use clock::ReplicaId;
 use code_context_menus::{
     AvailableCodeAction, CodeActionContents, CodeActionsItem, CodeActionsMenu, CodeContextMenu,
@@ -226,8 +226,8 @@ use workspace::{
     notifications::{DetachAndPromptErr, NotificationId, NotifyTaskExt},
     searchable::SearchEvent,
 };
-pub use zed_actions::editor::RevealInFileManager;
-use zed_actions::editor::{MoveDown, MoveUp};
+pub use zode_actions::editor::RevealInFileManager;
+use zode_actions::editor::{MoveDown, MoveUp};
 
 use crate::{
     code_context_menus::CompletionsMenuSource,
@@ -1137,7 +1137,7 @@ pub(crate) struct DiffReviewOverlay {
     _subscription: Subscription,
 }
 
-/// Zed's primary implementation of text input, allowing users to edit a [`MultiBuffer`].
+/// Zode's primary implementation of text input, allowing users to edit a [`MultiBuffer`].
 ///
 /// See the [module level documentation](self) for more information.
 pub struct Editor {
@@ -6092,7 +6092,7 @@ impl Editor {
             return None;
         }
 
-        // OnTypeFormatting returns a list of edits, no need to pass them between Zed instances,
+        // OnTypeFormatting returns a list of edits, no need to pass them between Zode instances,
         // hence we do LSP request & edit on host side only — add formats to host's history.
         let push_to_lsp_host_history = true;
         // If this is not the host, append its history with new edits.
@@ -18892,8 +18892,8 @@ impl Editor {
 
             if let Some(url) = url {
                 cx.update(|window, cx| {
-                    if parse_zed_link(&url, cx).is_some() {
-                        window.dispatch_action(Box::new(zed_actions::OpenZedUrl { url }), cx);
+                    if parse_zode_link(&url, cx).is_some() {
+                        window.dispatch_action(Box::new(zode_actions::OpenZodeUrl { url }), cx);
                     } else {
                         cx.open_url(&url);
                     }
@@ -19091,9 +19091,11 @@ impl Editor {
                 match first_url_or_file {
                     Some(Either::Left(url)) => {
                         cx.update(|window, cx| {
-                            if parse_zed_link(&url, cx).is_some() {
-                                window
-                                    .dispatch_action(Box::new(zed_actions::OpenZedUrl { url }), cx);
+                            if parse_zode_link(&url, cx).is_some() {
+                                window.dispatch_action(
+                                    Box::new(zode_actions::OpenZodeUrl { url }),
+                                    cx,
+                                );
                             } else {
                                 cx.open_url(&url);
                             }
@@ -22096,7 +22098,7 @@ impl Editor {
         cx: &mut Context<Self>,
     ) -> Entity<Self> {
         const MINIMAP_FONT_WEIGHT: gpui::FontWeight = gpui::FontWeight::BLACK;
-        const MINIMAP_FONT_FAMILY: SharedString = SharedString::new_static(".ZedMono");
+        const MINIMAP_FONT_FAMILY: SharedString = SharedString::new_static(".ZodeMono");
 
         let mut minimap = Editor::new_internal(
             EditorMode::Minimap {
@@ -23744,7 +23746,7 @@ impl Editor {
 
     pub fn copy_path(
         &mut self,
-        _: &zed_actions::workspace::CopyPath,
+        _: &zode_actions::workspace::CopyPath,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -23759,7 +23761,7 @@ impl Editor {
 
     pub fn copy_relative_path(
         &mut self,
-        _: &zed_actions::workspace::CopyRelativePath,
+        _: &zode_actions::workspace::CopyRelativePath,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -30144,10 +30146,10 @@ impl Render for MissingEditPredictionKeybindingTooltip {
                         .items_end()
                         .w_full()
                         .child(Button::new("open-keymap", "Assign Keybinding").size(ButtonSize::Compact).on_click(|_ev, window, cx| {
-                            window.dispatch_action(zed_actions::OpenKeymapFile.boxed_clone(), cx)
+                            window.dispatch_action(zode_actions::OpenKeymapFile.boxed_clone(), cx)
                         }))
                         .child(Button::new("see-docs", "See Docs").size(ButtonSize::Compact).on_click(|_ev, _window, cx| {
-                            cx.open_url("https://zed.dev/docs/completions#edit-predictions-missing-keybinding");
+                            cx.open_url("https://zodekit.com/docs/completions");
                         })),
                 )
         })

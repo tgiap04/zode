@@ -36,7 +36,7 @@ use std::{
     sync::{Arc, LazyLock, OnceLock},
     time::Duration,
 };
-use task::{DebugScenario, SpawnInTerminal, TaskTemplate, ZedDebugConfig};
+use task::{DebugScenario, SpawnInTerminal, TaskTemplate, ZodeDebugConfig};
 use util::paths::SanitizedPath;
 use wasmtime::{
     CacheStore, Engine, Store,
@@ -474,7 +474,7 @@ impl extension::Extension for WasmExtension {
         .await?
     }
 
-    async fn dap_config_to_scenario(&self, config: ZedDebugConfig) -> Result<DebugScenario> {
+    async fn dap_config_to_scenario(&self, config: ZodeDebugConfig) -> Result<DebugScenario> {
         self.call(|extension, store| {
             async move {
                 let kind = extension

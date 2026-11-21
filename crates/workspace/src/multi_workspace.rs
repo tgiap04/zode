@@ -790,8 +790,8 @@ impl MultiWorkspace {
             // Flush every workspace's pending debounced serialization before
             // the window closes. If this turns out to be the last window,
             // `remove_window()` below triggers `cx.quit()` directly (see
-            // `bind_on_window_closed` in zed.rs), which bypasses the `Quit`
-            // action's own manual flush loop (crates/zed/src/zed.rs
+            // `bind_on_window_closed` in zode.rs), which bypasses the `Quit`
+            // action's own manual flush loop (crates/zode/src/zode.rs
             // `quit()`) — `app_will_quit` alone only covers this
             // `MultiWorkspace`'s own state, not each workspace's pane
             // layout. Best-effort: a flush failing here must not block the

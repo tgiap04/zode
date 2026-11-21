@@ -10,9 +10,9 @@ local_install=false
 can_code_sign=false
 build_drivers=true
 
-# This must match the team in the provisioning profile.
-IDENTITY="Zed Industries, Inc."
-APPLE_NOTARIZATION_TEAM="MQ55VZLNZQ"
+# The codesign identity: the common name of the certificate in MACOS_CERTIFICATE, which
+# must match the team in the provisioning profile. Only read when signing credentials are set.
+IDENTITY="${MACOS_SIGNING_IDENTITY:-}"
 
 # Function for displaying help info
 help_info() {
@@ -52,12 +52,12 @@ shift $((OPTIND-1))
 
 
 # Get release channel
-pushd crates/zed
+pushd crates/zode
 channel=$(<RELEASE_CHANNEL)
-export ZED_RELEASE_CHANNEL="${channel}"
+export ZODE_RELEASE_CHANNEL="${channel}"
 popd
 
-export ZED_BUNDLE=true
+export ZODE_BUNDLE=true
 
 cargo_bundle_version=$(cargo -q bundle --help 2>&1 | head -n 1 || echo "")
 if [ "$cargo_bundle_version" != "cargo-bundle v0.6.1-zed" ]; then
@@ -91,7 +91,7 @@ rustup target add $target_triple
 
 database_drivers=(zode-db-sqlite zode-db-postgres zode-db-mysql zode-db-mongodb)
 
-echo "Compiling zed binaries"
+echo "Compiling zode binaries"
 # The database drivers are built here but no longer copied into the bundle:
 # they are published as release assets of their own and downloaded on first
 # use, so an install carries only the drivers its user asked for. See
@@ -110,7 +110,7 @@ cargo build ${build_flag} --package zode --package cli --package remote_server \
     --target $target_triple
 
 echo "Creating application bundle"
-pushd crates/zed
+pushd crates/zode
 cp Cargo.toml Cargo.toml.backup
 sed \
     -i.backup \
@@ -125,7 +125,7 @@ echo "Bundled ${app_path}"
 
 # DocumentTypes.plist references CFBundleTypeIconFile "Document", so the bundle must contain Document.icns.
 # It carries its own artwork, a page with the app icon on it, rather than the app icon itself.
-document_icon_source="crates/zed/resources/Document.icns"
+document_icon_source="crates/zode/resources/Document.icns"
 document_icon_target="${app_path}/Contents/Resources/Document.icns"
 if [[ -f "${document_icon_source}" ]]; then
     mkdir -p "$(dirname "${document_icon_target}")"
@@ -135,23 +135,27 @@ else
 fi
 
 if [[ -n "${MACOS_CERTIFICATE:-}" && -n "${MACOS_CERTIFICATE_PASSWORD:-}" && -n "${APPLE_NOTARIZATION_KEY:-}" && -n "${APPLE_NOTARIZATION_KEY_ID:-}" && -n "${APPLE_NOTARIZATION_ISSUER_ID:-}" ]]; then
+    if [[ -z "${IDENTITY}" ]]; then
+        echo "MACOS_SIGNING_IDENTITY must name the certificate in MACOS_CERTIFICATE to code sign." >&2
+        exit 1
+    fi
     can_code_sign=true
 
     echo "Setting up keychain for code signing..."
-    security create-keychain -p "$MACOS_CERTIFICATE_PASSWORD" zed.keychain || echo ""
-    security default-keychain -s zed.keychain
-    security unlock-keychain -p "$MACOS_CERTIFICATE_PASSWORD" zed.keychain
+    security create-keychain -p "$MACOS_CERTIFICATE_PASSWORD" zode.keychain || echo ""
+    security default-keychain -s zode.keychain
+    security unlock-keychain -p "$MACOS_CERTIFICATE_PASSWORD" zode.keychain
     # Calling set-keychain-settings without `-t` disables the auto-lock timeout
-    security set-keychain-settings zed.keychain
-    echo "$MACOS_CERTIFICATE" | base64 --decode > /tmp/zed-certificate.p12
-    security import /tmp/zed-certificate.p12 -k zed.keychain -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-    rm /tmp/zed-certificate.p12
-    security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CERTIFICATE_PASSWORD" zed.keychain
+    security set-keychain-settings zode.keychain
+    echo "$MACOS_CERTIFICATE" | base64 --decode > /tmp/zode-certificate.p12
+    security import /tmp/zode-certificate.p12 -k zode.keychain -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+    rm /tmp/zode-certificate.p12
+    security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CERTIFICATE_PASSWORD" zode.keychain
 
     function cleanup() {
         echo "Cleaning up keychain"
         security default-keychain -s login.keychain
-        security delete-keychain zed.keychain
+        security delete-keychain zode.keychain
     }
 
     trap cleanup EXIT
@@ -213,7 +217,7 @@ function sign_app_binaries() {
     download_git "${target_triple}" "${app_path}/Contents/MacOS/git"
 
     # Note: The app identifier for our development builds is the same as the app identifier for nightly.
-    cp crates/zed/contents/$channel/embedded.provisionprofile "${app_path}/Contents/"
+    cp crates/zode/contents/$channel/embedded.provisionprofile "${app_path}/Contents/"
 
     if [[ $can_code_sign = true ]]; then
         echo "Code signing binaries"
@@ -221,8 +225,8 @@ function sign_app_binaries() {
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/cli" -v
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/git" -v
         /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "${app_path}/Contents/MacOS/remote_server" -v
-        /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/zed/resources/zed.entitlements --sign "$IDENTITY" "${app_path}/Contents/MacOS/zode" -v
-        /usr/bin/codesign --force --timestamp --options runtime --entitlements crates/zed/resources/zed.entitlements --sign "$IDENTITY" "${app_path}" -v
+        /usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/zode/resources/zode.entitlements --sign "$IDENTITY" "${app_path}/Contents/MacOS/zode" -v
+        /usr/bin/codesign --force --timestamp --options runtime --entitlements crates/zode/resources/zode.entitlements --sign "$IDENTITY" "${app_path}" -v
     else
         echo "One or more of the following variables are missing: MACOS_CERTIFICATE, MACOS_CERTIFICATE_PASSWORD, APPLE_NOTARIZATION_KEY, APPLE_NOTARIZATION_KEY_ID, APPLE_NOTARIZATION_ISSUER_ID"
 
@@ -235,9 +239,9 @@ function sign_app_binaries() {
         # - get a signing key for the MQ55VZLNZQ team from Nathan.
         # - create your own signing key, and update references to MQ55VZLNZQ to your own team ID
         # then comment out this line.
-        cat crates/zed/resources/zed.entitlements | sed '/com.apple.developer.associated-domains/,+1d' > "${app_path}/Contents/Resources/zed.entitlements"
+        cat crates/zode/resources/zode.entitlements | sed '/com.apple.developer.associated-domains/,+1d' > "${app_path}/Contents/Resources/zode.entitlements"
 
-        codesign --force --deep --entitlements "${app_path}/Contents/Resources/zed.entitlements" --sign ${MACOS_SIGNING_KEY:- -} "${app_path}" -v
+        codesign --force --deep --entitlements "${app_path}/Contents/Resources/zode.entitlements" --sign ${MACOS_SIGNING_KEY:- -} "${app_path}" -v
     fi
 
     bundle_name=$(basename "$app_path")
@@ -278,7 +282,7 @@ function sign_app_binaries() {
         hdiutil create -volname Zode -srcfolder "${dmg_source_directory}" -ov -format UDZO "${dmg_file_path}"
 
         # If someone runs this bundle script locally, a symlink will be placed in `dmg_source_directory`.
-        # This symlink causes CPU issues with Zed if the Zed codebase is the project being worked on, so we simply remove it for now.
+        # This symlink causes CPU issues with Zode if the Zode codebase is the project being worked on, so we simply remove it for now.
         echo "Removing symlink to /Applications from ${dmg_source_directory}"
         rm ${dmg_source_directory}/Applications
 

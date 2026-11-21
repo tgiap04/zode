@@ -32,22 +32,23 @@ pub use rpc::*;
 pub use telemetry_events::Event;
 pub use user::*;
 
-static ZED_SERVER_URL: LazyLock<Option<String>> =
-    LazyLock::new(|| std::env::var("ZED_SERVER_URL").ok());
+static ZODE_SERVER_URL: LazyLock<Option<String>> =
+    LazyLock::new(|| std::env::var("ZODE_SERVER_URL").ok());
 
-pub static USE_WEB_LOGIN: LazyLock<bool> = LazyLock::new(|| std::env::var("ZED_WEB_LOGIN").is_ok());
+pub static USE_WEB_LOGIN: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("ZODE_WEB_LOGIN").is_ok());
 
 pub static ADMIN_API_TOKEN: LazyLock<Option<String>> = LazyLock::new(|| {
-    std::env::var("ZED_ADMIN_API_TOKEN")
+    std::env::var("ZODE_ADMIN_API_TOKEN")
         .ok()
         .and_then(|s| if s.is_empty() { None } else { Some(s) })
 });
 
-pub static ZED_APP_PATH: LazyLock<Option<PathBuf>> =
-    LazyLock::new(|| std::env::var("ZED_APP_PATH").ok().map(PathBuf::from));
+pub static ZODE_APP_PATH: LazyLock<Option<PathBuf>> =
+    LazyLock::new(|| std::env::var("ZODE_APP_PATH").ok().map(PathBuf::from));
 
-pub static ZED_ALWAYS_ACTIVE: LazyLock<bool> =
-    LazyLock::new(|| std::env::var("ZED_ALWAYS_ACTIVE").is_ok_and(|e| !e.is_empty()));
+pub static ZODE_ALWAYS_ACTIVE: LazyLock<bool> =
+    LazyLock::new(|| std::env::var("ZODE_ALWAYS_ACTIVE").is_ok_and(|e| !e.is_empty()));
 
 pub const INITIAL_RECONNECTION_DELAY: Duration = Duration::from_millis(500);
 pub const MAX_RECONNECTION_DELAY: Duration = Duration::from_secs(30);
@@ -60,7 +61,7 @@ pub struct ClientSettings {
 
 impl Settings for ClientSettings {
     fn from_settings(content: &settings::SettingsContent) -> Self {
-        if let Some(server_url) = &*ZED_SERVER_URL {
+        if let Some(server_url) = &*ZODE_SERVER_URL {
             return Self {
                 server_url: server_url.clone(),
             };
@@ -789,13 +790,13 @@ impl ProtoClient for Client {
     }
 }
 
-/// prefix for the zed:// url scheme
-pub const ZED_URL_SCHEME: &str = "zed";
+/// prefix for the zode:// url scheme
+pub const ZODE_URL_SCHEME: &str = "zode";
 
 /// A parsed Zed link that can be handled internally by the application.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ZedLink {
-    /// Join a channel: `zed.dev/channel/channel-name-123` or `zed://channel/channel-name-123`
+pub enum ZodeLink {
+    /// Join a channel: `zed.dev/channel/channel-name-123` or `zode://channel/channel-name-123`
     Channel { channel_id: u64 },
     /// Open channel notes: `zed.dev/channel/channel-name-123/notes` or with heading `notes#heading`
     ChannelNotes {
@@ -809,13 +810,13 @@ pub enum ZedLink {
 /// Returns a [`Some`] containing the parsed link if the link is a recognized Zed link
 /// that should be handled internally by the application.
 /// Returns [`None`] for links that should be opened in the browser.
-pub fn parse_zed_link(link: &str, cx: &App) -> Option<ZedLink> {
+pub fn parse_zode_link(link: &str, cx: &App) -> Option<ZodeLink> {
     let server_url = &ClientSettings::get_global(cx).server_url;
     let path = link
         .strip_prefix(server_url)
         .and_then(|result| result.strip_prefix('/'))
         .or_else(|| {
-            link.strip_prefix(ZED_URL_SCHEME)
+            link.strip_prefix(ZODE_URL_SCHEME)
                 .and_then(|result| result.strip_prefix("://"))
         })?;
 
@@ -830,18 +831,18 @@ pub fn parse_zed_link(link: &str, cx: &App) -> Option<ZedLink> {
     let channel_id = id_str.parse::<u64>().ok()?;
 
     let Some(next) = parts.next() else {
-        return Some(ZedLink::Channel { channel_id });
+        return Some(ZodeLink::Channel { channel_id });
     };
 
     if let Some(heading) = next.strip_prefix("notes#") {
-        return Some(ZedLink::ChannelNotes {
+        return Some(ZodeLink::ChannelNotes {
             channel_id,
             heading: Some(heading.to_string()),
         });
     }
 
     if next == "notes" {
-        return Some(ZedLink::ChannelNotes {
+        return Some(ZodeLink::ChannelNotes {
             channel_id,
             heading: None,
         });

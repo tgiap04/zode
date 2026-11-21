@@ -95,7 +95,7 @@ fn session(workspace: &mut Workspace, cx: &mut Context<Workspace>) -> Option<Ent
                     .color(Color::Muted),
             )
             .action("Sign In", |window, cx| {
-                window.dispatch_action(Box::new(zed_actions::account::SignIn), cx)
+                window.dispatch_action(Box::new(zode_actions::account::SignIn), cx)
             })
             .dismiss_button(true)
         },
@@ -106,7 +106,7 @@ fn session(workspace: &mut Workspace, cx: &mut Context<Workspace>) -> Option<Ent
 
 fn open_vault(
     workspace: &mut Workspace,
-    _: &zed_actions::env_sync::OpenEnvVault,
+    _: &zode_actions::env_sync::OpenEnvVault,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -144,7 +144,7 @@ fn open_team_members(
 
 fn set_up(
     workspace: &mut Workspace,
-    _: &zed_actions::env_sync::SetUpEnvSync,
+    _: &zode_actions::env_sync::SetUpEnvSync,
     _window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -158,7 +158,7 @@ fn set_up(
 
 fn bind_project(
     workspace: &mut Workspace,
-    _: &zed_actions::env_sync::BindEnvProject,
+    _: &zode_actions::env_sync::BindEnvProject,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -198,7 +198,7 @@ fn nothing_to_bind(project: &Project) -> Option<&'static str> {
 
 fn push_env_file(
     workspace: &mut Workspace,
-    _: &zed_actions::env_sync::PushEnvFile,
+    _: &zode_actions::env_sync::PushEnvFile,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -207,7 +207,7 @@ fn push_env_file(
 
 fn pull_env_file(
     workspace: &mut Workspace,
-    _: &zed_actions::env_sync::PullEnvFile,
+    _: &zode_actions::env_sync::PullEnvFile,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {

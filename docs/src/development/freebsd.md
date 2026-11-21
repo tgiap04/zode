@@ -1,6 +1,6 @@
 ---
 title: Building Zode for FreeBSD
-description: "Guide to building zed for freebsd for Zode development."
+description: "Guide to building Zode for freebsd for Zode development."
 ---
 
 # Building Zode for FreeBSD
@@ -9,7 +9,7 @@ FreeBSD is not currently a supported platform, so this guide is a work in progre
 
 ## Repository
 
-Clone the [Zode repository](https://github.com/zed-industries/zed).
+Clone the [Zode repository](https://github.com/tgiap04/zode).
 
 ## Dependencies
 
@@ -19,7 +19,7 @@ Clone the [Zode repository](https://github.com/zed-industries/zed).
   script/freebsd
   ```
 
-  If preferred, you can inspect [`script/freebsd`](https://github.com/zed-industries/zed/blob/main/script/freebsd) and perform the steps manually.
+  If preferred, you can inspect [`script/freebsd`](https://github.com/tgiap04/zode/blob/develop/script/freebsd) and perform the steps manually.
 
 ## Building from source
 

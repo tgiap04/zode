@@ -75,7 +75,7 @@ impl Global for GlobalAgentNotifier {}
 /// and letting it find out later: a platform with no implementation gets no
 /// subscriptions, no timers, nothing watching agent tabs for the life of the
 /// process -- the same "build nothing where the answer is no" rule
-/// `crates/zed` applies to `keep_display_awake`.
+/// `crates/zode` applies to `keep_display_awake`.
 pub fn init(cx: &mut App) {
     if !cx.can_post_notifications() {
         return;

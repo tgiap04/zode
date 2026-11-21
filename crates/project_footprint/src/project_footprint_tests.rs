@@ -273,7 +273,7 @@ fn format_cpu_reports_a_rounded_integer_percent() {
 /// `init_settings`. See the comment on `from_settings` for why that impl
 /// falls back rather than panicking on a missing default for now: `default.json`
 /// does not carry `project_footprint_indicator` until the crate is wired into
-/// `crates/zed` (phase 05), so the value resolved here is that fallback, not
+/// `crates/zode` (phase 05), so the value resolved here is that fallback, not
 /// a value read from `default.json`.
 fn init_settings(cx: &mut TestAppContext) {
     cx.update(|cx| {

@@ -1227,7 +1227,7 @@ pub(crate) mod tests {
             assert!(!pull_needs_confirmation(plain), "{plain}");
         }
         for risky in [
-            ".zed/settings.json",
+            ".zode/settings.json",
             ".vscode/tasks.json",
             ".envrc",
             "package.json",

@@ -36,7 +36,7 @@ cargo run --config 'profile.release.debug="full"'
 cargo build --config 'profile.release.debug="full"'
 ```
 
-> If you do not want to pass `--config` on every `cargo` command, you can also change the section in the [root `Cargo.toml`](https://github.com/zed-industries/zed/blob/main/Cargo.toml)
+> If you do not want to pass `--config` on every `cargo` command, you can also change the section in the [root `Cargo.toml`](https://github.com/tgiap04/zode/blob/develop/Cargo.toml)
 >
 > from
 >
@@ -81,8 +81,8 @@ If you are new to these tools, see the `gdb` docs [here](https://www.gnu.org/sof
 After enabling full debug info and building with `cargo build`, run `rust-gdb` or `rust-lldb` against the compiled Zode binary:
 
 ```
-rust-gdb target/debug/zed
-rust-lldb target/debug/zed
+rust-gdb target/debug/zode
+rust-lldb target/debug/zode
 ```
 
 You can also attach to a running Zode process (for example, one started with `cargo run`):

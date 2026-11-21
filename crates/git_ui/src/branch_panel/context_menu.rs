@@ -50,7 +50,7 @@ impl BranchPanel {
         }
 
         window.dispatch_action(
-            Box::new(zed_actions::SwitchWorktree {
+            Box::new(zode_actions::SwitchWorktree {
                 path: worktree.path.clone(),
                 display_name: crate::branch_panel::tree::worktree_label(worktree),
                 agent,

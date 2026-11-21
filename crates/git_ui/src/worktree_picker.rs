@@ -26,7 +26,7 @@ use workspace::{
 
 use crate::branch_panel::checkout_deletion;
 use crate::git_panel::show_error_toast;
-use zed_actions::{
+use zode_actions::{
     CreateWorktree, NewWorktreeBranchTarget, OpenWorktreeInNewWindow, SwitchWorktree,
 };
 

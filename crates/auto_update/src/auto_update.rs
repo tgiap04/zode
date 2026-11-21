@@ -349,9 +349,9 @@ pub fn init(http_client: Arc<dyn HttpClient>, cx: &mut App) {
 }
 
 pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
-    if let Some(message) = option_env!("ZED_UPDATE_EXPLANATION")
+    if let Some(message) = option_env!("ZODE_UPDATE_EXPLANATION")
         .map(ToOwned::to_owned)
-        .or_else(|| env::var("ZED_UPDATE_EXPLANATION").ok())
+        .or_else(|| env::var("ZODE_UPDATE_EXPLANATION").ok())
     {
         drop(window.prompt(
             gpui::PromptLevel::Info,
@@ -456,7 +456,7 @@ impl AutoUpdater {
         // On windows, executable files cannot be overwritten while they are
         // running, so we must wait to overwrite the application until quitting
         // or restarting. When quitting the app, we spawn the auto update helper
-        // to finish the auto update process after Zed exits. When restarting
+        // to finish the auto update process after Zode exits. When restarting
         // the app after an update, we use `set_restart_path` to run the auto
         // update helper instead of the app, so that it can overwrite the app
         // and then spawn the new binary.
@@ -781,8 +781,8 @@ impl AutoUpdater {
 
     async fn target_path(installer_dir: &InstallerDir) -> Result<PathBuf> {
         let filename = match OS {
-            "macos" => anyhow::Ok("Zed.dmg"),
-            "linux" => Ok("zed.tar.gz"),
+            "macos" => anyhow::Ok("Zode.dmg"),
+            "linux" => Ok("zode.tar.gz"),
             "windows" => Ok("Zode.exe"),
             unsupported_os => anyhow::bail!("not supported: {unsupported_os}"),
         }?;

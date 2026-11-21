@@ -27,7 +27,7 @@ This opens the current directory in Zode.
 
 If you're coming from WebStorm, the fastest way to feel at home is to use the JetBrains keymap. During onboarding, you can select it as your base keymap. If you missed that step, you can change it anytime:
 
-1. Open Settings with {#kb zed::OpenSettings}
+1. Open Settings with {#kb zode::OpenSettings}
 2. Search for `Base Keymap`
 3. Select `JetBrains`
 
@@ -35,7 +35,7 @@ This maps familiar shortcuts like {#kb:jetbrains project_symbols::Toggle} for Go
 
 ## Set Up Editor Preferences
 
-You can configure most settings in the Settings Editor ({#kb zed::OpenSettings}). For advanced settings, run `zed: open settings file` from the Command Palette to edit your settings file directly.
+You can configure most settings in the Settings Editor ({#kb zode::OpenSettings}). For advanced settings, run `zode: open settings file` from the Command Palette to edit your settings file directly.
 
 Settings WebStorm users typically configure first:
 
@@ -47,7 +47,7 @@ Settings WebStorm users typically configure first:
 | `inlay_hints`           | Show parameter names and type hints inline, like WebStorm's hints.              |
 | `relative_line_numbers` | Useful if you're coming from IdeaVim.                                           |
 
-Zode also supports per-project settings. Create a `.zed/settings.json` file in your project root to override global settings for that project, similar to how you might use `.idea` folders in WebStorm.
+Zode also supports per-project settings. Create a `.zode/settings.json` file in your project root to override global settings for that project, similar to how you might use `.idea` folders in WebStorm.
 
 > **Tip:** If you're joining an existing project, check `format_on_save` before making your first commit. Otherwise you might accidentally reformat an entire file when you only meant to change one line.
 
@@ -108,7 +108,7 @@ If you chose the JetBrains keymap during onboarding, most of your shortcuts shou
 ### How to Customize Keybindings
 
 - Open the Command Palette ({#kb:jetbrains command_palette::Toggle})
-- Run `zed: open keymap`
+- Run `zode: open keymap`
 
 This opens a list of all available bindings. You can override individual shortcuts or remove conflicts.
 
@@ -171,8 +171,8 @@ What this means in practice:
 
 **How to adapt:**
 
-- Create a `.zed/settings.json` in your project root for project-specific settings
-- Define common commands in `tasks.json` (open via Command Palette: `zed: open tasks`):
+- Create a `.zode/settings.json` in your project root for project-specific settings
+- Define common commands in `tasks.json` (open via Command Palette: `zode: open tasks`):
 
 ```json
 [
@@ -190,7 +190,7 @@ What this means in practice:
   },
   {
     "label": "test current file",
-    "command": "npm test -- $ZED_FILE"
+    "command": "npm test -- $ZODE_FILE"
   }
 ]
 ```
@@ -247,14 +247,14 @@ Zode can debug:
 - Jest, Mocha, Vitest, and other test frameworks
 - Next.js (both server and client-side)
 
-For more control, create a `.zed/debug.json` file:
+For more control, create a `.zode/debug.json` file:
 
 ```json
 [
   {
     "label": "Debug Current File",
     "adapter": "JavaScript",
-    "program": "$ZED_FILE",
+    "program": "$ZODE_FILE",
     "request": "launch"
   },
   {
@@ -330,8 +330,8 @@ To set expectations clearly, here's what WebStorm offers that Zode doesn't have:
 WebStorm offers Code With Me as a separate feature for collaboration. Zode has collaboration built into the core experience.
 
 - Open the Collab Panel in the left dock
-- Create a channel and [invite your collaborators](https://zed.dev/docs/collaboration#inviting-a-collaborator) to join
-- [Share your screen or your codebase](https://zed.dev/docs/collaboration#share-a-project) directly
+- Create a channel and [invite your collaborators](https://zodekit.com/docs/collaboration#inviting-a-collaborator) to join
+- [Share your screen or your codebase](https://zodekit.com/docs/collaboration#share-a-project) directly
 
 Once connected, you'll see each other's cursors, selections, and edits in real time. Voice chat is included. There's no need for separate tools or third-party logins.
 
@@ -341,7 +341,7 @@ If you're used to AI assistants in WebStorm (like GitHub Copilot, JetBrains AI A
 
 ### Configuring GitHub Copilot
 
-1. Open Settings with {#kb zed::OpenSettings}
+1. Open Settings with {#kb zode::OpenSettings}
 2. Navigate to **AI → Edit Predictions**
 3. Click **Configure** next to "Configure Providers"
 4. Under **GitHub Copilot**, click **Sign in to GitHub**
@@ -352,9 +352,9 @@ Once signed in, just start typing. Zode will offer suggestions inline for you to
 
 To use other AI models in Zode, you have several options:
 
-- Use Zode's hosted models, with higher rate limits. Requires [authentication](https://zed.dev/docs/authentication) and subscription to [Zed Pro](https://zed.dev/docs/ai/subscription.html).
-- Bring your own [API keys](https://zed.dev/docs/ai/llm-providers.html), no authentication needed
-- Use [external agents like Claude Agent](https://zed.dev/docs/ai/external-agents.html)
+- Zode has no hosted models or subscription: AI features use your own keys or agents.
+- Bring your own [API keys](https://zodekit.com/docs/ai/llm-providers.html), no authentication needed
+- Use [external agents like Claude Agent](https://zodekit.com/docs/ai/external-agents.html)
 
 ## Advanced Config and Productivity Tweaks
 

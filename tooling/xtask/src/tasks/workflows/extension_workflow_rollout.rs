@@ -310,7 +310,7 @@ fn rollout_workflows_to_extension(
     }
 
     let (authenticate, token) =
-        generate_token(vars::ZED_ZIPPY_APP_ID, vars::ZED_ZIPPY_APP_PRIVATE_KEY)
+        generate_token(vars::ZODE_ZIPPY_APP_ID, vars::ZODE_ZIPPY_APP_PRIVATE_KEY)
             .for_repository(RepositoryTarget::new(
                 "zed-extensions",
                 &["${{ matrix.repo }}"],
@@ -377,7 +377,7 @@ fn create_rollout_tag(rollout_job: &NamedJob, filter_repos_input: &WorkflowInput
     }
 
     let (authenticate, token) =
-        generate_token(vars::ZED_ZIPPY_APP_ID, vars::ZED_ZIPPY_APP_PRIVATE_KEY)
+        generate_token(vars::ZODE_ZIPPY_APP_ID, vars::ZODE_ZIPPY_APP_PRIVATE_KEY)
             .for_repository(RepositoryTarget::current())
             .with_permissions([(TokenPermissions::Contents, Level::Write)])
             .into();

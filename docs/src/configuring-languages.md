@@ -281,7 +281,7 @@ You can toggle language server support globally or per-language:
   }
 ```
 
-This disables the language server for Markdown files, which can be useful for performance in large documentation projects. You can configure this globally in your `~/.config/zode/settings.json` or inside a `.zed/settings.json` in your project directory.
+This disables the language server for Markdown files, which can be useful for performance in large documentation projects. You can configure this globally in your `~/.config/zode/settings.json` or inside a `.zode/settings.json` in your project directory.
 
 ## Formatting and Linting
 
@@ -395,7 +395,7 @@ Zode allows you to run both formatting and linting on save. Here's an example th
 
 If you encounter issues with formatting or linting:
 
-1. Check Zode's log file for error messages (Use the command palette: `zed: open log`)
+1. Check Zode's log file for error messages (Use the command palette: `zode: open log`)
 2. Ensure external tools (formatters, linters) are correctly installed and in your PATH
 3. Verify configurations in both Zode settings and language-specific config files (e.g., `.eslintrc`, `.prettierrc`)
 
@@ -443,7 +443,7 @@ Create custom themes by creating a JSON file in `~/.config/zode/themes/`. Zode w
 
 ### Using Theme Extensions
 
-Zode supports theme extensions. Browse and install theme extensions from the Extensions panel ({#kb zed::Extensions}).
+Zode supports theme extensions. Browse and install theme extensions from the Extensions panel ({#kb zode::Extensions}).
 
 To create your own theme extension, refer to the [Developing Theme Extensions](./extensions/themes.md) guide.
 

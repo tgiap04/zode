@@ -1,0 +1,1068 @@
+use gpui::{Action, actions};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+// If the zode binary doesn't use anything in this crate, it will be optimized away
+// and the actions won't initialize. So we just provide an empty initialization function
+// to be called from main.
+//
+// These may provide relevant context:
+// https://github.com/rust-lang/rust/issues/47384
+// https://github.com/mmastrac/rust-ctor/issues/280
+pub fn init() {}
+
+/// Opens a URL in the system's default web browser.
+#[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = zode)]
+#[serde(deny_unknown_fields)]
+pub struct OpenBrowser {
+    pub url: String,
+}
+
+/// Opens a zode:// URL within the application.
+#[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = zode)]
+#[serde(deny_unknown_fields)]
+pub struct OpenZodeUrl {
+    pub url: String,
+}
+
+/// Opens the keymap to either add a keybinding or change an existing one
+#[derive(PartialEq, Clone, Default, Action, JsonSchema, Serialize, Deserialize)]
+#[action(namespace = zode, no_json, no_register)]
+pub struct ChangeKeybinding {
+    pub action: String,
+}
+
+actions!(
+    zode,
+    [
+        /// Opens the settings editor.
+        #[action(deprecated_aliases = ["zed_actions::OpenSettingsEditor"])]
+        OpenSettings,
+        /// Opens the settings JSON file.
+        #[action(deprecated_aliases = ["zed_actions::OpenSettings"])]
+        OpenSettingsFile,
+        /// Opens project-specific settings.
+        #[action(deprecated_aliases = ["zed_actions::OpenProjectSettings"])]
+        OpenProjectSettings,
+        /// Opens the default keymap file.
+        OpenDefaultKeymap,
+        /// Opens the user keymap file.
+        #[action(deprecated_aliases = ["zed_actions::OpenKeymap"])]
+        OpenKeymapFile,
+        /// Opens the keymap editor.
+        #[action(deprecated_aliases = ["zed_actions::OpenKeymapEditor"])]
+        OpenKeymap,
+        /// Opens server settings.
+        OpenServerSettings,
+        /// Quits the application.
+        Quit,
+        /// Shows information about Zode.
+        About,
+        /// Opens the documentation website.
+        OpenDocs,
+        /// Views open source licenses.
+        OpenLicenses,
+        /// Opens the performance profiler.
+        OpenPerformanceProfiler,
+        /// Opens the onboarding view.
+        OpenOnboarding,
+        /// Shows the auto-update notification for testing.
+        ShowUpdateNotification,
+    ]
+);
+
+#[derive(PartialEq, Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionCategoryFilter {
+    Themes,
+    IconThemes,
+    Languages,
+    Grammars,
+    LanguageServers,
+    ContextServers,
+    Snippets,
+    DebugAdapters,
+}
+
+/// Opens the extensions management interface.
+#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = zode)]
+#[serde(deny_unknown_fields)]
+pub struct Extensions {
+    /// Filters the extensions page down to extensions that are in the specified category.
+    #[serde(default)]
+    pub category_filter: Option<ExtensionCategoryFilter>,
+    /// Focuses just the extension with the specified ID.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+
+/// Decreases the font size in the editor buffer.
+#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = zode)]
+#[serde(deny_unknown_fields)]
+pub struct DecreaseBufferFontSize {
+    #[serde(default)]
+    pub persist: bool,
+}
+
+/// Increases the font size in the editor buffer.
+#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = zode)]
+#[serde(deny_unknown_fields)]
+pub struct IncreaseBufferFontSize {
+    #[serde(default)]
+    pub persist: bool,
+}
+
+/// Opens the settings editor at a specific path.
+#[derive(PartialEq, Clone, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = zode)]
+#[serde(deny_unknown_fields)]
+pub struct OpenSettingsAt {
+    /// A path to a specific setting (e.g. `theme.mode`)
+    pub path: String,
+}
+
+/// Resets the buffer font size to the default value.
+#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = zode)]
+#[serde(deny_unknown_fields)]
+pub struct ResetBufferFontSize {
+    #[serde(default)]
+    pub persist: bool,
+}
+
+/// Decreases the font size of the user interface.
+#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = zode)]
+#[serde(deny_unknown_fields)]
+pub struct DecreaseUiFontSize {
+    #[serde(default)]
+    pub persist: bool,
+}
+
+/// Increases the font size of the user interface.
+#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = zode)]
+#[serde(deny_unknown_fields)]
+pub struct IncreaseUiFontSize {
+    #[serde(default)]
+    pub persist: bool,
+}
+
+/// Resets the UI font size to the default value.
+#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = zode)]
+#[serde(deny_unknown_fields)]
+pub struct ResetUiFontSize {
+    #[serde(default)]
+    pub persist: bool,
+}
+
+/// Resets all zoom levels (UI and buffer font sizes, including in the agent panel) to their default values.
+#[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+#[action(namespace = zode)]
+#[serde(deny_unknown_fields)]
+pub struct ResetAllZoom {
+    #[serde(default)]
+    pub persist: bool,
+}
+
+pub mod editor {
+    use gpui::actions;
+    actions!(
+        editor,
+        [
+            /// Moves cursor up.
+            MoveUp,
+            /// Moves cursor down.
+            MoveDown,
+            /// Reveals the current file in the system file manager.
+            RevealInFileManager,
+        ]
+    );
+}
+
+pub mod account {
+    use gpui::actions;
+
+    actions!(
+        account,
+        [
+            /// Signs in to a Zode account. Signing in is always optional —
+            /// the editor is fully usable without one.
+            SignIn,
+            /// Signs out and forgets the saved session.
+            SignOut,
+            /// Opens the account page on the web.
+            OpenAccountOnWeb,
+            /// Opens the push/pull window for synced settings.
+            SyncSettings,
+            /// Shows the recovery key this machine holds, for writing down again.
+            ShowRecoveryKey,
+            /// Takes a recovery key from another machine.
+            EnterRecoveryKey,
+            /// Replaces the recovery key and re-encrypts everything stored.
+            RotateRecoveryKey
+        ]
+    );
+}
+
+pub mod env_sync {
+    use gpui::actions;
+
+    actions!(
+        env_sync,
+        [
+            /// Opens the list of environment files stored on your account.
+            OpenEnvVault,
+            /// Creates the environment key for an account that has none yet.
+            SetUpEnvSync,
+            /// Sends the environment file in the active editor.
+            PushEnvFile,
+            /// Fetches the stored copy of the environment file in the active
+            /// editor, showing what would change before anything is written.
+            PullEnvFile,
+            /// Links this checkout to a project on your account.
+            BindEnvProject
+        ]
+    );
+}
+
+pub mod dev {
+    use gpui::actions;
+
+    actions!(
+        dev,
+        [
+            /// Toggles the developer inspector for debugging UI elements.
+            ToggleInspector
+        ]
+    );
+}
+
+pub mod remote_debug {
+    use gpui::actions;
+
+    actions!(
+        remote_debug,
+        [
+            /// Simulates a disconnection from the remote server for testing purposes.
+            /// This will trigger the reconnection logic.
+            SimulateDisconnect,
+            /// Simulates a timeout/slow connection to the remote server for testing purposes.
+            /// This will cause heartbeat failures and trigger reconnection.
+            SimulateTimeout,
+            /// Simulates a timeout/slow connection to the remote server for testing purposes.
+            /// This will cause heartbeat failures and attempting a reconnection while having exhausted all attempts.
+            SimulateTimeoutExhausted,
+        ]
+    );
+}
+
+pub mod workspace {
+    use gpui::actions;
+
+    actions!(
+        workspace,
+        [
+            #[action(deprecated_aliases = ["editor::CopyPath", "outline_panel::CopyPath", "project_panel::CopyPath"])]
+            CopyPath,
+            #[action(deprecated_aliases = ["editor::CopyRelativePath", "outline_panel::CopyRelativePath", "project_panel::CopyRelativePath"])]
+            CopyRelativePath,
+            /// Opens the selected file with the system's default application.
+            #[action(deprecated_aliases = ["project_panel::OpenWithSystem"])]
+            OpenWithSystem,
+        ]
+    );
+}
+
+/// Describes what a new git worktree checks out.
+///
+/// The first two variants create a detached worktree; `NewBranch` gives it a
+/// branch of its own. Detached is right for a quick look at a ref, and wrong
+/// for the case this panel exists to serve -- work on a feature -- because a
+/// detached checkout has nowhere to commit.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum NewWorktreeBranchTarget {
+    /// Create a detached worktree from the current HEAD.
+    #[default]
+    CurrentBranch,
+    /// Create a detached worktree at the tip of an existing branch.
+    ExistingBranch { name: String },
+    /// Create a new branch and check it out.
+    ///
+    /// `base` is the commit or ref it starts from; `None` means the current
+    /// HEAD. It exists because the git layer has always taken a base
+    /// (`CreateWorktreeTarget::NewBranch::base_sha`) and this enum used to drop
+    /// it -- so "create `x` based on `develop`" could only be expressed by
+    /// giving up the branch and checking out `develop` detached, which is a
+    /// worktree with nowhere to commit.
+    NewBranch {
+        name: String,
+        #[serde(default)]
+        base: Option<String>,
+    },
+}
+
+/// Creates a new git worktree and switches the workspace to it.
+/// Dispatched by the unified worktree picker when the user selects a "Create new worktree" entry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Action)]
+#[action(namespace = git)]
+#[serde(deny_unknown_fields)]
+pub struct CreateWorktree {
+    /// When this is None, Zode will randomly generate a worktree name.
+    pub worktree_name: Option<String>,
+    pub branch_target: NewWorktreeBranchTarget,
+    /// An agent to start in the new worktree once its workspace is open.
+    ///
+    /// Started there and not before: the checkout has to exist and the
+    /// workspace has to be the one showing it, or the agent runs in the tree
+    /// being left behind -- which looks identical from the tab.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// An absolute directory to put the checkout in, overriding
+    /// `git.worktree_directory` for this one creation. `None` uses the setting.
+    ///
+    /// Absolute, unlike the setting: this is what a folder picker hands back,
+    /// and the setting's confinement to the repository and its parent exists
+    /// for a value typed once in a config file, not for a directory chosen on
+    /// the spot.
+    #[serde(default)]
+    pub location: Option<PathBuf>,
+}
+
+/// Switches the workspace to an existing linked worktree.
+/// Dispatched by the unified worktree picker when the user selects an existing worktree.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Action)]
+#[action(namespace = git)]
+#[serde(deny_unknown_fields)]
+pub struct SwitchWorktree {
+    pub path: PathBuf,
+    pub display_name: String,
+    /// An agent to start once the switch has landed.
+    ///
+    /// After and not before: an agent runs in the directory its workspace has
+    /// open, so starting it on this side would run it in the checkout being
+    /// left behind -- which looks identical from the tab and is not.
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
+/// Opens an existing worktree in a new window.
+/// Dispatched by the worktree picker's "Open in New Window" button.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Action)]
+#[action(namespace = git)]
+#[serde(deny_unknown_fields)]
+pub struct OpenWorktreeInNewWindow {
+    pub path: PathBuf,
+}
+
+pub mod git {
+    use gpui::actions;
+
+    actions!(
+        git,
+        [
+            /// Checks out a different git branch.
+            CheckoutBranch,
+            /// Switches to a different git branch.
+            Switch,
+            /// Selects a different repository.
+            SelectRepo,
+            /// Filter remotes.
+            FilterRemotes,
+            /// Create a git remote.
+            CreateRemote,
+            /// Opens the git branch selector.
+            #[action(deprecated_aliases = ["branches::OpenRecent"])]
+            Branch,
+            /// Opens the git stash selector.
+            ViewStash,
+            /// Opens the git worktree selector.
+            Worktree,
+            /// Creates a pull request for the current branch.
+            CreatePullRequest
+        ]
+    );
+}
+
+pub mod toast {
+    use gpui::actions;
+
+    actions!(
+        toast,
+        [
+            /// Runs the action associated with a toast notification.
+            RunAction
+        ]
+    );
+}
+
+pub mod command_palette {
+    use gpui::actions;
+
+    actions!(
+        command_palette,
+        [
+            /// Toggles the command palette.
+            Toggle,
+        ]
+    );
+}
+
+pub mod project_panel {
+    use gpui::actions;
+
+    actions!(
+        project_panel,
+        [
+            /// Toggles the project panel.
+            Toggle,
+            /// Toggles focus on the project panel.
+            ToggleFocus
+        ]
+    );
+}
+pub mod feedback {
+    use gpui::actions;
+
+    actions!(
+        feedback,
+        [
+            /// Opens the bug report form.
+            FileBugReport,
+            /// Opens the feature request form.
+            RequestFeature
+        ]
+    );
+}
+
+pub mod theme {
+    use gpui::actions;
+
+    actions!(theme, [ToggleMode]);
+}
+
+pub mod theme_selector {
+    use gpui::Action;
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+
+    /// Toggles the theme selector interface.
+    #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+    #[action(namespace = theme_selector)]
+    #[serde(deny_unknown_fields)]
+    pub struct Toggle {
+        /// A list of theme names to filter the theme selector down to.
+        pub themes_filter: Option<Vec<String>>,
+    }
+}
+
+pub mod search {
+    use gpui::actions;
+    actions!(
+        search,
+        [
+            /// Toggles searching in ignored files.
+            ToggleIncludeIgnored
+        ]
+    );
+}
+pub mod buffer_search {
+    use gpui::{Action, actions};
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+
+    /// Opens the buffer search interface with the specified configuration.
+    #[derive(PartialEq, Clone, Deserialize, JsonSchema, Action)]
+    #[action(namespace = buffer_search)]
+    #[serde(deny_unknown_fields)]
+    pub struct Deploy {
+        #[serde(default = "util::serde::default_true")]
+        pub focus: bool,
+        #[serde(default)]
+        pub replace_enabled: bool,
+        #[serde(default)]
+        pub selection_search_enabled: bool,
+    }
+
+    impl Deploy {
+        pub fn find() -> Self {
+            Self {
+                focus: true,
+                replace_enabled: false,
+                selection_search_enabled: false,
+            }
+        }
+
+        pub fn replace() -> Self {
+            Self {
+                focus: true,
+                replace_enabled: true,
+                selection_search_enabled: false,
+            }
+        }
+    }
+
+    actions!(
+        buffer_search,
+        [
+            /// Deploys the search and replace interface.
+            DeployReplace,
+            /// Dismisses the search bar.
+            Dismiss,
+            /// Focuses back on the editor.
+            FocusEditor,
+            /// Sets the search query to the current selection without opening the search bar or running a search.
+            UseSelectionForFind,
+        ]
+    );
+}
+pub mod settings_profile_selector {
+    use gpui::Action;
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+
+    #[derive(PartialEq, Clone, Default, Debug, Deserialize, JsonSchema, Action)]
+    #[action(namespace = settings_profile_selector)]
+    pub struct Toggle;
+}
+
+pub mod agent {
+    use gpui::{Action, actions};
+    use schemars::JsonSchema;
+    use serde::{Deserialize, Serialize};
+
+    /// Which face of an agent to open.
+    ///
+    /// One variant, kept as an enum because it is serialized into the workspace
+    /// database: rows written when there was a second mode still deserialize.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    #[serde(rename_all = "snake_case")]
+    pub enum AgentViewMode {
+        /// A terminal session running the CLI the user installed. The agent's
+        /// interface is that CLI's, and this editor does not draw a second one
+        /// over it.
+        #[default]
+        Terminal,
+    }
+
+    /// Whether a launch was asked to skip the agent's permission prompts,
+    /// independently of what the checkout it runs in is set to.
+    ///
+    /// Not a `bool`, for the reason `project::agent_bypass::BypassCheck` is not
+    /// one: the value that switches a safety control off has to be the one a
+    /// caller names, never the one it gets by leaving a parameter behind. That
+    /// the default is `AsConfigured` is also what makes this safe to add to an
+    /// action people already have keybindings for.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+    #[serde(rename_all = "snake_case")]
+    pub enum PermissionPrompts {
+        /// Whatever the checkout is set to -- which is to keep asking, unless
+        /// somebody turned that off for that checkout.
+        #[default]
+        AsConfigured,
+        /// This one launch skips them, and nothing is written down. Still
+        /// refused unless the agent's flag is confirmed present in the CLI that
+        /// is actually installed, exactly as the per-checkout setting is.
+        SkipOnce,
+    }
+
+    /// Opens an agent beside the editor.
+    ///
+    /// This lives here, and not in `agent_ui`, because an action type belongs
+    /// with the other action types rather than in the crate that happens to
+    /// handle it — the same reason every other action in this crate sits apart
+    /// from its handler. `sidebar` already depends on `agent_ui` directly (it
+    /// draws `agent_ui::AgentView`), so that dependency is not what this split
+    /// avoids.
+    #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+    #[action(namespace = agent)]
+    #[serde(deny_unknown_fields)]
+    pub struct OpenAgent {
+        /// Agent id as listed by `AgentServerStore` — e.g. `claude-acp`.
+        pub agent: String,
+        /// Which mode to open in, or `None` to reopen in whichever mode this agent
+        /// was last used in. A plain click on the rail means `None`: come back the
+        /// way I left you.
+        #[serde(default)]
+        pub mode: Option<AgentViewMode>,
+    }
+
+    /// Shows an agent, or puts the agent column away when that agent is already
+    /// showing.
+    ///
+    /// Separate from `OpenAgent` rather than a flag on it: "open this" and
+    /// "toggle this" are different requests, and a command-palette `OpenAgent`
+    /// that sometimes closed things would be a surprise nobody asked for. The
+    /// rail button is a toggle, so the rail dispatches this.
+    #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+    #[action(namespace = agent)]
+    #[serde(deny_unknown_fields)]
+    pub struct ToggleAgent {
+        /// Agent id as listed by `AgentServerStore` -- e.g. `claude-acp`.
+        pub agent: String,
+    }
+
+    /// Starts a second, independent session of an agent that may already be open.
+    ///
+    /// Separate from `OpenAgent` rather than a flag on it, because the two answer
+    /// to different gestures: clicking the rail means "show me the one that is
+    /// running", and only a deliberate choice should spend another CLI process.
+    #[derive(Clone, PartialEq, Deserialize, JsonSchema, Action)]
+    #[action(namespace = agent)]
+    #[serde(deny_unknown_fields)]
+    pub struct NewAgent {
+        /// Agent id as listed by `AgentServerStore` — e.g. `claude-acp`.
+        pub agent: String,
+        /// Which mode to open in, or `None` for the mode this agent was last
+        /// used in.
+        #[serde(default)]
+        pub mode: Option<AgentViewMode>,
+        /// Whether this session skips the agent's permission prompts, whatever
+        /// the checkout it runs in is set to.
+        #[serde(default)]
+        pub permission_prompts: PermissionPrompts,
+    }
+
+    actions!(
+        agent,
+        [
+            /// Shows the history of past agent sessions, or puts it away.
+            ///
+            /// In the `agent` namespace rather than one of its own: the history is
+            /// another face of the same feature, and a namespace exists to group
+            /// what a user would look for together.
+            ToggleHistory,
+        ]
+    );
+}
+
+pub mod assistant {
+    use gpui::Action;
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+
+    /// Deploys the assistant interface with the specified configuration.
+    #[derive(Clone, Default, Deserialize, PartialEq, JsonSchema, Action)]
+    #[action(namespace = assistant)]
+    #[serde(deny_unknown_fields)]
+    pub struct InlineAssist {
+        pub prompt: Option<String>,
+    }
+}
+
+/// Opens the recent projects interface.
+#[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
+#[action(namespace = projects)]
+#[serde(deny_unknown_fields)]
+pub struct OpenRecent {
+    #[serde(default)]
+    pub create_new_window: bool,
+}
+
+/// Creates a project from a selected template.
+#[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
+#[action(namespace = projects)]
+#[serde(deny_unknown_fields)]
+pub struct OpenRemote {
+    #[serde(default)]
+    pub from_existing_connection: bool,
+    #[serde(default)]
+    pub create_new_window: bool,
+}
+
+/// Opens the dev container connection modal.
+#[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
+#[action(namespace = projects)]
+#[serde(deny_unknown_fields)]
+pub struct OpenDevContainer;
+
+/// Lists the other Zodes on your account, to pair with one or open a project
+/// on it through the relay.
+#[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
+#[action(namespace = projects)]
+#[serde(deny_unknown_fields)]
+pub struct OpenZodeOnAccount;
+
+/// Where to spawn the task in the UI.
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RevealTarget {
+    /// In the central pane group, "main" editor area.
+    Center,
+    /// In the terminal dock, "regular" terminal items' place.
+    #[default]
+    Dock,
+}
+
+/// Spawns a task with name or opens tasks modal.
+#[derive(Debug, PartialEq, Clone, Deserialize, JsonSchema, Action)]
+#[action(namespace = task)]
+#[serde(untagged)]
+pub enum Spawn {
+    /// Spawns a task by the name given.
+    ByName {
+        task_name: String,
+        #[serde(default)]
+        reveal_target: Option<RevealTarget>,
+    },
+    /// Spawns a task by the tag given.
+    ByTag {
+        task_tag: String,
+        #[serde(default)]
+        reveal_target: Option<RevealTarget>,
+    },
+    /// Spawns a task via modal's selection.
+    ViaModal {
+        /// Selected task's `reveal_target` property override.
+        #[serde(default)]
+        reveal_target: Option<RevealTarget>,
+    },
+}
+
+impl Spawn {
+    pub fn modal() -> Self {
+        Self::ViaModal {
+            reveal_target: None,
+        }
+    }
+}
+
+/// Reruns the last task.
+#[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
+#[action(namespace = task)]
+#[serde(deny_unknown_fields)]
+pub struct Rerun {
+    /// Controls whether the task context is reevaluated prior to execution of a task.
+    /// If it is not, environment variables such as ZODE_COLUMN, ZODE_FILE are gonna be the same as in the last execution of a task
+    /// If it is, these variables will be updated to reflect current state of editor at the time task::Rerun is executed.
+    /// default: false
+    #[serde(default)]
+    pub reevaluate_context: bool,
+    /// Overrides `allow_concurrent_runs` property of the task being reran.
+    /// Default: null
+    #[serde(default)]
+    pub allow_concurrent_runs: Option<bool>,
+    /// Overrides `use_new_terminal` property of the task being reran.
+    /// Default: null
+    #[serde(default)]
+    pub use_new_terminal: Option<bool>,
+
+    /// If present, rerun the task with this ID, otherwise rerun the last task.
+    #[serde(skip)]
+    pub task_id: Option<String>,
+}
+
+pub mod outline {
+    use std::sync::OnceLock;
+
+    use gpui::{AnyView, App, Window, actions};
+
+    actions!(
+        outline,
+        [
+            #[action(name = "Toggle")]
+            ToggleOutline
+        ]
+    );
+    /// A pointer to outline::toggle function, exposed here to sewer the breadcrumbs <-> outline dependency.
+    pub static TOGGLE_OUTLINE: OnceLock<fn(AnyView, &mut Window, &mut App)> = OnceLock::new();
+}
+
+actions!(
+    git_onboarding,
+    [
+        /// Opens the git integration onboarding modal.
+        OpenGitIntegrationOnboarding
+    ]
+);
+
+pub mod debug_panel {
+    use gpui::actions;
+    actions!(
+        debug_panel,
+        [
+            /// Toggles the debug panel.
+            Toggle,
+            /// Toggles focus on the debug panel.
+            ToggleFocus
+        ]
+    );
+}
+
+actions!(
+    debugger,
+    [
+        /// Toggles the enabled state of a breakpoint.
+        ToggleEnableBreakpoint,
+        /// Removes a breakpoint.
+        UnsetBreakpoint,
+        /// Opens the project debug tasks configuration.
+        OpenProjectDebugTasks,
+    ]
+);
+
+pub mod vim {
+    use gpui::actions;
+
+    actions!(
+        vim,
+        [
+            /// Opens the default keymap file.
+            OpenDefaultKeymap
+        ]
+    );
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct WslConnectionOptions {
+    pub distro_name: String,
+    pub user: Option<String>,
+}
+
+#[cfg(target_os = "windows")]
+pub mod wsl_actions {
+    use gpui::Action;
+    use schemars::JsonSchema;
+    use serde::Deserialize;
+
+    /// Opens a folder inside Wsl.
+    #[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
+    #[action(namespace = projects)]
+    #[serde(deny_unknown_fields)]
+    pub struct OpenFolderInWsl {
+        #[serde(default)]
+        pub create_new_window: bool,
+    }
+
+    /// Open a wsl distro.
+    #[derive(PartialEq, Clone, Deserialize, Default, JsonSchema, Action)]
+    #[action(namespace = projects)]
+    #[serde(deny_unknown_fields)]
+    pub struct OpenWsl {
+        #[serde(default)]
+        pub create_new_window: bool,
+    }
+}
+
+pub mod preview {
+    pub mod markdown {
+        use gpui::actions;
+
+        actions!(
+            markdown,
+            [
+                /// Opens a markdown preview for the current file.
+                OpenPreview,
+                /// Opens a markdown preview in a split pane.
+                OpenPreviewToTheSide,
+            ]
+        );
+    }
+
+    pub mod svg {
+        use gpui::actions;
+
+        actions!(
+            svg,
+            [
+                /// Opens an SVG preview for the current file.
+                OpenPreview,
+                /// Opens an SVG preview in a split pane.
+                OpenPreviewToTheSide,
+            ]
+        );
+    }
+}
+
+pub mod database {
+    use gpui::actions;
+
+    actions!(
+        database,
+        [
+            /// Opens the database tab, or steps back to the tab that was being
+            /// read.
+            ToggleDatabase,
+            /// Opens the dialog for adding a database connection.
+            AddConnection,
+            /// Opens a second database tab beside the code, where `ToggleDatabase`
+            /// brings the existing one forward.
+            OpenInEditorTab,
+            /// Opens the database in a window of its own that floats above other
+            /// applications.
+            OpenInFloatingWindow,
+            /// Closes the connection under the cursor, stopping its driver.
+            Disconnect,
+            /// Runs the selected SQL, or the statement the cursor is in when
+            /// nothing is selected.
+            RunQuery,
+            /// Runs the selected SQL, or the whole scratch buffer when nothing
+            /// is selected.
+            RunAll,
+            /// Lists the statements this connection ran, to insert or run
+            /// again.
+            ShowQueryHistory,
+            /// Stops the query that is running.
+            CancelQuery,
+            /// Shows the next page of results.
+            NextPage,
+            /// Shows the previous page of results.
+            PreviousPage,
+            /// Copies the page on screen as CSV.
+            CopyResultsAsCsv,
+            /// Reads the active connection's schemas, tables and open table
+            /// again, keeping what is expanded.
+            RefreshDatabase,
+            /// Copies the selected result rows as tab-separated text, or the
+            /// one selected cell as its value.
+            CopySelection,
+            /// Selects every row of the result page.
+            SelectAllRows,
+            /// Shows or hides the filter bar over a table opened from the tree.
+            ToggleFilterBar,
+            /// Writes the edited cells of the table on screen to the database,
+            /// after the connection's safety level has had its say.
+            SaveChanges,
+            /// Throws away the edited cells that have not been saved.
+            DiscardChanges,
+            /// Edits the value of the selected cell.
+            EditCell,
+            /// Sets the selected cell to NULL.
+            SetCellNull,
+            /// Keeps what was typed in the cell being edited and moves on to
+            /// the next cell that can be edited.
+            EditNextCell,
+            /// Keeps what was typed in the cell being edited and moves back to
+            /// the previous cell that can be edited.
+            EditPreviousCell,
+        ]
+    );
+}
+
+pub mod container {
+    use gpui::actions;
+
+    actions!(
+        container,
+        [
+            /// Opens the container tab, or steps back to the tab that was being
+            /// read.
+            ToggleContainer,
+            /// Opens a second container tab beside the code, where
+            /// `ToggleContainer` brings the existing one forward.
+            OpenInEditorTab,
+            /// Opens the container list in a window of its own that floats above
+            /// other applications.
+            OpenInFloatingWindow,
+            /// Adds the row under the cursor to the selection, or takes it out.
+            ToggleRowSelection,
+            /// Selects every row the list currently shows.
+            SelectAllRows,
+            /// Asks to remove the selected rows, or the row under the cursor when
+            /// nothing is selected. Always through the confirmation.
+            RemoveSelectedRows,
+        ]
+    );
+}
+
+pub mod floating_pane {
+    use gpui::actions;
+
+    actions!(
+        floating_pane,
+        [
+            /// Opens the floating window over the editor, or puts it away.
+            ToggleFloatingPane,
+            /// Closes the floating window, ending its terminals and threads.
+            ///
+            /// Told apart from `ToggleFloatingPane` by what survives it, which
+            /// is the whole difference between the two buttons on its title
+            /// bar: minimising hides the window and leaves everything running,
+            /// this ends it. Asks first whenever there is anything to lose.
+            CloseFloatingPane,
+            /// Opens a terminal as a tab in the floating window.
+            NewTerminal,
+            /// Opens an unsaved markdown note as a tab in the floating window.
+            NewMarkdownNote,
+            /// Opens an existing markdown file as a tab in the floating window.
+            OpenMarkdownNote,
+            /// Splits the floating window's active pane to the right.
+            ///
+            /// `pane::SplitRight` already reaches the same `Event::Split` once
+            /// focus sits inside a pane, so this is not a second code path —
+            /// it is a window-scoped name a user can bind under the
+            /// `FloatingPane` context without touching the editor's own split
+            /// bindings, matching the five siblings above.
+            SplitRight,
+            /// Splits the floating window's active pane to the left. See
+            /// `SplitRight` for why this exists alongside `pane::SplitLeft`.
+            SplitLeft,
+            /// Splits the floating window's active pane upward. See
+            /// `SplitRight` for why this exists alongside `pane::SplitUp`.
+            SplitUp,
+            /// Splits the floating window's active pane downward. See
+            /// `SplitRight` for why this exists alongside `pane::SplitDown`.
+            SplitDown,
+        ]
+    );
+}
+
+pub mod agents_sidebar {
+    use gpui::actions;
+
+    actions!(
+        agents_sidebar,
+        [
+            /// Moves focus to the sidebar's search/filter editor.
+            FocusSidebarFilter,
+        ]
+    );
+}
+
+pub mod notebook {
+    use gpui::actions;
+
+    actions!(
+        notebook,
+        [
+            /// Opens a Jupyter notebook file.
+            OpenNotebook,
+            /// Runs all cells in the notebook.
+            RunAll,
+            /// Runs the current cell and stays on it.
+            Run,
+            /// Runs the current cell and advances to the next cell.
+            RunAndAdvance,
+            /// Clears all cell outputs.
+            ClearOutputs,
+            /// Moves the current cell up.
+            MoveCellUp,
+            /// Moves the current cell down.
+            MoveCellDown,
+            /// Adds a new markdown cell.
+            AddMarkdownBlock,
+            /// Adds a new code cell.
+            AddCodeBlock,
+            /// Restarts the kernel.
+            RestartKernel,
+            /// Interrupts the current execution.
+            InterruptKernel,
+            /// Move down in cells.
+            NotebookMoveDown,
+            /// Move up in cells.
+            NotebookMoveUp,
+            /// Enters the current cell's editor (edit mode).
+            EnterEditMode,
+            /// Exits the cell editor and returns to cell command mode.
+            EnterCommandMode,
+        ]
+    );
+}

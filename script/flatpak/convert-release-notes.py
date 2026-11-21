@@ -85,7 +85,7 @@ if __name__ == "__main__":
     release_info_str += f"    <url>https://github.com/zed-industries/zed/releases/tag/{tag}</url>\n"
     release_info_str += "</release>\n"
 
-    channel_releases_file = f"../../crates/zed/resources/flatpak/release-info/{channel}"
+    channel_releases_file = f"../../crates/zode/resources/flatpak/release-info/{channel}"
     with open(channel_releases_file) as f:
         old_release_info = f.read()
     with open(channel_releases_file, "w") as f:

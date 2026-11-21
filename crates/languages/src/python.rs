@@ -834,7 +834,7 @@ const PYTHON_TEST_TARGET_TASK_VARIABLE: VariableName =
     VariableName::Custom(Cow::Borrowed("PYTHON_TEST_TARGET"));
 
 const PYTHON_ACTIVE_TOOLCHAIN_PATH: VariableName =
-    VariableName::Custom(Cow::Borrowed("PYTHON_ACTIVE_ZED_TOOLCHAIN"));
+    VariableName::Custom(Cow::Borrowed("PYTHON_ACTIVE_ZODE_TOOLCHAIN"));
 
 const PYTHON_MODULE_NAME_TASK_VARIABLE: VariableName =
     VariableName::Custom(Cow::Borrowed("PYTHON_MODULE_NAME"));
@@ -945,7 +945,7 @@ impl ContextProvider for PythonContextProvider {
                     },
                     // Run test(s) for a specific target within a file
                     TaskTemplate {
-                        label: "unittest $ZED_CUSTOM_PYTHON_TEST_TARGET".to_owned(),
+                        label: "unittest $ZODE_CUSTOM_PYTHON_TEST_TARGET".to_owned(),
                         command: PYTHON_ACTIVE_TOOLCHAIN_PATH.template_value(),
                         args: vec![
                             "-m".to_owned(),
@@ -977,7 +977,7 @@ impl ContextProvider for PythonContextProvider {
                     },
                     // Run test(s) for a specific target within a file
                     TaskTemplate {
-                        label: "pytest $ZED_CUSTOM_PYTHON_TEST_TARGET".to_owned(),
+                        label: "pytest $ZODE_CUSTOM_PYTHON_TEST_TARGET".to_owned(),
                         command: PYTHON_ACTIVE_TOOLCHAIN_PATH.template_value(),
                         args: vec![
                             "-m".to_owned(),

@@ -198,16 +198,16 @@ members = [
     "crates/workspace",
     "crates/worktree",
     "crates/worktree_benchmarks",
-    "crates/zed",
-    "crates/zed_actions",
-    "crates/zed_credentials_provider",
+    "crates/zode",
+    "crates/zode_actions",
+    "crates/zode_credentials_provider",
     "crates/zode_account",
     "crates/zode_account_ui",
     "crates/zode_env_sync",
     "crates/zode_env_sync_ui",
     "crates/zode_sync",
     "crates/zode_team_vault",
-    "crates/zed_env_vars",
+    "crates/zode_env_vars",
     "crates/zlog",
     "crates/zlog_settings",
     "crates/ztracing",
@@ -230,7 +230,7 @@ members = [
     "tooling/perf",
     "tooling/xtask",
 ]
-default-members = ["crates/zed"]
+default-members = ["crates/zode"]
 
 [workspace.package]
 publish = false
@@ -434,9 +434,9 @@ which_key = { path = "crates/which_key" }
 watch = { path = "crates/watch" }
 workspace = { path = "crates/workspace" }
 worktree = { path = "crates/worktree" }
-zode = { path = "crates/zed" }
-zed_actions = { path = "crates/zed_actions" }
-zed_credentials_provider = { path = "crates/zed_credentials_provider" }
+zode = { path = "crates/zode" }
+zode_actions = { path = "crates/zode_actions" }
+zode_credentials_provider = { path = "crates/zode_credentials_provider" }
 os_auth = { path = "crates/os_auth" }
 zode_account = { path = "crates/zode_account" }
 zode_account_ui = { path = "crates/zode_account_ui" }
@@ -444,7 +444,7 @@ zode_env_sync = { path = "crates/zode_env_sync" }
 zode_env_sync_ui = { path = "crates/zode_env_sync_ui" }
 zode_sync = { path = "crates/zode_sync" }
 zode_team_vault = { path = "crates/zode_team_vault" }
-zed_env_vars = { path = "crates/zed_env_vars" }
+zode_env_vars = { path = "crates/zode_env_vars" }
 zlog = { path = "crates/zlog" }
 zlog_settings = { path = "crates/zlog_settings" }
 ztracing = { path = "crates/ztracing" }
@@ -930,7 +930,7 @@ telemetry_events = { codegen-units = 1 }
 theme_selector = { codegen-units = 1 }
 time_format = { codegen-units = 1 }
 ui_input = { codegen-units = 1 }
-zed_actions = { codegen-units = 1 }
+zode_actions = { codegen-units = 1 }
 
 [profile.release]
 debug = "limited"

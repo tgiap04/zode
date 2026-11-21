@@ -920,14 +920,14 @@ impl ContextProvider for RustContextProvider {
                     "-p".into(),
                     RUST_PACKAGE_TASK_VARIABLE.template_value(),
                 ],
-                cwd: Some("$ZED_DIRNAME".to_owned()),
+                cwd: Some("$ZODE_DIRNAME".to_owned()),
                 ..TaskTemplate::default()
             },
             TaskTemplate {
                 label: "Check all targets (workspace)".into(),
                 command: "cargo".into(),
                 args: vec!["check".into(), "--workspace".into(), "--all-targets".into()],
-                cwd: Some("$ZED_DIRNAME".to_owned()),
+                cwd: Some("$ZODE_DIRNAME".to_owned()),
                 ..TaskTemplate::default()
             },
             TaskTemplate {
@@ -1217,7 +1217,7 @@ async fn human_readable_package_name(
 }
 
 // For providing local `cargo check -p $pkgid` task, we do not need most of the information we have returned.
-// Output example in the root of Zed project:
+// Output example in the root of Zode project:
 // ```sh
 // ❯ cargo pkgid zed
 // path+file:///absolute/path/to/project/zed/crates/zed#0.131.0

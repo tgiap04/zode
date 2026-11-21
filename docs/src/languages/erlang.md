@@ -18,7 +18,7 @@ The Erlang extension offers language server support for `erlang_ls` and `erlang-
 
 `erlang_ls` is enabled by default.
 
-Configure language servers in Settings ({#kb zed::OpenSettings}) under Languages > Erlang, or add to your settings file:
+Configure language servers in Settings ({#kb zode::OpenSettings}) under Languages > Erlang, or add to your settings file:
 
 ```json [settings]
 {

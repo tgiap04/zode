@@ -12,7 +12,7 @@ if (-not $env:GITHUB_REF_NAME) {
 }
 
 # Mirrors script/determine-release-channel. The channel is read off the shape of the
-# tag rather than crates/zed/RELEASE_CHANNEL, and the tag is not required to match the
+# tag rather than crates/zode/RELEASE_CHANNEL, and the tag is not required to match the
 # version in Cargo.toml -- this fork releases straight from a tag.
 #
 #   v0.1.0        -> stable,  not a prerelease
@@ -38,4 +38,4 @@ Write-Output "RELEASE_VERSION=$version" >> $env:GITHUB_ENV
 # installer's whole naming block (app name, display name, icon, mutex, registry key).
 # Leaving it at the checked-in value is how a tagged release ends up installing
 # itself as a dev build.
-$channel | Set-Content -Path "crates/zed/RELEASE_CHANNEL"
+$channel | Set-Content -Path "crates/zode/RELEASE_CHANNEL"
