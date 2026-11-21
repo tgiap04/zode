@@ -40,6 +40,7 @@
 
 # Customization
 
+- [Settings](./configuring-zode.md)
 - [Appearance](./appearance.md)
   - [Themes](./themes.md)
   - [Icon Themes](./icon-themes.md)

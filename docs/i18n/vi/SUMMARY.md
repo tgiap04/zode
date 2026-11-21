@@ -40,6 +40,7 @@
 
 # Tùy biến
 
+- [Cài đặt](./configuring-zode.md)
 - [Giao diện](./appearance.md)
   - [Giao diện (Theme)](./themes.md)
   - [Giao diện biểu tượng](./icon-themes.md)
