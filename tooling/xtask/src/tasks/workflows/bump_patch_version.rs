@@ -45,7 +45,7 @@ fn run_bump_patch_version(branch: &WorkflowInput, prerelease: &WorkflowInput) ->
 
     /// Bumps the patch version and reports the tag to cut.
     ///
-    /// Upstream read `crates/zed/RELEASE_CHANNEL` here and refused to run unless it
+    /// Upstream read `crates/zode/RELEASE_CHANNEL` here and refused to run unless it
     /// said `stable` or `preview`. That gate cannot pass in this fork: the file says
     /// `dev` on every branch, because the channel is derived from the *tag* --
     /// `script/determine-release-channel` reads its shape, and the bundling jobs write

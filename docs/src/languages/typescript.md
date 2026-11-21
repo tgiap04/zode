@@ -19,7 +19,7 @@ TBD: Document the difference between Language servers
 ## Language servers
 
 By default Zode uses [vtsls](https://github.com/yioneko/vtsls) for TypeScript, TSX, and JavaScript files.
-Configure language servers in Settings ({#kb zed::OpenSettings}) under Languages > TypeScript/TSX/JavaScript, or add to your settings file:
+Configure language servers in Settings ({#kb zode::OpenSettings}) under Languages > TypeScript/TSX/JavaScript, or add to your settings file:
 
 ```json [settings]
 {
@@ -37,7 +37,7 @@ Configure language servers in Settings ({#kb zed::OpenSettings}) under Languages
 }
 ```
 
-Prettier will also be used for TypeScript files by default. To disable this, configure in Settings ({#kb zed::OpenSettings}) under Languages > TypeScript, or add to your settings file:
+Prettier will also be used for TypeScript files by default. To disable this, configure in Settings ({#kb zode::OpenSettings}) under Languages > TypeScript, or add to your settings file:
 
 ```json [settings]
 {
@@ -205,7 +205,7 @@ Run {#action debugger::Start} ({#kb debugger::Start}) to see a contextual list o
 
 As for all languages, configurations from `.vscode/launch.json` are also available for debugging in Zode.
 
-If your use-case isn't covered by any of these, you can take full control by adding debug configurations to `.zed/debug.json`. See below for example configurations.
+If your use-case isn't covered by any of these, you can take full control by adding debug configurations to `.zode/debug.json`. See below for example configurations.
 
 ### Configuring JavaScript debug tasks
 
@@ -225,8 +225,8 @@ Given an externally-ran web server (e.g., with `npx serve` or `npx live-server`)
     "type": "chrome",
     "request": "launch",
     "url": "http://localhost:5500",
-    "program": "$ZED_FILE",
-    "webRoot": "${ZED_WORKTREE_ROOT}",
+    "program": "$ZODE_FILE",
+    "webRoot": "${ZODE_WORKTREE_ROOT}",
     "build": {
       "command": "npx",
       "args": ["tsc"]

@@ -74,8 +74,8 @@ impl TextSystem {
             font_runs_pool: Mutex::default(),
             fallback_font_stack: smallvec![
                 // TODO: Remove this when Linux have implemented setting fallbacks.
-                font(".ZedMono"),
-                font(".ZedSans"),
+                font(".ZodeMono"),
+                font(".ZodeSans"),
                 font("Helvetica"),
                 font("Segoe UI"),     // Windows
                 font("Ubuntu"),       // Gnome (Ubuntu)
@@ -1158,21 +1158,13 @@ impl FontMetrics {
 /// Maps well-known virtual font names to their concrete equivalents.
 #[allow(unused)]
 pub fn font_name_with_fallbacks<'a>(name: &'a str, system: &'a str) -> &'a str {
-    // Note: the "Zed Plex" fonts were deprecated as we are not allowed to use "Plex"
-    // in a derived font name. They are essentially indistinguishable from IBM Plex/Lilex,
-    // and so retained here for backward compatibility.
-    //
-    // `.ZedSans` and "Zed Plex Sans" no longer resolve to the same family. The dotted
-    // name means "whatever sans this build ships with" -- `default.json` has always
-    // said it "may change in the future", which is why the concrete family was never
-    // written there -- and it now ships Inter. "Zed Plex Sans" was kept only because
-    // it was indistinguishable from IBM Plex; Inter is not, so that name keeps
-    // pointing at the font it was named for.
+    // `.ZodeSans` means "whatever sans this build ships with" -- `default.json` says it
+    // "may change in the future", which is why the concrete family is not written
+    // there -- and it currently ships Inter.
     match name {
         ".SystemUIFont" => system,
-        ".ZedSans" => "Inter",
-        "Zed Plex Sans" => "IBM Plex Sans",
-        ".ZedMono" | "Zed Plex Mono" => "Lilex",
+        ".ZodeSans" => "Inter",
+        ".ZodeMono" => "Lilex",
         _ => name,
     }
 }
@@ -1189,9 +1181,8 @@ pub fn font_name_with_fallbacks_shared<'a>(
     // below is what actually holds them together.
     match name.as_str() {
         ".SystemUIFont" => system,
-        ".ZedSans" => const { &SharedString::new_static("Inter") },
-        "Zed Plex Sans" => const { &SharedString::new_static("IBM Plex Sans") },
-        ".ZedMono" | "Zed Plex Mono" => const { &SharedString::new_static("Lilex") },
+        ".ZodeSans" => const { &SharedString::new_static("Inter") },
+        ".ZodeMono" => const { &SharedString::new_static("Lilex") },
         _ => name,
     }
 }
@@ -1202,12 +1193,10 @@ mod font_alias_tests {
 
     /// Every virtual name the two functions know about, plus a plain family name
     /// that must pass straight through untouched.
-    const NAMES: [&str; 7] = [
+    const NAMES: [&str; 5] = [
         ".SystemUIFont",
-        ".ZedSans",
-        "Zed Plex Sans",
-        ".ZedMono",
-        "Zed Plex Mono",
+        ".ZodeSans",
+        ".ZodeMono",
         "Inter",
         "Helvetica",
     ];
@@ -1228,21 +1217,26 @@ mod font_alias_tests {
         }
     }
 
-    /// `.ZedSans` means "the sans this build ships with" and now ships Inter.
-    /// "Zed Plex Sans" was retained only because it was indistinguishable from
-    /// IBM Plex, so it keeps pointing at the font it is named for -- the two are
-    /// deliberately no longer the same family.
+    /// `.ZodeSans` means "the sans this build ships with" and now ships Inter;
+    /// `.ZodeMono` the bundled monospace. Upstream's "Zed Plex" names are not
+    /// aliases any more -- the settings migration rewrites them to the concrete
+    /// families -- so here they are ordinary names that pass straight through.
     #[test]
-    fn zed_sans_ships_inter_while_the_plex_compat_name_stays_plex() {
-        assert_eq!(font_name_with_fallbacks(".ZedSans", "System Font"), "Inter");
+    fn zode_virtual_names_resolve_and_zed_plex_names_pass_through() {
         assert_eq!(
-            font_name_with_fallbacks("Zed Plex Sans", "System Font"),
-            "IBM Plex Sans"
+            font_name_with_fallbacks(".ZodeSans", "System Font"),
+            "Inter"
         );
-        assert_eq!(font_name_with_fallbacks(".ZedMono", "System Font"), "Lilex");
+        assert_eq!(
+            font_name_with_fallbacks(".ZodeMono", "System Font"),
+            "Lilex"
+        );
         assert_eq!(
             font_name_with_fallbacks(".SystemUIFont", "System Font"),
             "System Font"
         );
+        for name in ["Zed Plex Sans", "Zed Plex Mono", ".ZedMono", ".ZedSans"] {
+            assert_eq!(font_name_with_fallbacks(name, "System Font"), name);
+        }
     }
 }

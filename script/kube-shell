@@ -5,7 +5,7 @@ if [[ $# -ne 1 ]]; then
   exit 1
 fi
 
-export ZED_KUBE_NAMESPACE=$1
+export ZODE_KUBE_NAMESPACE=$1
 
-pod=$(kubectl --namespace=${ZED_KUBE_NAMESPACE} get pods --selector=app=zed --output=jsonpath='{.items[*].metadata.name}')
-exec kubectl --namespace $ZED_KUBE_NAMESPACE exec --tty --stdin $pod -- /bin/bash
+pod=$(kubectl --namespace=${ZODE_KUBE_NAMESPACE} get pods --selector=app=zed --output=jsonpath='{.items[*].metadata.name}')
+exec kubectl --namespace $ZODE_KUBE_NAMESPACE exec --tty --stdin $pod -- /bin/bash

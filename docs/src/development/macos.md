@@ -7,7 +7,7 @@ description: "Guide to building zed for macos for Zode development."
 
 ## Repository
 
-Clone the [Zode repository](https://github.com/zed-industries/zed).
+Clone the [Zode repository](https://github.com/tgiap04/zode).
 
 ## Dependencies
 

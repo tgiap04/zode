@@ -1,4 +1,4 @@
-//! Provides constructs for the Zed app version and release channel.
+//! Provides constructs for the Zode app version and release channel.
 
 #![deny(missing_docs)]
 
@@ -10,10 +10,15 @@ use semver::Version;
 /// stable | dev | nightly | preview
 pub static RELEASE_CHANNEL_NAME: LazyLock<String> = LazyLock::new(|| {
     if cfg!(debug_assertions) {
-        env::var("ZED_RELEASE_CHANNEL")
-            .unwrap_or_else(|_| include_str!("../../zed/RELEASE_CHANNEL").trim().to_string())
+        env::var("ZODE_RELEASE_CHANNEL").unwrap_or_else(|_| {
+            include_str!("../../zode/RELEASE_CHANNEL")
+                .trim()
+                .to_string()
+        })
     } else {
-        include_str!("../../zed/RELEASE_CHANNEL").trim().to_string()
+        include_str!("../../zode/RELEASE_CHANNEL")
+            .trim()
+            .to_string()
     }
 });
 
@@ -43,7 +48,7 @@ pub fn app_identifier() -> &'static str {
     }
 }
 
-/// The Git commit SHA that Zed was built at.
+/// The Git commit SHA that Zode was built at.
 #[derive(Clone, Eq, Debug, PartialEq)]
 pub struct AppCommitSha(String);
 
@@ -83,7 +88,7 @@ struct GlobalAppVersion(Version);
 
 impl Global for GlobalAppVersion {}
 
-/// The version of Zed.
+/// The version of Zode.
 pub struct AppVersion;
 
 impl AppVersion {
@@ -93,8 +98,8 @@ impl AppVersion {
         build_id: Option<&str>,
         commit_sha: Option<AppCommitSha>,
     ) -> Version {
-        let mut version: Version = if let Ok(from_env) = env::var("ZED_APP_VERSION") {
-            from_env.parse().expect("invalid ZED_APP_VERSION")
+        let mut version: Version = if let Ok(from_env) = env::var("ZODE_APP_VERSION") {
+            from_env.parse().expect("invalid ZODE_APP_VERSION")
         } else {
             pkg_version.parse().expect("invalid version in Cargo.toml")
         };
@@ -143,12 +148,12 @@ fn without_build_metadata(mut version: Version) -> Version {
     version
 }
 
-/// A Zed release channel.
+/// A Zode release channel.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub enum ReleaseChannel {
     /// The development release channel.
     ///
-    /// Used for local debug builds of Zed.
+    /// Used for local debug builds of Zode.
     #[default]
     Dev,
 
@@ -225,7 +230,7 @@ impl ReleaseChannel {
 
     /// Returns the application ID that's used by Wayland as application ID
     /// and WM_CLASS on X11.
-    /// This also has to match the bundle identifier for Zed on macOS.
+    /// This also has to match the bundle identifier for Zode on macOS.
     pub fn app_id(&self) -> &'static str {
         match self {
             ReleaseChannel::Dev => "io.github.tgiap04.zode.dev",

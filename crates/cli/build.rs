@@ -2,7 +2,7 @@
 use std::process::Command;
 
 fn main() {
-    if std::env::var("ZED_UPDATE_EXPLANATION").is_ok() {
+    if std::env::var("ZODE_UPDATE_EXPLANATION").is_ok() {
         println!(r#"cargo:rustc-cfg=feature="no-bundled-uninstall""#);
     }
 
@@ -13,7 +13,7 @@ fn main() {
     // `main.rs` reads RELEASE_VERSION through `option_env!`, which cargo does not track
     // as a dependency. Without this, a warm build cache keeps whatever version was baked
     // in first -- so a retagged build reports the older number to anyone running
-    // `zode --version`. Same reasoning as crates/zed/build.rs.
+    // `zode --version`. Same reasoning as crates/zode/build.rs.
     println!("cargo:rerun-if-env-changed=RELEASE_VERSION");
 
     // Populate git sha environment variable if git is available
@@ -27,9 +27,9 @@ fn main() {
         let git_sha = String::from_utf8_lossy(&output.stdout);
         let git_sha = git_sha.trim();
 
-        println!("cargo:rustc-env=ZED_COMMIT_SHA={git_sha}");
+        println!("cargo:rustc-env=ZODE_COMMIT_SHA={git_sha}");
     }
     if let Some(build_identifier) = option_env!("GITHUB_RUN_NUMBER") {
-        println!("cargo:rustc-env=ZED_BUILD_ID={build_identifier}");
+        println!("cargo:rustc-env=ZODE_BUILD_ID={build_identifier}");
     }
 }

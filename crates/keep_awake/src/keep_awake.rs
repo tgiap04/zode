@@ -179,7 +179,7 @@ pub enum Status {
     Disabled,
     /// Everything says yes and the request was still refused.
     ///
-    /// Not the same as "this platform has no implementation" -- `crates/zed` asks
+    /// Not the same as "this platform has no implementation" -- `crates/zode` asks
     /// `App::can_keep_display_awake` first and does not build this entity at all
     /// where the answer is no, so a platform without an actuator has no
     /// indicator rather than a dimmed one. What is left here is a platform that

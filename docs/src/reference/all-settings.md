@@ -312,11 +312,11 @@ Note that a save will be triggered when an unsaved tab is closed, even if this i
 
 - Description: The name of a font to use for rendering text in the editor.
 - Setting: `buffer_font_family`
-- Default: `.ZedMono`. This currently aliases to [Lilex](https://lilex.myrt.co).
+- Default: `.ZodeMono`. This currently aliases to [Lilex](https://lilex.myrt.co).
 
 **Options**
 
-The name of any font family installed on the user's system, or `".ZedMono"`.
+The name of any font family installed on the user's system, or `".ZodeMono"`.
 
 ## Buffer Font Features
 
@@ -1999,7 +1999,7 @@ Note, specifying `file_scan_exclusions` in settings.json will override the defau
 {
   "file_types": {
     "JSONC": [
-      "**/.zed/**/*.json",
+      "**/.zode/**/*.json",
       "**/zed/**/*.json",
       "**/Zode/**/*.json",
       "**/.vscode/**/*.json"
@@ -2675,10 +2675,10 @@ At this point, the server may or may not return hints depending on its implement
 
 The following languages have inlay hints preconfigured by Zode:
 
-- [Go](https://docs.zed.dev/languages/go)
-- [Rust](https://docs.zed.dev/languages/rust)
-- [Svelte](https://docs.zed.dev/languages/svelte)
-- [TypeScript](https://docs.zed.dev/languages/typescript)
+- [Go](https://zodekit.com/docs/languages/go)
+- [Rust](https://zodekit.com/docs/languages/rust)
+- [Svelte](https://zodekit.com/docs/languages/svelte)
+- [TypeScript](https://zodekit.com/docs/languages/typescript)
 
 Use the `lsp` section for the server configuration. Examples are provided in the corresponding language documentation.
 
@@ -5338,7 +5338,7 @@ The path of an image file on this machine; `~/` is expanded. The image is read f
 
 **Options**
 
-The name of any font family installed on the system, `".ZedSans"` to follow whichever sans Zode ships with rather than naming it, or `".SystemUIFont"` to use the system's default UI font (on macOS and Windows).
+The name of any font family installed on the system, `".ZodeSans"` to follow whichever sans Zode ships with rather than naming it, or `".SystemUIFont"` to use the system's default UI font (on macOS and Windows).
 
 ## UI Font Features
 
@@ -5471,7 +5471,7 @@ To preview and enable a settings profile, open the command palette via {#kb comm
   "soft_wrap": "none",
 
   "buffer_font_size": 18,
-  "buffer_font_family": ".ZedMono",
+  "buffer_font_family": ".ZodeMono",
 
   "autosave": "on_focus_change",
   "format_on_save": "off",

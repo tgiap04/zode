@@ -27,7 +27,7 @@ mod tokens;
 use std::sync::LazyLock;
 
 use gpui::{App, AppContext as _, Entity};
-use zed_env_vars::{EnvVar, env_var};
+use zode_env_vars::{EnvVar, env_var};
 
 pub use account::{Account, AccountStatus, AccountStatusChanged, AccountUser, ApiCredential};
 pub use device_flow::DeviceFlowError;
@@ -43,7 +43,7 @@ pub use tokens::StoredTokens;
 /// editor at a local backend is a developer action, not a user preference, and
 /// a settings key would have to be threaded through the generated
 /// `settings_content` schema for something no user should ever set. Same shape
-/// as `ZED_DEVELOPMENT_USE_KEYCHAIN` in `zed_credentials_provider`.
+/// as `ZODE_DEVELOPMENT_USE_KEYCHAIN` in `zode_credentials_provider`.
 static ZODE_API_URL: LazyLock<EnvVar> = env_var!("ZODE_API_URL");
 
 /// Where the browser app lives, when it is not simply the API host without
@@ -52,15 +52,15 @@ static ZODE_WEB_URL: LazyLock<EnvVar> = env_var!("ZODE_WEB_URL");
 
 /// The API's own host, not the marketing site.
 ///
-/// The browser app is served from `zodekit.site` and the API from
-/// `api.zodekit.site`; a page can reach the second through CORS, but the IDE
+/// The browser app is served from `zodekit.com` and the API from
+/// `api.zodekit.com`; a page can reach the second through CORS, but the IDE
 /// is not a browser and has no reason to depend on whatever the site host
 /// proxies. Going straight at the API is both simpler and one fewer thing that
 /// can be misconfigured out from under a released binary.
-const DEFAULT_API_URL: &str = "https://api.zodekit.site/api";
+const DEFAULT_API_URL: &str = "https://api.zodekit.com/api";
 
 /// The browser app's origin — the marketing site and the account pages.
-const DEFAULT_WEB_URL: &str = "https://zodekit.site";
+const DEFAULT_WEB_URL: &str = "https://zodekit.com";
 
 pub fn api_url() -> String {
     ZODE_API_URL
@@ -74,7 +74,7 @@ pub fn api_url() -> String {
 ///
 /// This used to be derived by stripping `/api` off [`api_url`], which was
 /// correct only while the API answered on the site's own host. Pointing the
-/// IDE at `api.zodekit.site` quietly turned "Account on the Web" into a link
+/// IDE at `api.zodekit.com` quietly turned "Account on the Web" into a link
 /// to the API — a host that serves no pages at all.
 ///
 /// The order below matters. When `ZODE_API_URL` is set but `ZODE_WEB_URL` is
@@ -142,8 +142,8 @@ mod tests {
     #[test]
     fn production_drops_both_the_path_and_the_api_subdomain() {
         assert_eq!(
-            derive_web_url("https://api.zodekit.site/api"),
-            "https://zodekit.site"
+            derive_web_url("https://api.zodekit.com/api"),
+            "https://zodekit.com"
         );
     }
 
@@ -174,8 +174,8 @@ mod tests {
     #[test]
     fn a_trailing_slash_does_not_change_the_answer() {
         assert_eq!(
-            derive_web_url("https://api.zodekit.site/api/"),
-            "https://zodekit.site"
+            derive_web_url("https://api.zodekit.com/api/"),
+            "https://zodekit.com"
         );
     }
 
@@ -183,20 +183,20 @@ mod tests {
     fn plan_pages_sit_on_the_web_origin_whatever_its_trailing_slash() {
         use super::{BILLING_PATH, PRICING_PATH, web_page};
         assert_eq!(
-            web_page("https://zodekit.site", PRICING_PATH),
-            "https://zodekit.site/pricing"
+            web_page("https://zodekit.com", PRICING_PATH),
+            "https://zodekit.com/pricing"
         );
         assert_eq!(
-            web_page("https://zodekit.site/", BILLING_PATH),
-            "https://zodekit.site/account/billing"
+            web_page("https://zodekit.com/", BILLING_PATH),
+            "https://zodekit.com/account/billing"
         );
     }
 
     #[test]
     fn a_base_without_the_api_path_still_works() {
         assert_eq!(
-            derive_web_url("https://api.zodekit.site"),
-            "https://zodekit.site"
+            derive_web_url("https://api.zodekit.com"),
+            "https://zodekit.com"
         );
     }
 }
@@ -210,7 +210,7 @@ mod tests {
 /// than reaching for the global and having to cope with it being absent.
 pub fn init(cx: &mut App) -> Entity<Account> {
     let http_client = cx.http_client();
-    let credentials = zed_credentials_provider::global(cx);
+    let credentials = zode_credentials_provider::global(cx);
 
     let account = cx.new(|cx| {
         let mut account = Account::new(http_client, credentials, api_url());

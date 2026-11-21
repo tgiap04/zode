@@ -436,7 +436,7 @@ impl BranchPanel {
                     &workspace,
                     session,
                     agent_sessions::Fork::Continue,
-                    zed_actions::agent::PermissionPrompts::SkipOnce,
+                    zode_actions::agent::PermissionPrompts::SkipOnce,
                     window,
                     cx,
                 );

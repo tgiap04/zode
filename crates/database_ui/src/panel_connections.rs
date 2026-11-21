@@ -162,7 +162,7 @@ impl DatabasePanel {
         if let Some(node) = self.connections.get_mut(index) {
             node.state = NodeState::Connecting;
         }
-        let credentials = zed_credentials_provider::global(cx);
+        let credentials = zode_credentials_provider::global(cx);
         cx.notify();
 
         let secret = read_secret(credentials, config.credential_key().to_string(), cx);

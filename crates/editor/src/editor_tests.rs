@@ -22784,7 +22784,7 @@ struct Row10;"#};
         &mut cx,
     );
 
-    // Deletion hunks are ephemeral, so it's impossible to place the caret into them — Zed triggers reverts for lines, adjacent to carets and selections.
+    // Deletion hunks are ephemeral, so it's impossible to place the caret into them — Zode triggers reverts for lines, adjacent to carets and selections.
     assert_hunk_revert(
         indoc! {r#"struct Row;
                    ˇstruct Row2;
@@ -34353,7 +34353,7 @@ async fn test_local_worktree_trust(cx: &mut TestAppContext) {
     fs.insert_tree(
         path!("/project"),
         json!({
-            ".zed": {
+            ".zode": {
                 "settings.json": r#"{"languages":{"Rust":{"language_servers":["override-rust-analyzer"]}}}"#
             },
             "main.rs": "fn main() {}"
@@ -34450,7 +34450,7 @@ async fn test_local_worktree_trust(cx: &mut TestAppContext) {
             )
             .language_servers,
             ["...".to_string()],
-            "local .zed/settings.json must not apply before trust approval"
+            "local .zode/settings.json must not apply before trust approval"
         )
     });
 
@@ -34483,7 +34483,7 @@ async fn test_local_worktree_trust(cx: &mut TestAppContext) {
             )
             .language_servers,
             ["override-rust-analyzer".to_string()],
-            "local .zed/settings.json should apply after trust approval"
+            "local .zode/settings.json should apply after trust approval"
         )
     });
     let _fake_language_server = fake_language_server.await.unwrap();

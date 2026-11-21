@@ -462,7 +462,7 @@ async fn test_remote_settings(cx: &mut TestAppContext, server_cx: &mut TestAppCo
     });
 
     fs.insert_tree(
-        "/code/project1/.zed",
+        "/code/project1/.zode",
         json!({
             "settings.json": r#"
                   {
@@ -549,7 +549,7 @@ async fn test_remote_lsp(cx: &mut TestAppContext, server_cx: &mut TestAppContext
     let (project, headless) = init_test(&fs, cx, server_cx).await;
 
     fs.insert_tree(
-        path!("/code/project1/.zed"),
+        path!("/code/project1/.zode"),
         json!({
             "settings.json": r#"
           {
@@ -788,7 +788,7 @@ async fn test_remote_cancel_language_server_work(
     let (project, headless) = init_test(&fs, cx, server_cx).await;
 
     fs.insert_tree(
-        path!("/code/project1/.zed"),
+        path!("/code/project1/.zode"),
         json!({
             "settings.json": r#"
           {
@@ -2579,7 +2579,7 @@ async fn test_hibernate_ignores_stale_zero_diagnostic_summary_from_host(
     // to run ("no language server download dir defined") -- matching
     // `test_remote_cancel_language_server_work`'s setup exactly.
     fs.insert_tree(
-        path!("/code/project1/.zed"),
+        path!("/code/project1/.zode"),
         json!({
             "settings.json": r#"
           {

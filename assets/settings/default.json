@@ -1,5 +1,5 @@
 {
-  "$schema": "zed://schemas/settings",
+  "$schema": "zode://schemas/settings",
   // The name of the Zode theme to use for the UI.
   //
   // `mode` is one of:
@@ -34,8 +34,8 @@
   "buffer_font_family": "JetBrains Mono",
   // Set the buffer text's font fallbacks, this will be merged with
   // the platform's default fallbacks.
-  // ".ZedMono" aliases the bundled Lilex and covers glyphs JetBrains Mono lacks.
-  "buffer_font_fallbacks": [".ZedMono"],
+  // ".ZodeMono" aliases the bundled Lilex and covers glyphs JetBrains Mono lacks.
+  "buffer_font_fallbacks": [".ZodeMono"],
   // The OpenType features to enable for text in the editor.
   "buffer_font_features": {
     // Disable ligatures:
@@ -58,7 +58,7 @@
   "buffer_line_height": "comfortable",
   // The name of a font to use for rendering text in the UI
   // You can set this to ".SystemUIFont" to use the system font
-  // ".ZedSans" also resolves to whatever sans this build ships with,
+  // ".ZodeSans" also resolves to whatever sans this build ships with,
   // which is the same font named here
   "ui_font_family": "Inter",
   // Set the UI's font fallbacks, this will be merged with the platform's
@@ -1507,7 +1507,7 @@
       "**/*.crt",
       "**/.dev.vars",
       "**/secrets.yml",
-      "**/.zed/settings.json", // zed project settings
+      "**/.zode/settings.json", // zed project settings
       "/**/zed/settings.json", // zed user settings
       "/**/zed/keymap.json",
     ],
@@ -1788,7 +1788,7 @@
     // Set the terminal's font fallbacks. If this option is not included,
     // the terminal will default to matching the buffer's font fallbacks.
     // This will be merged with the platform's default font fallbacks
-    "font_fallbacks": [".ZedMono"],
+    "font_fallbacks": [".ZodeMono"],
     // The weight of the editor font in standard CSS units from 100 to 900.
     "font_weight": 400,
     // Sets the maximum number of lines in the terminal's scrollback buffer.
@@ -1893,9 +1893,9 @@
   //
   "file_types": {
     "JSONC": [
-      "**/.zed/*.json",
+      "**/.zode/*.json",
       "**/.vscode/**/*.json",
-      "**/{zed,Zed}/{settings,keymap,tasks,debug}.json",
+      "**/{zode,Zode}/{settings,keymap,tasks,debug}.json",
       "tsconfig*.json",
     ],
     "Markdown": [".rules", ".cursorrules", ".windsurfrules", ".clinerules"],
@@ -2315,7 +2315,7 @@
     //   }
     // ]
     //
-    // Default rules are viewable via the "zed: show default semantic token rules" action.
+    // Default rules are viewable via the "zode: show default semantic token rules" action.
     "semantic_token_rules": [],
   },
   // Jupyter settings
@@ -2371,7 +2371,7 @@
     "delay_ms": 1000,
   },
   // The server to connect to. If the environment variable
-  // ZED_SERVER_URL is set, it will override this setting.
+  // ZODE_SERVER_URL is set, it will override this setting.
   "server_url": "https://zed.dev",
   // Settings overrides to use when using Zode Preview.
   // Mostly useful for developers who are managing multiple instances of Zode.

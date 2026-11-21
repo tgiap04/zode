@@ -387,7 +387,7 @@ impl NeovimConnection {
 
         let mut selections = Vec::new();
         // Vim uses the index of the first and last character in the selection
-        // Zed uses the index of the positions between the characters, so we need
+        // Zode uses the index of the positions between the characters, so we need
         // to add one to the end in visual mode.
         match mode {
             Mode::VisualBlock if selection_row != cursor_row => {

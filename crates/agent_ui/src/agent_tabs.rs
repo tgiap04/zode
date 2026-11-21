@@ -322,7 +322,7 @@ mod tests {
     use fs::FakeFs;
     use gpui::{AppContext as _, TestAppContext};
     use project::Project;
-    use zed_actions::agent::AgentViewMode;
+    use zode_actions::agent::AgentViewMode;
 
     fn tab(
         agent: &str,

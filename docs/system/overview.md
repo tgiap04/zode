@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-Zode is a native, GPU-accelerated code editor written in Rust, built on the project's own in-house UI framework, GPUI (`crates/gpui`). The workspace is a single Cargo monorepo of 180 workspace-member crate paths under `crates/` (179 top-level crate directories plus one nested derive-macro crate, `crates/refineable/derive_refineable`), plus 4 in-tree extension crates under `extensions/` (glsl, html, proto, test-extension — built against `extension_api`, loaded dynamically as WASM at runtime, not statically linked) and 3 dev-tooling crates under `tooling/` (compliance, perf, xtask). The workspace compiles to one primary binary (`crates/zed`, declared as `default-members`) that runs on macOS, Linux, and Windows, with an experimental WASM/web rendering backend (`crates/gpui_web`).
+Zode is a native, GPU-accelerated code editor written in Rust, built on the project's own in-house UI framework, GPUI (`crates/gpui`). The workspace is a single Cargo monorepo of 180 workspace-member crate paths under `crates/` (179 top-level crate directories plus one nested derive-macro crate, `crates/refineable/derive_refineable`), plus 4 in-tree extension crates under `extensions/` (glsl, html, proto, test-extension — built against `extension_api`, loaded dynamically as WASM at runtime, not statically linked) and 3 dev-tooling crates under `tooling/` (compliance, perf, xtask). The workspace compiles to one primary binary (`crates/zode`, declared as `default-members`) that runs on macOS, Linux, and Windows, with an experimental WASM/web rendering backend (`crates/gpui_web`).
 
 Architecturally the system is organized as concentric layers rather than a client/server split: GPUI (rendering, windowing, entity/event model, async executors/`Scheduler`) underpins an editor-core layer (`text`/`rope`/`sum_tree` for buffer storage, `language`/`language_core` for syntax/diagnostics-aware buffers, `multi_buffer`, `editor`), which is coordinated by a project layer (`project`, `worktree`, `workspace`, `fs`, `db`) that wires in Language Server Protocol (`lsp`, `languages`) and Debug Adapter Protocol (`dap`, `dap_adapters`, `debugger_ui`) support, a WASM extension host (`extension_host`), settings/theme/keymap infrastructure (`settings`, `settings_content`, `theme`, migration engine in `migrator`), and a large first-party UI component library (`ui`, 106 files). There is **no** AI/agent subsystem and **no** real-time collaboration server in this fork — see `architecture.md`'s correction note (verified: no `agent`/`collab`/`livekit`/`language_model` crates exist under `crates/`; only a single unused `agent-client-protocol` version pin remains in `[workspace.dependencies]` with zero consumers).
 
@@ -23,7 +23,7 @@ For per-subsystem crate detail and the full background-logic inventory, see [sco
 ```mermaid
 graph TB
     subgraph "Application Shell"
-        ZED[crates/zed — binary entry point]
+        ZED[crates/zode — binary entry point]
         WS[workspace — panes/docks/panels, multi-workspace + hibernation]
         SIDEBAR[sidebar — always-visible project rail]
         TITLEBAR[title_bar — window chrome + search bar]
@@ -154,7 +154,7 @@ This is the only "client/server" boundary in the system, and it is a single-user
 
 ## Security Overview
 
-- **Authentication**: SSH remote development uses `crates/askpass` (including `encrypted_password.rs`) for interactive/non-interactive SSH credential prompts; `crates/client` handles telemetry/update-check auth via OS-keychain-backed credential storage (`crates/credentials_provider`, `crates/zed_credentials_provider`).
+- **Authentication**: SSH remote development uses `crates/askpass` (including `encrypted_password.rs`) for interactive/non-interactive SSH credential prompts; `crates/client` handles telemetry/update-check auth via OS-keychain-backed credential storage (`crates/credentials_provider`, `crates/zode_credentials_provider`).
 - **Authorization**: No traditional RBAC/route-guard system exists (single local user, no multi-tenant surface). What this codebase calls "authorization" reduces to capability/trust gates: the extension WASM sandbox's per-extension capability allowlist, the buffer `Capability` (ReadWrite/Read/ReadOnly) edit gate, and a local worktree-trust boundary (`crates/project/src/trusted_worktrees.rs`) gating whether a project may spawn LSP/git tooling. See `permissions-matrix.md` for the full PERM### catalog.
 - **Data Encryption**: Network transport relies on `crates/http_client_tls`/`reqwest_client` for TLS on outbound HTTP (extension downloads, update checks, telemetry); no application-level at-rest encryption layer was identified (local SQLite state via `crates/db`/`sqlez` is unencrypted on disk, consistent with a local developer tool).
 - **API Security**: N/A — no HTTP API surface exposed by this application; the only wire protocol (`rpc`/`proto`) is the SSH-tunneled remote-development transport described above.

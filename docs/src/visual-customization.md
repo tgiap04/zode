@@ -5,13 +5,13 @@ description: "Various aspects of Zode's visual layout can be configured in the S
 
 # Visual Customization
 
-Various aspects of Zode's visual layout can be configured in the Settings Editor ({#kb zed::OpenSettings}) or in your settings file ({#kb zed::OpenSettingsFile}).
+Various aspects of Zode's visual layout can be configured in the Settings Editor ({#kb zode::OpenSettings}) or in your settings file ({#kb zode::OpenSettingsFile}).
 
 See [All Settings](./reference/all-settings.md) for additional information and other non-visual settings.
 
 ## Themes
 
-You can install many [color themes](./themes.md) in form of extensions by running {#action zed::Extensions} from the command palette. [Icon themes](./icon-themes.md) are a different story: Zode's file and folder icons are fixed to the Material Icon Theme and cannot be changed, so there is nothing to install there.
+You can install many [color themes](./themes.md) in form of extensions by running {#action zode::Extensions} from the command palette. [Icon themes](./icon-themes.md) are a different story: Zode's file and folder icons are fixed to the Material Icon Theme and cannot be changed, so there is nothing to install there.
 
 You can preview/choose amongst your installed color themes with {#action theme_selector::Toggle} ({#kb theme_selector::Toggle}), which modifies the following setting:
 
@@ -40,14 +40,14 @@ The `icon_theme` setting still exists — it defaults to `"Material Icon Theme"`
 
 ```json [settings]
   // UI Font. Zode's default is the bundled "Inter". Use ".SystemUIFont" for the
-  // default system font (SF Pro on macOS), or ".ZedSans" to follow whichever
+  // default system font (SF Pro on macOS), or ".ZodeSans" to follow whichever
   // sans Zode ships with rather than naming it
   "ui_font_family": ".SystemUIFont",
   "ui_font_weight": 400, // Font weight in standard CSS units from 100 to 900.
   "ui_font_size": 16,
 
   // Buffer Font - Used by editor buffers
-  // use ".ZedMono" for the bundled default monospace (currently Lilex)
+  // use ".ZodeMono" for the bundled default monospace (currently Lilex)
   "buffer_font_family": "Berkeley Mono", // Font name for editor buffers
   "buffer_font_size": 15,                 // Font size for editor buffers
   "buffer_font_weight": 400,              // Font weight in CSS units [100-900]

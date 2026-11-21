@@ -5,7 +5,7 @@ description: "Guide to release notes for Zode development."
 
 # Release Notes
 
-Whenever you open a pull request, the body is automatically populated based on this [pull request template](https://github.com/zed-industries/zed/blob/main/.github/pull_request_template.md).
+Whenever you open a pull request, the body is automatically populated based on this [pull request template](https://github.com/tgiap04/zode/blob/develop/.github/pull_request_template.md).
 
 ```md
 ...
@@ -15,7 +15,7 @@ Release Notes:
 - N/A _or_ Added/Fixed/Improved ...
 ```
 
-On Wednesdays, we run [`get-preview-channel-changes`](https://github.com/zed-industries/zed/blob/main/script/get-preview-channel-changes), which collects `Release Notes` lines from pull requests landing in preview, as described in the [Release](https://zed.dev/docs/development/release-notes) docs.
+On Wednesdays, we run [`get-preview-channel-changes`](https://github.com/zed-industries/zed/blob/main/script/get-preview-channel-changes), which collects `Release Notes` lines from pull requests landing in preview, as described in the [Release](https://zodekit.com/docs/development/release-notes) docs.
 
 The script outputs everything below the `Release Notes` line, including metadata such as the pull request author (if they are not a Zode team member) and a link to the pull request.
 If you use `N/A`, the script skips your pull request entirely.

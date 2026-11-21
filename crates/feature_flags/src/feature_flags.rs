@@ -17,8 +17,8 @@ pub use flags::*;
 pub use settings::{FeatureFlagsSettings, generate_feature_flags_schema};
 pub use store::*;
 
-pub static ZED_DISABLE_STAFF: LazyLock<bool> = LazyLock::new(|| {
-    std::env::var("ZED_DISABLE_STAFF").is_ok_and(|value| !value.is_empty() && value != "0")
+pub static ZODE_DISABLE_STAFF: LazyLock<bool> = LazyLock::new(|| {
+    std::env::var("ZODE_DISABLE_STAFF").is_ok_and(|value| !value.is_empty() && value != "0")
 });
 
 impl Global for FeatureFlagStore {}
@@ -109,7 +109,7 @@ impl FeatureFlagValue for PresenceFlag {
 /// a generic parameter when called [`FeatureFlagAppExt::has_flag`].
 ///
 /// Feature flags are enabled for members of Zed staff by default. To disable this behavior
-/// so you can test flags being disabled, set ZED_DISABLE_STAFF=1 in your environment,
+/// so you can test flags being disabled, set ZODE_DISABLE_STAFF=1 in your environment,
 /// which will force Zed to treat the current user as non-staff.
 pub trait FeatureFlag {
     const NAME: &'static str;

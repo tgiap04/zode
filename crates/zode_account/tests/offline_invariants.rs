@@ -234,7 +234,7 @@ async fn a_machine_that_has_never_signed_in_issues_no_request(cx: &mut TestAppCo
     let account = cx.update(|cx| {
         cx.new(|cx| {
             let mut account =
-                Account::new(http_client, credentials, "https://zodekit.site/api".into());
+                Account::new(http_client, credentials, "https://zodekit.com/api".into());
             account.restore(cx).detach();
             account
         })
@@ -265,7 +265,7 @@ async fn an_idle_signed_out_account_never_wakes_up(cx: &mut TestAppContext) {
     let _account = cx.update(|cx| {
         cx.new(|cx| {
             let mut account =
-                Account::new(http_client, credentials, "https://zodekit.site/api".into());
+                Account::new(http_client, credentials, "https://zodekit.com/api".into());
             account.restore(cx).detach();
             account
         })
@@ -296,8 +296,8 @@ async fn cancelling_a_sign_in_stops_the_polling(cx: &mut TestAppContext) {
                 serde_json::json!({
                     "device_code": "dc",
                     "user_code": "A1B2-C3D4",
-                    "verification_uri": "https://zodekit.site/activate",
-                    "verification_uri_complete": "https://zodekit.site/activate?code=A1B2-C3D4",
+                    "verification_uri": "https://zodekit.com/activate",
+                    "verification_uri_complete": "https://zodekit.com/activate?code=A1B2-C3D4",
                     "expires_in": 600,
                     "interval": 5
                 })
@@ -322,7 +322,7 @@ async fn cancelling_a_sign_in_stops_the_polling(cx: &mut TestAppContext) {
             Account::new(
                 http_client,
                 StubCredentials::empty(),
-                "https://zodekit.site/api".into(),
+                "https://zodekit.com/api".into(),
             )
         })
     });
@@ -377,7 +377,7 @@ async fn a_hung_account_service_does_not_block_the_rest_of_the_app(cx: &mut Test
             Account::new(
                 http_client,
                 StubCredentials::empty(),
-                "https://zodekit.site/api".into(),
+                "https://zodekit.com/api".into(),
             )
         })
     });
@@ -471,7 +471,7 @@ async fn an_offline_start_still_names_the_account_it_saved(cx: &mut TestAppConte
     let account = cx.update(|cx| {
         cx.new(|cx| {
             let mut account =
-                Account::new(http_client, credentials, "https://zodekit.site/api".into());
+                Account::new(http_client, credentials, "https://zodekit.com/api".into());
             account.restore(cx).detach();
             account
         })
@@ -504,7 +504,7 @@ async fn an_entry_saved_before_the_user_was_remembered_still_loads(cx: &mut Test
     let account = cx.update(|cx| {
         cx.new(|cx| {
             let mut account =
-                Account::new(http_client, credentials, "https://zodekit.site/api".into());
+                Account::new(http_client, credentials, "https://zodekit.com/api".into());
             account.restore(cx).detach();
             account
         })
@@ -712,8 +712,8 @@ impl RotatingServer {
                 serde_json::json!({
                     "device_code": "dc",
                     "user_code": "A1B2-C3D4",
-                    "verification_uri": "https://zodekit.site/activate",
-                    "verification_uri_complete": "https://zodekit.site/activate?code=A1B2-C3D4",
+                    "verification_uri": "https://zodekit.com/activate",
+                    "verification_uri_complete": "https://zodekit.com/activate?code=A1B2-C3D4",
                     "expires_in": 600,
                     "interval": 5,
                 }),
@@ -757,8 +757,8 @@ impl RotatingServer {
                     },
                     "team": null,
                     "grandfather": null,
-                    "upgradeUrl": "https://zodekit.site/pricing",
-                    "manageUrl": "https://zodekit.site/account/billing",
+                    "upgradeUrl": "https://zodekit.com/pricing",
+                    "manageUrl": "https://zodekit.com/account/billing",
                 }),
             ));
         }
@@ -810,7 +810,7 @@ fn restored_account(
             let mut account = Account::new(
                 http_client,
                 credentials.clone(),
-                "https://zodekit.site/api".into(),
+                "https://zodekit.com/api".into(),
             );
             account.restore(cx).detach();
             account
@@ -1660,7 +1660,7 @@ async fn a_signed_out_account_never_asks_for_its_plan(cx: &mut TestAppContext) {
             Account::new(
                 http_client,
                 StubCredentials::empty(),
-                "https://zodekit.site/api".into(),
+                "https://zodekit.com/api".into(),
             )
         })
     });
@@ -1712,7 +1712,7 @@ async fn signing_in_reads_the_plan_once_and_never_again_on_its_own(cx: &mut Test
             Account::new(
                 server.client(),
                 StubCredentials::empty(),
-                "https://zodekit.site/api".into(),
+                "https://zodekit.com/api".into(),
             )
         })
     });
@@ -1723,7 +1723,7 @@ async fn signing_in_reads_the_plan_once_and_never_again_on_its_own(cx: &mut Test
     assert_eq!(
         server.plan_requests(),
         vec![(
-            "https://zodekit.site/api/account/plan".to_string(),
+            "https://zodekit.com/api/account/plan".to_string(),
             "Bearer at-signed-in".to_string()
         )],
         "one plan read, to the API, as the user who just signed in"

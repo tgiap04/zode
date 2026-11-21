@@ -15,8 +15,8 @@ use regex::Regex;
 use semver::Version;
 use serde::Deserialize;
 
-pub(crate) const ZED_ZIPPY_LOGIN: &str = "zed-zippy[bot]";
-pub(crate) const ZED_ZIPPY_EMAIL: &str = "234243425+zed-zippy[bot]@users.noreply.github.com";
+pub(crate) const ZODE_ZIPPY_LOGIN: &str = "zed-zippy[bot]";
+pub(crate) const ZODE_ZIPPY_EMAIL: &str = "234243425+zed-zippy[bot]@users.noreply.github.com";
 
 pub trait Subcommand {
     type ParsedOutput: FromStr<Err = anyhow::Error>;
@@ -168,7 +168,7 @@ impl Committer {
     }
 
     pub(crate) fn is_zed_zippy(&self) -> bool {
-        self.email == ZED_ZIPPY_EMAIL
+        self.email == ZODE_ZIPPY_EMAIL
     }
 }
 
@@ -681,7 +681,7 @@ mod tests {
 
     #[test]
     fn committer_is_zed_zippy() {
-        let committer = Committer::new("Zed Zippy", ZED_ZIPPY_EMAIL);
+        let committer = Committer::new("Zed Zippy", ZODE_ZIPPY_EMAIL);
         assert!(committer.is_zed_zippy());
     }
 

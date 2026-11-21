@@ -99,7 +99,7 @@ impl Backoff {
 }
 
 /// The WebSocket address of the relay for an API base such as
-/// `https://api.zodekit.site/api`.
+/// `https://api.zodekit.com/api`.
 pub fn relay_url(api_url: &str) -> String {
     let trimmed = api_url.trim_end_matches('/');
     let websocket = if let Some(rest) = trimmed.strip_prefix("https://") {
@@ -740,8 +740,8 @@ mod tests {
     #[test]
     fn the_relay_address_follows_the_api_address() {
         assert_eq!(
-            relay_url("https://api.zodekit.site/api"),
-            "wss://api.zodekit.site/api/relay"
+            relay_url("https://api.zodekit.com/api"),
+            "wss://api.zodekit.com/api/relay"
         );
         assert_eq!(
             relay_url("http://localhost:8000/api/"),

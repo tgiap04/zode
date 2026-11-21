@@ -195,7 +195,7 @@ fn git_panel_context_menu(
                 StashAll.boxed_clone(),
             )
             .action_disabled_when(!state.has_stash_items, "Stash Pop", StashPop.boxed_clone())
-            .action("View Stash", zed_actions::git::ViewStash.boxed_clone())
+            .action("View Stash", zode_actions::git::ViewStash.boxed_clone())
             .separator()
             .action("Open Diff", project_diff::Diff.boxed_clone())
             .when(state.show_branch_diff, |this| {
@@ -4917,7 +4917,7 @@ impl RenderOnce for RepositoryRow {
             .label_size(LabelSize::Small)
             .truncate(true)
             .on_click(|_, window, cx| {
-                window.dispatch_action(zed_actions::git::Switch.boxed_clone(), cx);
+                window.dispatch_action(zode_actions::git::Switch.boxed_clone(), cx);
             });
 
         let branch_selector = PopoverMenu::new("popover-button")
@@ -4937,7 +4937,7 @@ impl RenderOnce for RepositoryRow {
             })
             .trigger_with_tooltip(
                 branch_selector_button,
-                Tooltip::for_action_title("Switch Branch", &zed_actions::git::Switch),
+                Tooltip::for_action_title("Switch Branch", &zode_actions::git::Switch),
             )
             .anchor(Anchor::BottomLeft)
             .offset(gpui::Point {

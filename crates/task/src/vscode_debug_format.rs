@@ -137,14 +137,14 @@ mod tests {
                 adapter: "JavaScript".into(),
                 config: json!({
                     "request": "launch",
-                    "program": "${ZED_WORKTREE_ROOT}/xyz.js",
+                    "program": "${ZODE_WORKTREE_ROOT}/xyz.js",
                     "showDevDebugOutput": false,
                     "stopOnEntry": true,
                     "args": [
                         "--foo",
-                        "${ZED_WORKTREE_ROOT}/thing",
+                        "${ZODE_WORKTREE_ROOT}/thing",
                     ],
-                    "cwd": "${ZED_WORKTREE_ROOT}/${FOO}/sub",
+                    "cwd": "${ZODE_WORKTREE_ROOT}/${FOO}/sub",
                     "env": {
                         "X": "Y",
                     },

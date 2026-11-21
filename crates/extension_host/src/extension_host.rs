@@ -187,7 +187,7 @@ pub struct ExtensionIndexLanguageEntry {
 }
 
 actions!(
-    zed,
+    zode,
     [
         /// Reloads all installed extensions.
         ReloadExtensions
@@ -582,7 +582,7 @@ impl ExtensionStore {
         self.fetch_extensions_from_api(&format!("/extensions/{extension_id}"), &[], cx)
     }
 
-    /// Installs any extensions that should be included with Zed by default.
+    /// Installs any extensions that should be included with Zode by default.
     ///
     /// This can be used to make certain functionality provided by extensions
     /// available out-of-the-box.

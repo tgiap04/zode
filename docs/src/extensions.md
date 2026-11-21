@@ -31,7 +31,7 @@ five built-in CLIs on the sidebar rail (`claude`, `codex`, `agy`, `copilot`,
 `opencode`), each run as a terminal session, plus whatever command you name
 yourself in the
 `agent_servers` **setting** (which is a different thing from the manifest field;
-see [Configuring Zode](./configuring-zed.md)).
+see [Configuring Zode](./configuring-zode.md)).
 
 What this means in practice:
 

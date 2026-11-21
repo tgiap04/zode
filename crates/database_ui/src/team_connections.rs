@@ -295,7 +295,7 @@ impl DatabasePanel {
             return;
         };
         let written = write_secret(
-            zed_credentials_provider::global(cx),
+            zode_credentials_provider::global(cx),
             node.config.credential_key().to_string(),
             node.config.name.clone(),
             password.to_string(),
@@ -433,7 +433,7 @@ impl ShareConnectionModal {
 
         let password = self.include_password.then(|| {
             read_secret(
-                zed_credentials_provider::global(cx),
+                zode_credentials_provider::global(cx),
                 self.config.credential_key().to_string(),
                 cx,
             )

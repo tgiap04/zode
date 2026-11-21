@@ -11,7 +11,7 @@ use gpui::{App, Entity, Hsla, MouseButton, SharedString, WeakEntity, Window};
 use std::collections::BTreeMap;
 use ui::{Tooltip, prelude::*};
 use ui_input::InputField;
-use zed_actions::database as actions;
+use zode_actions::database as actions;
 
 impl DatabasePanel {
     /// What the grid draws over the cells it has edits for, taken as a copy so

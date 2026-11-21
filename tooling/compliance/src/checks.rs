@@ -3,7 +3,7 @@ use std::{fmt, ops::Not as _, rc::Rc};
 use itertools::Itertools as _;
 
 use crate::{
-    git::{CommitDetails, CommitList, ZED_ZIPPY_LOGIN},
+    git::{CommitDetails, CommitList, ZODE_ZIPPY_LOGIN},
     github::{
         CommitAuthor, GithubApiClient, GithubLogin, PullRequestComment, PullRequestData,
         PullRequestReview, Repository, ReviewState,
@@ -11,8 +11,8 @@ use crate::{
     report::Report,
 };
 
-const ZED_ZIPPY_COMMENT_APPROVAL_PATTERN: &str = "@zed-zippy approve";
-const ZED_ZIPPY_GROUP_APPROVAL: &str = "@zed-industries/approved";
+const ZODE_ZIPPY_COMMENT_APPROVAL_PATTERN: &str = "@zed-zippy approve";
+const ZODE_ZIPPY_GROUP_APPROVAL: &str = "@zed-industries/approved";
 const EXPECTED_VERSION_BUMP_LOC: u64 = 2;
 
 #[derive(Debug)]
@@ -219,7 +219,7 @@ impl Reporter {
         if !authors
             .primary_author()
             .user()
-            .is_some_and(|login| login.as_str() == ZED_ZIPPY_LOGIN)
+            .is_some_and(|login| login.as_str() == ZODE_ZIPPY_LOGIN)
         {
             return Err(ReviewFailure::UnexpectedZippyAction(
                 VersionBumpFailure::AuthorMismatch,
@@ -381,7 +381,8 @@ impl Reporter {
     }
 
     fn contains_approving_pattern(body: &str) -> bool {
-        body.contains(ZED_ZIPPY_COMMENT_APPROVAL_PATTERN) || body.contains(ZED_ZIPPY_GROUP_APPROVAL)
+        body.contains(ZODE_ZIPPY_COMMENT_APPROVAL_PATTERN)
+            || body.contains(ZODE_ZIPPY_GROUP_APPROVAL)
     }
 
     pub async fn generate_report(mut self) -> anyhow::Result<Report> {
@@ -416,7 +417,7 @@ mod tests {
     use std::rc::Rc;
     use std::str::FromStr;
 
-    use crate::git::{CommitDetails, CommitList, CommitSha, ZED_ZIPPY_EMAIL, ZED_ZIPPY_LOGIN};
+    use crate::git::{CommitDetails, CommitList, CommitSha, ZODE_ZIPPY_EMAIL, ZODE_ZIPPY_LOGIN};
     use crate::github::{
         CommitMetadataBySha, GithubApiClient, GithubLogin, GithubUser, PullRequestComment,
         PullRequestData, PullRequestReview, Repository, ReviewState,
@@ -551,8 +552,8 @@ mod tests {
     fn zippy_author() -> serde_json::Value {
         serde_json::json!({
             "name": "Zed Zippy",
-            "email": ZED_ZIPPY_EMAIL,
-            "user": { "login": ZED_ZIPPY_LOGIN }
+            "email": ZODE_ZIPPY_EMAIL,
+            "user": { "login": ZODE_ZIPPY_LOGIN }
         })
     }
 
@@ -631,7 +632,7 @@ mod tests {
                         "authors": { "nodes": [] },
                         "signature": {
                             "isValid": true,
-                            "signer": { "login": ZED_ZIPPY_LOGIN }
+                            "signer": { "login": ZODE_ZIPPY_LOGIN }
                         },
                         "additions": 2,
                         "deletions": 2
@@ -641,7 +642,7 @@ mod tests {
                 commit: make_commit(
                     "abc12345abc12345",
                     "Zed Zippy",
-                    ZED_ZIPPY_EMAIL,
+                    ZODE_ZIPPY_EMAIL,
                     "Bump to 0.230.2 for @cole-miller",
                     "",
                 ),
@@ -892,7 +893,7 @@ mod tests {
             .with_commit(make_commit(
                 "abc12345abc12345",
                 "Zed Zippy",
-                ZED_ZIPPY_EMAIL,
+                ZODE_ZIPPY_EMAIL,
                 "Bump to 0.230.2",
                 "",
             ))
@@ -936,7 +937,7 @@ mod tests {
                     "authors": { "nodes": [] },
                     "signature": {
                         "isValid": false,
-                        "signer": { "login": ZED_ZIPPY_LOGIN }
+                        "signer": { "login": ZODE_ZIPPY_LOGIN }
                     },
                     "additions": 2,
                     "deletions": 2
@@ -961,7 +962,7 @@ mod tests {
                     "authors": { "nodes": [] },
                     "signature": {
                         "isValid": true,
-                        "signer": { "login": ZED_ZIPPY_LOGIN }
+                        "signer": { "login": ZODE_ZIPPY_LOGIN }
                     },
                     "additions": 5,
                     "deletions": 2
@@ -1011,7 +1012,7 @@ mod tests {
                     "authors": { "nodes": [alice_author()] },
                     "signature": {
                         "isValid": true,
-                        "signer": { "login": ZED_ZIPPY_LOGIN }
+                        "signer": { "login": ZODE_ZIPPY_LOGIN }
                     },
                     "additions": 2,
                     "deletions": 2
@@ -1048,7 +1049,7 @@ mod tests {
             .with_commit(make_commit(
                 "abc12345abc12345",
                 "Zed Zippy",
-                ZED_ZIPPY_EMAIL,
+                ZODE_ZIPPY_EMAIL,
                 "Some change (#1234)",
                 "",
             ))

@@ -9,7 +9,7 @@ use gpui::{AppContext as _, Context, Entity, TestAppContext, VisualTestContext, 
 use project::Project;
 use serde_json::json;
 use workspace::{MultiWorkspace, Workspace};
-use zed_actions::agent::AgentViewMode;
+use zode_actions::agent::AgentViewMode;
 
 pub(crate) struct TwoProjects {
     pub(crate) multi_workspace: Entity<MultiWorkspace>,

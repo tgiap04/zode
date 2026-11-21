@@ -52,7 +52,7 @@ impl Sidebar {
                     } else {
                         "Show Containers"
                     },
-                    Some(&zed_actions::container::ToggleContainer),
+                    Some(&zode_actions::container::ToggleContainer),
                     "Right-click to open in an editor tab",
                     cx,
                 )
@@ -61,10 +61,10 @@ impl Sidebar {
             // inside `Sidebar::update`, and opening a panel reaches back through
             // the workspace. Same trap as `render_rail_database`.
             .on_click(|_, window, cx| {
-                window.dispatch_action(Box::new(zed_actions::container::ToggleContainer), cx)
+                window.dispatch_action(Box::new(zode_actions::container::ToggleContainer), cx)
             })
             .on_right_click(|_, window, cx| {
-                window.dispatch_action(Box::new(zed_actions::container::OpenInEditorTab), cx)
+                window.dispatch_action(Box::new(zode_actions::container::OpenInEditorTab), cx)
             })
             .into_any_element()
     }
@@ -99,7 +99,7 @@ mod tests {
         cx.run_until_parked();
 
         cx.update(|window, cx| {
-            window.dispatch_action(Box::new(zed_actions::container::ToggleContainer), cx)
+            window.dispatch_action(Box::new(zode_actions::container::ToggleContainer), cx)
         });
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
@@ -132,7 +132,7 @@ mod tests {
         });
 
         cx.update(|window, cx| {
-            window.dispatch_action(Box::new(zed_actions::container::ToggleContainer), cx)
+            window.dispatch_action(Box::new(zode_actions::container::ToggleContainer), cx)
         });
         cx.run_until_parked();
 

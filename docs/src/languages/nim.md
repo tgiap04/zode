@@ -15,7 +15,7 @@ Report issues to: [https://github.com/foxoman/zed-nim/issues](https://github.com
 
 To use [arnetheduck/nph](https://github.com/arnetheduck/nph) as a formatter, follow the [nph installation instructions](https://github.com/arnetheduck/nph?tab=readme-ov-file#installation).
 
-Configure formatting in Settings ({#kb zed::OpenSettings}) under Languages > Nim, or add to your settings file:
+Configure formatting in Settings ({#kb zode::OpenSettings}) under Languages > Nim, or add to your settings file:
 
 ```json [settings]
   "languages": {

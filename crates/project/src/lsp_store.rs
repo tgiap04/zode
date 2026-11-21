@@ -6772,7 +6772,7 @@ impl LspStore {
         let mut new_label = match completion_item {
             Some(completion_item) => {
                 // Some language servers always return `detail` lazily via resolve, regardless of
-                // the resolvable properties Zed advertises. Regenerate labels here to handle this.
+                // the resolvable properties Zode advertises. Regenerate labels here to handle this.
                 // See: https://github.com/yioneko/vtsls/issues/213
                 let language = snapshot.language();
                 match language {

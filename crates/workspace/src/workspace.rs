@@ -164,7 +164,7 @@ pub use workspace_settings::{
     AutosaveSetting, BottomDockLayout, FocusFollowsMouse, RestoreOnStartupBehavior,
     StatusBarSettings, TabBarSettings, WorkspaceSettings,
 };
-use zed_actions::{Spawn, feedback::FileBugReport, theme::ToggleMode};
+use zode_actions::{Spawn, feedback::FileBugReport, theme::ToggleMode};
 
 use crate::panel_size_key::{PROJECT_PANEL_SIZE_STATE_KEY, panel_size_key};
 use crate::{dock::PanelSizeState, item::ItemBufferKind, notifications::NotificationId};
@@ -178,15 +178,15 @@ use crate::{
 
 pub const SERIALIZATION_THROTTLE_TIME: Duration = Duration::from_millis(200);
 
-static ZED_WINDOW_SIZE: LazyLock<Option<Size<Pixels>>> = LazyLock::new(|| {
-    env::var("ZED_WINDOW_SIZE")
+static ZODE_WINDOW_SIZE: LazyLock<Option<Size<Pixels>>> = LazyLock::new(|| {
+    env::var("ZODE_WINDOW_SIZE")
         .ok()
         .as_deref()
         .and_then(parse_pixel_size_env_var)
 });
 
-static ZED_WINDOW_POSITION: LazyLock<Option<Point<Pixels>>> = LazyLock::new(|| {
-    env::var("ZED_WINDOW_POSITION")
+static ZODE_WINDOW_POSITION: LazyLock<Option<Point<Pixels>>> = LazyLock::new(|| {
+    env::var("ZODE_WINDOW_POSITION")
         .ok()
         .as_deref()
         .and_then(parse_pixel_position_env_var)
@@ -8751,8 +8751,8 @@ fn leader_border_for_pane(
 }
 
 fn window_bounds_env_override() -> Option<Bounds<Pixels>> {
-    ZED_WINDOW_POSITION
-        .zip(*ZED_WINDOW_SIZE)
+    ZODE_WINDOW_POSITION
+        .zip(*ZODE_WINDOW_SIZE)
         .map(|(position, size)| Bounds {
             origin: position,
             size,
@@ -9776,7 +9776,7 @@ actions!(
         /// Use `collab_panel::OpenSelectedChannelNotes` to open the channel notes for the selected
         /// channel in the collab panel.
         ///
-        /// If you want to open a specific channel, use `zed::OpenZedUrl` with a channel notes URL -
+        /// If you want to open a specific channel, use `zode::OpenZodeUrl` with a channel notes URL -
         /// can be copied via "Copy link to section" in the context menu of the channel notes
         /// buffer. These URLs look like `https://zed.dev/channel/channel-name-CHANNEL_ID/notes`.
         OpenChannelNotes,
@@ -9804,11 +9804,11 @@ pub struct OpenChannelNotesById {
 }
 
 actions!(
-    zed,
+    zode,
     [
-        /// Opens the Zed log file.
+        /// Opens the Zode log file.
         OpenLog,
-        /// Reveals the Zed log file in the system file manager.
+        /// Reveals the Zode log file in the system file manager.
         RevealLogInFileManager
     ]
 );
@@ -18436,7 +18436,7 @@ mod tests {
     async fn test_toggle_theme_mode_persists_and_updates_active_theme(cx: &mut TestAppContext) {
         use settings::{ThemeName, ThemeSelection};
         use theme::SystemAppearance;
-        use zed_actions::theme::ToggleMode;
+        use zode_actions::theme::ToggleMode;
 
         init_test(cx);
 

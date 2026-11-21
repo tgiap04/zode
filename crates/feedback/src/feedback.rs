@@ -3,19 +3,19 @@ use gpui::{App, ClipboardItem, PromptLevel, actions};
 use system_specs::{CopySystemSpecsIntoClipboard, SystemSpecs};
 use util::ResultExt;
 use workspace::Workspace;
-use zed_actions::feedback::{FileBugReport, RequestFeature};
+use zode_actions::feedback::{FileBugReport, RequestFeature};
 
 actions!(
-    zed,
+    zode,
     [
         /// Opens the Zed repository on GitHub.
-        OpenZedRepo,
+        OpenZodeRepo,
         /// Copies installed extensions to the clipboard for bug reports.
         CopyInstalledExtensionsIntoClipboard
     ]
 );
 
-const ZED_REPO_URL: &str = "https://github.com/tgiap04/zode";
+const ZODE_REPO_URL: &str = "https://github.com/tgiap04/zode";
 
 const REQUEST_FEATURE_URL: &str = "https://github.com/tgiap04/zode/issues/new";
 
@@ -81,8 +81,8 @@ pub fn init(cx: &mut App) {
                 })
                 .detach();
             })
-            .register_action(move |_, _: &OpenZedRepo, _, cx| {
-                cx.open_url(ZED_REPO_URL);
+            .register_action(move |_, _: &OpenZodeRepo, _, cx| {
+                cx.open_url(ZODE_REPO_URL);
             });
     })
     .detach();

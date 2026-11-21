@@ -243,7 +243,7 @@ impl LineWrapper {
         // e.g. `a-b`, `var_name`, `I'm`/`won’t`, '@mention`, `#hashtag`, `100%`, `3.1415`,
         // `2^3`, `a~b`, `a=1`, `Self::new`, etc.
         matches!(c, '-' | '_' | '.' | '\'' | '’' | '‘' | '$' | '%' | '@' | '#' | '^' | '~' | ',' | '=' | ':') ||
-        // `⋯` character is special used in Zed, to keep this at the end of the line.
+        // `⋯` character is special used in Zode, to keep this at the end of the line.
         matches!(c, '⋯')
     }
 
@@ -388,7 +388,7 @@ mod tests {
     fn build_wrapper() -> LineWrapper {
         let dispatcher = TestDispatcher::new(0);
         let cx = TestAppContext::build(dispatcher, None);
-        let id = cx.text_system().resolve_font(&font(".ZedMono"));
+        let id = cx.text_system().resolve_font(&font(".ZodeMono"));
         LineWrapper::new(id, px(16.), cx.text_system().clone())
     }
 

@@ -17,7 +17,7 @@ Here's how to make Zode feel like home:
 
 2. **Toggle light/dark mode quickly**: Press {#kb theme::ToggleMode}. If you currently use a static `"theme": "..."` value, the first toggle converts it to dynamic mode settings with default themes.
 
-3. **Set your font**: Open the Settings Editor with {#kb zed::OpenSettings} and search for `buffer_font_family`. Set it to your preferred coding font.
+3. **Set your font**: Open the Settings Editor with {#kb zode::OpenSettings} and search for `buffer_font_family`. Set it to your preferred coding font.
 
 4. **Adjust font size**: In the same Settings Editor, search for `buffer_font_size` and `ui_font_size` to tweak the editor and interface text sizes.
 
@@ -25,7 +25,7 @@ That's it. You now have a personalized Zode setup.
 
 ## Themes
 
-Install themes from the Extensions page ({#action zed::Extensions}), then switch between them with the Theme Selector ({#kb theme_selector::Toggle}).
+Install themes from the Extensions page ({#action zode::Extensions}), then switch between them with the Theme Selector ({#kb theme_selector::Toggle}).
 
 Zode supports separate themes for light and dark mode with automatic switching based on your system preference:
 

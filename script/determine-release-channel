@@ -11,7 +11,7 @@ elif [ -z "${GITHUB_REF_NAME-}" ]; then
     exit 1
 fi
 
-# The channel is read off the shape of the tag rather than crates/zed/RELEASE_CHANNEL,
+# The channel is read off the shape of the tag rather than crates/zode/RELEASE_CHANNEL,
 # and the tag is not required to match the version in Cargo.toml. Upstream ties the two
 # together and rejects anything outside stable/preview, which makes every release a
 # version-bump commit first; this fork releases straight from a tag.
@@ -39,4 +39,4 @@ echo "RELEASE_VERSION=${version}" >> "$GITHUB_ENV"
 # `[package.metadata.bundle-*]` section on macOS, `APP_NAME` on Linux and the
 # installer's whole naming block on Windows. Leaving it at the checked-in value
 # is how a tagged release ends up installing itself as a dev build.
-echo "${channel}" > crates/zed/RELEASE_CHANNEL
+echo "${channel}" > crates/zode/RELEASE_CHANNEL

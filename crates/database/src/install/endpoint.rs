@@ -121,39 +121,39 @@ mod tests {
 
     #[test]
     fn the_manifest_is_read_from_latest_and_an_archive_from_its_own_version() {
-        let endpoint = DriverEndpoint::new("https://api.zodekit.site/api");
+        let endpoint = DriverEndpoint::new("https://api.zodekit.com/api");
         assert_eq!(
             endpoint.latest_manifest_url(),
-            "https://api.zodekit.site/api/drivers/latest/zode-db-drivers-manifest.json"
+            "https://api.zodekit.com/api/drivers/latest/zode-db-drivers-manifest.json"
         );
         assert_eq!(
             endpoint.asset_url("0.1.4", "zode-db-postgres-aarch64-apple-darwin.tar.gz"),
-            "https://api.zodekit.site/api/drivers/0.1.4/zode-db-postgres-aarch64-apple-darwin.tar.gz"
+            "https://api.zodekit.com/api/drivers/0.1.4/zode-db-postgres-aarch64-apple-darwin.tar.gz"
         );
     }
 
     /// A trailing slash on the configured base must not double up in the URL.
     #[test]
     fn a_trailing_slash_on_the_base_does_not_duplicate() {
-        let endpoint = DriverEndpoint::new("https://api.zodekit.site/api/");
+        let endpoint = DriverEndpoint::new("https://api.zodekit.com/api/");
         assert_eq!(
             endpoint.asset_url("0.1.4", "asset.tar.gz"),
-            "https://api.zodekit.site/api/drivers/0.1.4/asset.tar.gz"
+            "https://api.zodekit.com/api/drivers/0.1.4/asset.tar.gz"
         );
         assert_eq!(
             endpoint.latest_manifest_url(),
-            "https://api.zodekit.site/api/drivers/latest/zode-db-drivers-manifest.json"
+            "https://api.zodekit.com/api/drivers/latest/zode-db-drivers-manifest.json"
         );
     }
 
     fn endpoint() -> DriverEndpoint {
-        DriverEndpoint::new("https://api.zodekit.site/api")
+        DriverEndpoint::new("https://api.zodekit.com/api")
     }
 
     #[test]
     fn a_url_at_the_configured_origin_is_trusted() {
         endpoint()
-            .ensure_trusted("https://api.zodekit.site/api/drivers/0.1.1/asset.tar.gz")
+            .ensure_trusted("https://api.zodekit.com/api/drivers/0.1.1/asset.tar.gz")
             .unwrap();
     }
 
@@ -163,7 +163,7 @@ mod tests {
             .ensure_trusted("https://evil.example/drivers/0.1.1/asset.tar.gz")
             .unwrap_err();
         let message = error.to_string();
-        assert!(message.contains("api.zodekit.site"), "{message}");
+        assert!(message.contains("api.zodekit.com"), "{message}");
         assert!(message.contains("evil.example"), "{message}");
     }
 
@@ -171,7 +171,7 @@ mod tests {
     fn a_different_scheme_is_refused() {
         assert!(
             endpoint()
-                .ensure_trusted("http://api.zodekit.site/api/drivers/0.1.1/asset.tar.gz")
+                .ensure_trusted("http://api.zodekit.com/api/drivers/0.1.1/asset.tar.gz")
                 .is_err()
         );
     }
@@ -180,29 +180,29 @@ mod tests {
     fn a_different_port_is_refused() {
         assert!(
             endpoint()
-                .ensure_trusted("https://api.zodekit.site:8443/api/drivers/0.1.1/asset.tar.gz")
+                .ensure_trusted("https://api.zodekit.com:8443/api/drivers/0.1.1/asset.tar.gz")
                 .is_err()
         );
     }
 
-    /// `https://api.zodekit.site@evil.com/` parses with the real host in the
+    /// `https://api.zodekit.com@evil.com/` parses with the real host in the
     /// userinfo slot and `evil.com` as the actual host -- the textbook trick
     /// this check exists to catch.
     #[test]
     fn userinfo_dressed_up_as_the_trusted_host_is_refused() {
         assert!(
             endpoint()
-                .ensure_trusted("https://api.zodekit.site@evil.com/drivers/0.1.1/asset.tar.gz")
+                .ensure_trusted("https://api.zodekit.com@evil.com/drivers/0.1.1/asset.tar.gz")
                 .is_err()
         );
     }
 
     #[test]
     fn plain_http_on_a_public_host_is_refused_even_if_same_origin() {
-        let endpoint = DriverEndpoint::new("http://api.zodekit.site/api");
+        let endpoint = DriverEndpoint::new("http://api.zodekit.com/api");
         assert!(
             endpoint
-                .ensure_trusted("http://api.zodekit.site/api/drivers/0.1.1/asset.tar.gz")
+                .ensure_trusted("http://api.zodekit.com/api/drivers/0.1.1/asset.tar.gz")
                 .is_err()
         );
     }
@@ -266,7 +266,7 @@ mod tests {
         let endpoint = DriverEndpoint::new("not a url");
         assert!(
             endpoint
-                .ensure_trusted("https://api.zodekit.site/api/drivers/0.1.1/asset.tar.gz")
+                .ensure_trusted("https://api.zodekit.com/api/drivers/0.1.1/asset.tar.gz")
                 .is_err()
         );
     }

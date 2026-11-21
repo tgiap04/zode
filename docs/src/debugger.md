@@ -41,7 +41,7 @@ For most languages, the fastest way to get started is to run {#action debugger::
 
 You can open the same modal by clicking the "plus" button at the top right of the debug panel.
 
-For languages that don't provide preconfigured debug tasks (this includes C, C++, and some extension-supported languages), you can define debug configurations in the `.zed/debug.json` file in your project root. This file should be an array of configuration objects:
+For languages that don't provide preconfigured debug tasks (this includes C, C++, and some extension-supported languages), you can define debug configurations in the `.zode/debug.json` file in your project root. This file should be an array of configuration objects:
 
 ```json [debug]
 [
@@ -58,19 +58,19 @@ For languages that don't provide preconfigured debug tasks (this includes C, C++
 ]
 ```
 
-Check the documentation for your language for example configurations covering typical use-cases. Once you've added configurations to `.zed/debug.json`, they'll appear in the list in the new process modal.
+Check the documentation for your language for example configurations covering typical use-cases. Once you've added configurations to `.zode/debug.json`, they'll appear in the list in the new process modal.
 
-Zode will also load debug configurations from `.vscode/launch.json`, and show them in the new process modal if no configurations are found in `.zed/debug.json`.
+Zode will also load debug configurations from `.vscode/launch.json`, and show them in the new process modal if no configurations are found in `.zode/debug.json`.
 
 #### Global debug configurations
 
-If you run the same launch profiles across multiple projects, you can store them once in your user configuration. Invoke {#action zed::OpenDebugTasks} from the command palette to open the global `debug.json` file; Zode creates it next to your user `settings.json` and keeps it in sync with the debugger UI. The file lives at:
+If you run the same launch profiles across multiple projects, you can store them once in your user configuration. Invoke {#action zode::OpenDebugTasks} from the command palette to open the global `debug.json` file; Zode creates it next to your user `settings.json` and keeps it in sync with the debugger UI. The file lives at:
 
 - **macOS:** `~/.config/zode/debug.json`
 - **Linux/BSD:** `$XDG_CONFIG_HOME/zode/debug.json` (falls back to `~/.config/zode/debug.json`)
 - **Windows:** `%APPDATA%\Zode\debug.json`
 
-Populate this file with the same array of objects you would place in `.zed/debug.json`. Any scenarios defined there are merged into every workspace, so your favorite launch presets appear automatically in the "New Debug Session" dialog.
+Populate this file with the same array of objects you would place in `.zode/debug.json`. Any scenarios defined there are merged into every workspace, so your favorite launch presets appear automatically in the "New Debug Session" dialog.
 
 ### Launching & Attaching
 
@@ -101,8 +101,8 @@ All other fields are provided by the debug adapter and can contain [task variabl
     "request": "launch",
     // The program to debug. This field supports path resolution with ~ or . symbols.
     "program": "path_to_program",
-    // cwd: defaults to the current working directory of your project ($ZED_WORKTREE_ROOT)
-    "cwd": "$ZED_WORKTREE_ROOT"
+    // cwd: defaults to the current working directory of your project ($ZODE_WORKTREE_ROOT)
+    "cwd": "$ZODE_WORKTREE_ROOT"
   }
 ]
 ```
@@ -137,7 +137,7 @@ Build tasks can also refer to the existing tasks by unsubstituted label:
     "adapter": "CodeLLDB",
     "program": "path_to_program",
     "request": "launch",
-    "build": "my build task" // Or "my build task for $ZED_FILE"
+    "build": "my build task" // Or "my build task for $ZODE_FILE"
   }
 ]
 ```
@@ -377,7 +377,7 @@ The Debugger supports the following theme options:
 
 ## Troubleshooting
 
-If you're running into problems with the debugger, please [open a GitHub issue](https://github.com/zed-industries/zed/issues/new?template=04_bug_debugger.yml), providing as much context as possible. There are also some features you can use to gather more information about the problem:
+If you're running into problems with the debugger, please [open a GitHub issue](https://github.com/tgiap04/zode/issues/new?template=10_bug_report.yml), providing as much context as possible. There are also some features you can use to gather more information about the problem:
 
 - When you have a session running in the debug panel, you can run the {#action dev::CopyDebugAdapterArguments} action to copy a JSON blob to the clipboard that describes how Zode initialized the session. This is especially useful when the session failed to start, and is great context to add if you open a GitHub issue.
 - You can also use the {#action dev::OpenDebugAdapterLogs} action to see a trace of all of Zode's communications with debug adapters during the most recent debug sessions.

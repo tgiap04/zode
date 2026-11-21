@@ -1,7 +1,7 @@
 # Remote control — what can and cannot happen
 
 Remote control lets another device operate this Zode through a relay at
-zodekit.site. The relay is not open source, and it sits in the middle of every
+zodekit.com. The relay is not open source, and it sits in the middle of every
 session. This page exists because that is a reasonable thing to be uneasy
 about. Everything here is either checkable by you or held by a test in the
 repositories named below; where a claim is weaker than it sounds, it says so.
@@ -201,7 +201,7 @@ a toast on this screen names the device and the session.
    It works while remote control is off, so you can forget a device before you
    turn remote control back on.
 2. For a browser, also sign it out on the web devices page,
-   `zodekit.site/account/devices`.
+   `zodekit.com/account/devices`.
 3. If in doubt, **Disconnect All Devices** or **Turn Off Remote Control**.
 
 Revocation also wipes credentials on the revoked device itself: a device that

@@ -644,7 +644,7 @@ impl DatabasePanel {
                 .iter()
                 .any(|node| !node.is_personal() && node.config.url == url);
         if !still_used {
-            delete_secret(zed_credentials_provider::global(cx), url, cx).detach_and_log_err(cx);
+            delete_secret(zode_credentials_provider::global(cx), url, cx).detach_and_log_err(cx);
         }
 
         let Ok(fs) = self.workspace.read_with(cx, |workspace, cx| {

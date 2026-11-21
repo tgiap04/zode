@@ -98,7 +98,7 @@ The real dividing lines in this codebase are not "admin vs. user" in the web-app
 - Docker-based and (legacy, non-functional in this fork) collaboration-based projects are
   explicitly exempted from the workspace-trust mechanism, per the module's own documentation,
   because those transport layers manage isolation themselves.
-- A `ZED_DISABLE_STAFF` environment variable exists purely for local testing — it forces a staff
+- A `ZODE_DISABLE_STAFF` environment variable exists purely for local testing — it forces a staff
   account to be treated as non-staff so a developer can verify what non-staff users see for a
   given feature flag. It is a test aid, not a real access boundary.
 - No A/B experiments, environment-based access gates, or locale-based access rules were found

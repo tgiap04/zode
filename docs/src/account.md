@@ -123,7 +123,7 @@ with **Upgrade…** or **Manage Plan…** beside it. Both open the website in yo
 browser. Paying happens there, through Polar; the editor never sees a card or a
 payment.
 
-The editor reads the plan from `api.zodekit.site` at four moments only: when
+The editor reads the plan from `api.zodekit.com` at four moments only: when
 you sign in, once when the editor starts with a saved sign-in, when you open the
 account menu or a sync window, and right after a request your plan refused. Never
 on a timer, and never on a machine that has not signed in. The answer

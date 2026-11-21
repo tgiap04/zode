@@ -6,7 +6,7 @@ pub fn main(_socket: &str) -> Result<()> {
     panic!("--nc isn't yet supported on Windows");
 }
 
-/// The main function for when Zed is running in netcat mode
+/// The main function for when Zode is running in netcat mode
 #[cfg(not(windows))]
 pub fn main(socket: &str) -> Result<()> {
     use futures::{AsyncReadExt as _, AsyncWriteExt as _, FutureExt as _, io::BufReader, select};

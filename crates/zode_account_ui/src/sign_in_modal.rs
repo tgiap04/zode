@@ -255,8 +255,8 @@ mod tests {
     fn waiting() -> AccountStatus {
         AccountStatus::WaitingForApproval {
             user_code: "A1B2-C3D4".into(),
-            verification_uri: "https://zodekit.site/activate".into(),
-            verification_uri_complete: "https://zodekit.site/activate?code=A1B2-C3D4".into(),
+            verification_uri: "https://zodekit.com/activate".into(),
+            verification_uri_complete: "https://zodekit.com/activate?code=A1B2-C3D4".into(),
         }
     }
 

@@ -78,8 +78,8 @@ pub(crate) fn extension_bump() -> Workflow {
         .add_env(("RUST_BACKTRACE", 1))
         .add_env(("CARGO_INCREMENTAL", 0))
         .add_env((
-            "ZED_EXTENSION_CLI_SHA",
-            extension_tests::ZED_EXTENSION_CLI_SHA,
+            "ZODE_EXTENSION_CLI_SHA",
+            extension_tests::ZODE_EXTENSION_CLI_SHA,
         ))
         .add_job(check_version_changed.name, check_version_changed.job)
         .add_job(bump_version.name, bump_version.job)

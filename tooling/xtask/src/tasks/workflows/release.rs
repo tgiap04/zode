@@ -54,7 +54,7 @@ pub(crate) fn release() -> Workflow {
     let bump_manifest_on_develop = bump_manifest_on_develop(&bump_deps);
 
     // Every bundling job resolves the channel from the tag itself. The bundling
-    // scripts read `crates/zed/RELEASE_CHANNEL`, and a job that leaves it alone
+    // scripts read `crates/zode/RELEASE_CHANNEL`, and a job that leaves it alone
     // bundles the checked-in channel -- which is how a `v*` tag produced installers
     // named "Zode Dev" / "Zode Devel" on all three platforms.
     let channel = Some(ReleaseChannel::FromTag);
@@ -156,7 +156,7 @@ fn bundle_remote_server_linux(arch: Arch) -> NamedJob {
             .add_env(Env::new("DEBIAN_FRONTEND", "noninteractive"))
             .add_step(steps::bootstrap_container())
             .add_step(steps::checkout_repo())
-            // `remote_server` compiles its channel in from `crates/zed/RELEASE_CHANNEL`,
+            // `remote_server` compiles its channel in from `crates/zode/RELEASE_CHANNEL`,
             // and a server built as dev reports a commit where the app expects a version.
             .add_step(steps::script("script/determine-release-channel"))
             .add_step(steps::free_disk_space(Platform::Linux))
@@ -421,7 +421,7 @@ fn create_draft_release(deps: &[&NamedJob]) -> NamedJob {
         "#})
     }
 
-    // The tag is the source of truth for a published version: `crates/zed/build.rs` stamps
+    // The tag is the source of truth for a published version: `crates/zode/build.rs` stamps
     // RELEASE_VERSION into the binary, so a Cargo.toml that disagrees no longer yields a
     // build that misreports itself. A divergence is still worth saying out loud, because
     // the tag commit then names a different version than the release built from it. Warn,
@@ -431,11 +431,11 @@ fn create_draft_release(deps: &[&NamedJob]) -> NamedJob {
     fn warn_on_version_divergence() -> Step<Run> {
         named::bash!(indoc::indoc! {r#"
             # The first `version =` in the manifest is the one under [package].
-            manifest_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/zed/Cargo.toml | head -1)
+            manifest_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/zode/Cargo.toml | head -1)
             if [ "$manifest_version" = "$RELEASE_VERSION" ]; then
-                echo "tag and crates/zed/Cargo.toml agree on ${RELEASE_VERSION}"
+                echo "tag and crates/zode/Cargo.toml agree on ${RELEASE_VERSION}"
             else
-                echo "::warning::tag ${GITHUB_REF_NAME} builds as ${RELEASE_VERSION} but crates/zed/Cargo.toml on this commit says ${manifest_version}; the binary reports the tag, and for a stable tag bump_manifest_on_develop moves develop's manifest up to it"
+                echo "::warning::tag ${GITHUB_REF_NAME} builds as ${RELEASE_VERSION} but crates/zode/Cargo.toml on this commit says ${manifest_version}; the binary reports the tag, and for a stable tag bump_manifest_on_develop moves develop's manifest up to it"
             fi
         "#})
     }
@@ -489,7 +489,7 @@ fn bump_manifest_on_develop(deps: &[&NamedJob]) -> NamedJob {
         named::bash!(indoc::indoc! {r#"
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git commit -m "chore: bump zode to $VERSION" -- crates/zed/Cargo.toml Cargo.lock
+            git commit -m "chore: bump zode to $VERSION" -- crates/zode/Cargo.toml Cargo.lock
             git push origin HEAD:refs/heads/develop
         "#})
         .if_condition(Expression::new(format!("{} == 'true'", changed.expr())))
@@ -1100,8 +1100,8 @@ mod tests {
             .as_str()
             .expect("validate_release_assets has a run step");
         for name in [
-            "zed-remote-server-linux-x86_64.gz",
-            "zed-remote-server-linux-aarch64.gz",
+            "zode-remote-server-linux-x86_64.gz",
+            "zode-remote-server-linux-aarch64.gz",
             "remote-server-manifest.json",
         ] {
             assert!(
@@ -1159,14 +1159,14 @@ mod tests {
         }
     }
 
-    /// The client asks for `zed-remote-server-{os}-{arch}.gz`, with the arch spelled as
+    /// The client asks for `zode-remote-server-{os}-{arch}.gz`, with the arch spelled as
     /// Rust spells it. These must agree byte for byte with the names the jobs upload.
     #[test]
     fn the_remote_server_asset_names_are_the_ones_the_client_asks_for() {
         for arch in [Arch::X86_64, Arch::AARCH64] {
             assert_eq!(
                 assets::remote_server_linux(arch),
-                format!("zed-remote-server-linux-{arch}.gz")
+                format!("zode-remote-server-linux-{arch}.gz")
             );
         }
         assert!(
@@ -1201,7 +1201,8 @@ mod tests {
                 if root.exists() {
                     fs::remove_dir_all(&root).expect("clearing a stale scratch checkout");
                 }
-                fs::create_dir_all(root.join("crates/zed")).expect("creating the scratch checkout");
+                fs::create_dir_all(root.join("crates/zode"))
+                    .expect("creating the scratch checkout");
                 // Built before the writes so `Drop` cleans up even if one of them fails.
                 let checkout = Self { root };
                 fs::write(checkout.manifest_path(), manifest).expect("writing the manifest");
@@ -1211,7 +1212,7 @@ mod tests {
             }
 
             fn manifest_path(&self) -> PathBuf {
-                self.root.join("crates/zed/Cargo.toml")
+                self.root.join("crates/zode/Cargo.toml")
             }
 
             fn lockfile_path(&self) -> PathBuf {

@@ -15,13 +15,13 @@ Navigating through the theme list by moving up and down will change the theme in
 
 ## Installing New Themes
 
-You can find hundreds of different theme options in Zode's extensions store, which you can access via the command palette with `zed: extensions` or the [Zode website](https://zed.dev/extensions?filter=themes).
+You can find hundreds of different theme options in Zode's extensions store, which you can access via the command palette with `zode: extensions` or the [Zed extensions website](https://zed.dev/extensions?filter=themes).
 
 Many popular themes have been ported to Zode, and if you're struggling to choose one, visit [zed-themes.com](https://zed-themes.com), a third-party gallery with visible previews for many of them.
 
 ## Build Your Theme
 
-You can use [Zode's Theme Builder](https://zed.dev/theme-builder) to design your own custom theme based on an existing one.
+You can use [Zed's Theme Builder](https://zed.dev/theme-builder) to design your own custom theme based on an existing one.
 
 This tool lets you fine-tune and preview how every surface in the Zode app will look.
 You can then export the JSON for [local use](./themes.md#local-themes) or for [publishing in Zode's extension store](./extensions/themes.md).
@@ -29,7 +29,7 @@ You can then export the JSON for [local use](./themes.md#local-themes) or for [p
 ## Configuring a Theme
 
 Your selected theme is stored in your settings file.
-You can open your settings file from the command palette with {#action zed::OpenSettingsFile} (bound to {#kb zed::OpenSettingsFile}).
+You can open your settings file from the command palette with {#action zode::OpenSettingsFile} (bound to {#kb zode::OpenSettingsFile}).
 
 By default, Zode maintains two themes: one for light mode and one for dark mode.
 You can set the mode to `"dark"` or `"light"` to ignore the current system mode.

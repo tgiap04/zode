@@ -198,7 +198,7 @@ Inherited from Zed, and largely unchanged:
 - [`ui`](./crates/ui) — shared components and the patterns they follow.
 - [`rpc`](./crates/rpc) — the wire messages. In this fork they serve remote development
   only; the collaboration server they were written for was removed.
-- [`cli`](./crates/cli), [`zed`](./crates/zed) — the CLI, and the binary where it all
+- [`cli`](./crates/cli), [`zed`](./crates/zode) — the CLI, and the binary where it all
   comes together.
 
 Specific to this fork:

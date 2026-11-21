@@ -2,7 +2,7 @@
 
 // ./script/cargo is a transparent wrapper around cargo that:
 // - When running in a clone of `./zed-industries/zed`
-// - outputs build timings to the ZED_DATA_DIR/build_timings
+// - outputs build timings to the ZODE_DATA_DIR/build_timings
 // When Zed starts for staff-members it uploads the build timings to Snowflake
 // To use it:
 //  ./script/cargo --init
