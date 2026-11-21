@@ -61,7 +61,7 @@ See [Using lintr](https://lintr.r-lib.org/articles/lintr.html) for a complete li
 
 Ensure that you have installed both the [ocsmit/zed-r](https://github.com/ocsmit/zed-r) extension (for general R language awareness in Zode) and the [Air](https://posit-dev.github.io/air/) extension.
 
-Configure language servers in Settings ({#kb zed::OpenSettings}) under Languages > R, or add to your settings file:
+Configure language servers in Settings ({#kb zode::OpenSettings}) under Languages > R, or add to your settings file:
 
 ```json [settings]
 {
@@ -73,7 +73,7 @@ Configure language servers in Settings ({#kb zed::OpenSettings}) under Languages
 }
 ```
 
-If you use the `"r_language_server"` from `REditorSupport/languageserver`, but would still like to use Air for formatting, configure in Settings ({#kb zed::OpenSettings}) under Languages > R, or add to your settings file:
+If you use the `"r_language_server"` from `REditorSupport/languageserver`, but would still like to use Air for formatting, configure in Settings ({#kb zode::OpenSettings}) under Languages > R, or add to your settings file:
 
 ```json [settings]
 {
@@ -111,7 +111,7 @@ TBD: Get this working
 
 ### REditorSupport/languageserver Configuration
 
-You can configure the [R languageserver settings](https://github.com/REditorSupport/languageserver#settings) via Zed Project Settings `.zed/settings.json` or Zode User Settings `~/.config/zode/settings.json`:
+You can configure the [R languageserver settings](https://github.com/REditorSupport/languageserver#settings) via Zode Project Settings `.zode/settings.json` or Zode User Settings `~/.config/zode/settings.json`:
 
 For example to disable Lintr linting and suppress code snippet suggestions (both enabled by default):
 

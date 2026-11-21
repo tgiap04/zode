@@ -252,7 +252,7 @@ impl Sidebar {
                 // the wrong one of the two.
                 rail_button("project-rail-open-settings", IconName::Settings)
                     .tooltip(move |_window, cx| {
-                        Tooltip::for_action("Open Settings", &zed_actions::OpenSettings, cx)
+                        Tooltip::for_action("Open Settings", &zode_actions::OpenSettings, cx)
                     })
                     // Dispatched rather than called, but not for the panel
                     // toggle's reason above: `on_click` hands out `&mut App`, so
@@ -261,7 +261,7 @@ impl Sidebar {
                     // into, and going through the action keeps the button on the
                     // same path as the command palette and any keybinding.
                     .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(zed_actions::OpenSettings), cx);
+                        window.dispatch_action(Box::new(zode_actions::OpenSettings), cx);
                     }),
             )
             // Last, below the settings gear: every activity bar that has an

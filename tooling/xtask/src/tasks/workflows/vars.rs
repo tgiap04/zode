@@ -36,11 +36,11 @@ secret!(DIGITALOCEAN_SPACES_SECRET_KEY);
 secret!(GITHUB_TOKEN);
 secret!(MACOS_CERTIFICATE);
 secret!(MACOS_CERTIFICATE_PASSWORD);
-secret!(ZED_CLIENT_CHECKSUM_SEED);
-secret!(ZED_SENTRY_MINIDUMP_ENDPOINT);
-secret!(SLACK_APP_ZED_UNIT_EVALS_BOT_TOKEN);
-secret!(ZED_ZIPPY_APP_ID);
-secret!(ZED_ZIPPY_APP_PRIVATE_KEY);
+secret!(ZODE_CLIENT_CHECKSUM_SEED);
+secret!(ZODE_SENTRY_MINIDUMP_ENDPOINT);
+secret!(SLACK_APP_ZODE_UNIT_EVALS_BOT_TOKEN);
+secret!(ZODE_ZIPPY_APP_ID);
+secret!(ZODE_ZIPPY_APP_PRIVATE_KEY);
 secret!(R2_ACCOUNT_ID);
 secret!(R2_ACCESS_KEY_ID);
 secret!(R2_SECRET_ACCESS_KEY);
@@ -58,6 +58,9 @@ var!(AZURE_SIGNING_ENDPOINT);
 // variable lets a staging backend be targeted by editing repo config rather
 // than by changing code.
 var!(ZODE_DRIVER_UPLOAD_URL);
+
+// The common name of the certificate in `MACOS_CERTIFICATE`; `script/bundle-mac` signs with it.
+var!(MACOS_SIGNING_IDENTITY);
 
 /// The stock `[profile.release]` (debug = "limited", codegen-units = 1, lto = "thin")
 /// is tuned for the shipped binary and does not fit a hosted runner's 14 GB disk or the
@@ -77,14 +80,15 @@ pub fn release_profile_envs() -> Env {
 
 pub fn bundle_envs(platform: Platform) -> Env {
     let env = release_profile_envs()
-        .add("ZED_CLIENT_CHECKSUM_SEED", ZED_CLIENT_CHECKSUM_SEED)
-        .add("ZED_MINIDUMP_ENDPOINT", ZED_SENTRY_MINIDUMP_ENDPOINT);
+        .add("ZODE_CLIENT_CHECKSUM_SEED", ZODE_CLIENT_CHECKSUM_SEED)
+        .add("ZODE_MINIDUMP_ENDPOINT", ZODE_SENTRY_MINIDUMP_ENDPOINT);
 
     match platform {
         Platform::Linux => env,
         Platform::Mac => env
             .add("MACOS_CERTIFICATE", MACOS_CERTIFICATE)
             .add("MACOS_CERTIFICATE_PASSWORD", MACOS_CERTIFICATE_PASSWORD)
+            .add("MACOS_SIGNING_IDENTITY", MACOS_SIGNING_IDENTITY)
             .add("APPLE_NOTARIZATION_KEY", APPLE_NOTARIZATION_KEY)
             .add("APPLE_NOTARIZATION_KEY_ID", APPLE_NOTARIZATION_KEY_ID)
             .add("APPLE_NOTARIZATION_ISSUER_ID", APPLE_NOTARIZATION_ISSUER_ID),
@@ -424,8 +428,8 @@ pub mod assets {
     /// installs on a WSL or SSH host. The names are what
     /// `remote_connection::remote_server_release::asset_name` asks for, so a spelling
     /// change here is a download the app can no longer find.
-    pub const REMOTE_SERVER_LINUX_X86_64: &str = "zed-remote-server-linux-x86_64.gz";
-    pub const REMOTE_SERVER_LINUX_AARCH64: &str = "zed-remote-server-linux-aarch64.gz";
+    pub const REMOTE_SERVER_LINUX_X86_64: &str = "zode-remote-server-linux-x86_64.gz";
+    pub const REMOTE_SERVER_LINUX_AARCH64: &str = "zode-remote-server-linux-aarch64.gz";
 
     /// Names the two archives above with their checksums; the app fetches it first and
     /// refuses an archive that does not hash to its entry. Written by

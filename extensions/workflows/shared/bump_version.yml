@@ -48,8 +48,8 @@ jobs:
       pull-requests: write
     uses: zed-industries/zed/.github/workflows/extension_bump.yml@main
     secrets:
-      app-id: ${{ secrets.ZED_ZIPPY_APP_ID }}
-      app-secret: ${{ secrets.ZED_ZIPPY_APP_PRIVATE_KEY }}
+      app-id: ${{ secrets.ZODE_ZIPPY_APP_ID }}
+      app-secret: ${{ secrets.ZODE_ZIPPY_APP_PRIVATE_KEY }}
     with:
       bump-type: ${{ needs.determine_bump_type.outputs.bump_type }}
       force-bump: ${{ github.event_name != 'push' }}

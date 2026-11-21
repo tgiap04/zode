@@ -102,8 +102,8 @@ Zode uses Metal for rendering. If you experience graphical glitches:
 
 If Zode uses more resources than expected:
 
-1. Check for runaway language servers in the terminal output (`zed: open log`)
+1. Check for runaway language servers in the terminal output (`zode: open log`)
 2. Try disabling extensions one by one to identify conflicts
 3. For large projects, consider using [project settings](./reference/all-settings.md#file-scan-exclusions) to exclude unnecessary folders from indexing
 
-For additional help, see the [Troubleshooting guide](./troubleshooting.md) or visit the [Zode Discord](https://discord.gg/zed-community).
+For additional help, see the [Troubleshooting guide](./troubleshooting.md) or open an issue on [GitHub](https://github.com/tgiap04/zode/issues).

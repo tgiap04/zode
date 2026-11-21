@@ -101,7 +101,7 @@ Until a signed set has been published, a build that carries this check cannot
 download drivers. Drivers that are already installed keep working, and so do
 older apps, which read the unsigned copy under `latest`.
 
-`ZODE_API_URL` defaults to `https://api.zodekit.site/api`
+`ZODE_API_URL` defaults to `https://api.zodekit.com/api`
 (`zode_account::api_url()`); point it at a backend you're running locally to
 test the download path end to end, e.g.
 `ZODE_API_URL=http://localhost:8000/api`. Every URL the app follows must stay on
@@ -115,6 +115,12 @@ work for someone who has never signed in.
 release assets, and CI runs it that way. `-n` skips both the build and the
 packaging; `make bundle` passes it, because a local bundle never carries
 drivers and publishing them is the release job's work.
+
+Code signing and symbol upload are off unless their credentials are set.
+`script/bundle-mac` signs when `MACOS_CERTIFICATE` and the notarization keys are
+present, and then also needs `MACOS_SIGNING_IDENTITY`, the certificate's common
+name. `script/bundle-linux` and `script/bundle-windows.ps1` upload debug symbols
+only when both `SENTRY_AUTH_TOKEN` and `SENTRY_ORG` are set.
 
 ### Publishing and signing a driver set
 
@@ -185,7 +191,7 @@ protocol handshake. A driver that speaks a different protocol than this build is
 refused, and the message says to remove it in the connection dialog and download
 it again, or to update Zode if that does not help.
 
-This is also the manual/offline install path: no route to `api.zodekit.site`
+This is also the manual/offline install path: no route to `api.zodekit.com`
 still works by placing the binary at
 `<data_dir>/database_drivers/<id>/<version>/zode-db-<id>` (add `.exe` on
 Windows). `<version>` can be any directory name of the form
@@ -248,19 +254,19 @@ If you need to test something out using the real system keychain in a
 development build, run Zode with the following environment variable set:
 
 ```
-ZED_DEVELOPMENT_USE_KEYCHAIN=1
+ZODE_DEVELOPMENT_USE_KEYCHAIN=1
 ```
 
 ## Performance Measurements
 
 Zode includes a frame time measurement system that can be used to profile how long it takes to render each frame. This is particularly useful when comparing rendering performance between different versions or when optimizing frame rendering code.
 
-### Using ZED_MEASUREMENTS
+### Using ZODE_MEASUREMENTS
 
-To enable performance measurements, set the `ZED_MEASUREMENTS` environment variable:
+To enable performance measurements, set the `ZODE_MEASUREMENTS` environment variable:
 
 ```sh
-export ZED_MEASUREMENTS=1
+export ZODE_MEASUREMENTS=1
 ```
 
 When enabled, Zode will print frame rendering timing information to stderr, showing how long each frame takes to render.
@@ -272,7 +278,7 @@ Here's a typical workflow for comparing frame rendering performance between diff
 1. **Enable measurements:**
 
    ```sh
-   export ZED_MEASUREMENTS=1
+   export ZODE_MEASUREMENTS=1
    ```
 
 2. **Test the first version:**
@@ -309,8 +315,8 @@ ETW recordings may contain personally identifiable or security-sensitive informa
 
 Open the command palette and run one of the following:
 
-- `zed: record etw trace`: records CPU, GPU, memory, and I/O activity
-- `zed: record etw trace with heap tracing`: includes heap allocation data for the Zode process
+- `zode: record etw trace`: records CPU, GPU, memory, and I/O activity
+- `zode: record etw trace with heap tracing`: includes heap allocation data for the Zode process
 
 Zode will prompt you to choose a save location for the `.etl` file, then request administrator permission. Once granted, recording will begin.
 
@@ -318,14 +324,14 @@ Zode will prompt you to choose a save location for the `.etl` file, then request
 
 While a trace is recording, open the command palette and run one of the following:
 
-- `zed: save etw trace`: stops recording and saves the trace to disk
-- `zed: cancel etw trace`: stops recording without saving
+- `zode: save etw trace`: stops recording and saves the trace to disk
+- `zode: cancel etw trace`: stops recording without saving
 
 Recordings automatically save after 60 seconds if not stopped manually.
 
 ## Contributor links
 
-- [CONTRIBUTING.md](https://github.com/zed-industries/zed/blob/main/CONTRIBUTING.md)
+- [CONTRIBUTING.md](https://github.com/tgiap04/zode/blob/develop/CONTRIBUTING.md)
 - [Debugging Crashes](./development/debugging-crashes.md)
-- [Code of Conduct](https://zed.dev/code-of-conduct)
-- [Zode Contributor License](https://zed.dev/cla)
+- [Code of Conduct](https://github.com/tgiap04/zode/blob/develop/CODE_OF_CONDUCT.md)
+- [Contributions are under the repository's licenses](https://github.com/tgiap04/zode)

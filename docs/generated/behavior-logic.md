@@ -631,11 +631,11 @@ Defines the bulk of the editor's data-carrying keymap actions via repeated `#[de
 **Payload**: N/A
 **File Schema**: N/A — not a file-exchange type
 **Source File**: crates/feedback/src/feedback.rs
-**Source Symbol**: OpenZedRepo
+**Source Symbol**: OpenZodeRepo
 
 ### Description
 
-`actions!(zed, [OpenZedRepo, CopyInstalledExtensionsIntoClipboard])` opens the project's GitHub repository in the browser and copies the installed-extensions list to the clipboard for bug reports.
+`actions!(zed, [OpenZodeRepo, CopyInstalledExtensionsIntoClipboard])` opens the project's GitHub repository in the browser and copies the installed-extensions list to the clipboard for bug reports.
 
 ### Related Modules
 
@@ -927,12 +927,12 @@ Defines the bulk of the editor's data-carrying keymap actions via repeated `#[de
 **Trigger**: Command palette
 **Payload**: N/A
 **File Schema**: N/A — not a file-exchange type
-**Source File**: crates/install_cli/src/register_zed_scheme.rs
-**Source Symbol**: RegisterZedScheme
+**Source File**: crates/install_cli/src/register_zode_scheme.rs
+**Source Symbol**: RegisterZodeScheme
 
 ### Description
 
-`actions!(cli, [RegisterZedScheme])` registers the `zed://` URL scheme handler with the OS.
+`actions!(cli, [RegisterZodeScheme])` registers the `zed://` URL scheme handler with the OS.
 
 ### Related Modules
 
@@ -2198,7 +2198,7 @@ Declares `Open { create_new_window: bool }` (`#[derive(Action)]`, namespace `wor
 **Trigger**: Keybinding / command palette / native application menu
 **Payload**: N/A
 **File Schema**: N/A — not a file-exchange type
-**Source File**: crates/zed/src/zed.rs
+**Source File**: crates/zode/src/zode.rs
 **Source Symbol**: DebugElements
 
 ### Description
@@ -2217,16 +2217,16 @@ Declares `Open { create_new_window: bool }` (`#[derive(Action)]`, namespace `wor
 **Trigger**: Keybinding / command palette — cross-crate shared action namespace re-exported to avoid circular crate dependencies
 **Payload**: N/A
 **File Schema**: N/A — not a file-exchange type
-**Source File**: crates/zed_actions/src/lib.rs
+**Source File**: crates/zode_actions/src/lib.rs
 **Source Symbol**: OpenBrowser
 
 ### Description
 
-Declares data-carrying `OpenBrowser { url }`, `OpenZedUrl { url }`, `ChangeKeybinding { action }` (`#[derive(Action)]`, namespace `zed`), the unit-action block `actions!(zed, [OpenSettings, OpenSettingsFile, OpenProjectSettings, OpenDefaultKeymapFile, ...])`, and further data-carrying actions `Extensions { category_filter, id }`, `AcpRegistry`, `DecreaseBufferFontSize { persist }`, `IncreaseBufferFontSize { persist }`, `OpenSettingsAt { path }`. This crate exists solely to let leaf UI crates (extensions_ui, onboarding, theme_selector, etc.) reference these shared action types without depending on `zed`/`workspace` directly.
+Declares data-carrying `OpenBrowser { url }`, `OpenZodeUrl { url }`, `ChangeKeybinding { action }` (`#[derive(Action)]`, namespace `zed`), the unit-action block `actions!(zed, [OpenSettings, OpenSettingsFile, OpenProjectSettings, OpenDefaultKeymapFile, ...])`, and further data-carrying actions `Extensions { category_filter, id }`, `AcpRegistry`, `DecreaseBufferFontSize { persist }`, `IncreaseBufferFontSize { persist }`, `OpenSettingsAt { path }`. This crate exists solely to let leaf UI crates (extensions_ui, onboarding, theme_selector, etc.) reference these shared action types without depending on `zed`/`workspace` directly.
 
 ### Related Modules
 
-- zed_actions
+- zode_actions
 
 ---
 
@@ -3360,7 +3360,7 @@ Spawns a background `BackgroundScanner` that watches the worktree's absolute pat
 **Trigger**: Filesystem change (`.scm` query file) under `crates/grammars/src` in a debug build
 **Payload**: N/A
 **File Schema**: N/A — not a file-exchange type
-**Source File**: crates/zed/src/main.rs
+**Source File**: crates/zode/src/main.rs
 **Source Symbol**: watch_languages
 
 ### Description
@@ -3387,7 +3387,7 @@ Debug-only (`#[cfg(debug_assertions)]`) background task that watches the local g
 **Trigger**: Keymap file changes on disk, or the `SettingsStore` global changes in a way that affects the base keymap (base keymap setting, vim-mode setting, helix-mode setting), or (platform-specific) the OS keyboard layout changes
 **Payload**: N/A
 **File Schema**: N/A — not a file-exchange type
-**Source File**: crates/zed/src/zed.rs
+**Source File**: crates/zode/src/zode.rs
 **Source Symbol**: handle_keymap_file_changes
 
 ### Description
@@ -5093,7 +5093,7 @@ Runs the filesystem `create_dir`/`write` call on the background executor, keepin
 **Trigger**: Zode starts in an environment where the active theme file may change on disk
 **Payload**: N/A
 **File Schema**: N/A
-**Source File**: crates/zed/src/main.rs
+**Source File**: crates/zode/src/main.rs
 **Source Symbol**: zed::watch_themes
 
 ### Description
@@ -5120,7 +5120,7 @@ Spawns and detaches a background loop that watches the theme file path for chang
 **Trigger**: user clicks "Backup and Update" in the settings/keymap migration dialog
 **Payload**: N/A
 **File Schema**: N/A
-**Source File**: crates/zed/src/zed/migrate.rs
+**Source File**: crates/zode/src/zode/migrate.rs
 **Source Symbol**: MigrationNotification::render (backup-and-migrate on_click handler)
 
 ### Description

@@ -573,18 +573,18 @@ erDiagram
 
 **Description**: A single embedded terminal instance (wraps the Alacritty terminal emulator core). Owned by a `Project`'s `Terminals` registry; rendered inside panes/panels. Trims and restores its scrollback across hibernation in this fork (`pre_hibernate_scroll_history`).
 
-| Attribute                    | Type                              | Constraints | Description                                                                                                            |
-| ---------------------------- | --------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------- |
-| terminal_type                | TerminalType (enum)               | NOT NULL    | Pty vs. DisplayOnly — see Discriminator                                                                                |
-| term                         | Arc<FairMutex<Term<ZedListener>>> | NOT NULL    | The underlying Alacritty terminal grid/state                                                                           |
-| pre_hibernate_scroll_history | Option<usize>                     | nullable    | This terminal's `scrolling_history` size before it was last shrunk to save memory on hibernate; `None` if never shrunk |
-| matches                      | Vec<RangeInclusive<AlacPoint>>    |             | Current search-highlight matches                                                                                       |
-| last_content                 | TerminalContent                   | NOT NULL    | Cached rendered content snapshot                                                                                       |
-| task                         | Option<TaskState>                 | nullable    | Set when this terminal was spawned to run a `tasks.json` task rather than an interactive shell                         |
-| vi_mode_enabled              | bool                              | NOT NULL    | Vi-style terminal navigation toggle                                                                                    |
-| is_remote_terminal           | bool                              | NOT NULL    | True for terminals opened on a remote-dev host                                                                         |
-| child_exited                 | Option<ExitStatus>                | nullable    | Set once the shell/process has exited                                                                                  |
-| activation_script            | Vec<String>                       |             | Shell init commands (e.g. venv activation) run on spawn                                                                |
+| Attribute                    | Type                               | Constraints | Description                                                                                                            |
+| ---------------------------- | ---------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------- |
+| terminal_type                | TerminalType (enum)                | NOT NULL    | Pty vs. DisplayOnly — see Discriminator                                                                                |
+| term                         | Arc<FairMutex<Term<ZodeListener>>> | NOT NULL    | The underlying Alacritty terminal grid/state                                                                           |
+| pre_hibernate_scroll_history | Option<usize>                      | nullable    | This terminal's `scrolling_history` size before it was last shrunk to save memory on hibernate; `None` if never shrunk |
+| matches                      | Vec<RangeInclusive<AlacPoint>>     |             | Current search-highlight matches                                                                                       |
+| last_content                 | TerminalContent                    | NOT NULL    | Cached rendered content snapshot                                                                                       |
+| task                         | Option<TaskState>                  | nullable    | Set when this terminal was spawned to run a `tasks.json` task rather than an interactive shell                         |
+| vi_mode_enabled              | bool                               | NOT NULL    | Vi-style terminal navigation toggle                                                                                    |
+| is_remote_terminal           | bool                               | NOT NULL    | True for terminals opened on a remote-dev host                                                                         |
+| child_exited                 | Option<ExitStatus>                 | nullable    | Set once the shell/process has exited                                                                                  |
+| activation_script            | Vec<String>                        |             | Shell init commands (e.g. venv activation) run on spawn                                                                |
 
 **Relationships**:
 

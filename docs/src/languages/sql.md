@@ -26,7 +26,7 @@ which sql-formatter
 sql-formatter --version
 ```
 
-3. Configure formatting in Settings ({#kb zed::OpenSettings}) under Languages > SQL, or add to your settings file:
+3. Configure formatting in Settings ({#kb zode::OpenSettings}) under Languages > SQL, or add to your settings file:
 
 ```json [settings]
   "languages": {
@@ -43,7 +43,7 @@ sql-formatter --version
 
 Substitute your preferred [SQL Dialect] for `mysql` above (`duckdb`, `hive`, `mariadb`, `postgresql`, `redshift`, `snowflake`, `sqlite`, `spark`, etc).
 
-You can add this to Zode project settings (`.zed/settings.json`) or via your Zode user settings (`~/.config/zode/settings.json`).
+You can add this to Zode project settings (`.zode/settings.json`) or via your Zode user settings (`~/.config/zode/settings.json`).
 
 ### Advanced Formatting
 

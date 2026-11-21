@@ -25,9 +25,9 @@ Before starting to develop an extension for Zode, be sure to [install Rust via r
 
 When developing an extension, you can use it in Zode without needing to publish it by installing it as a _dev extension_.
 
-From the extensions page, click the `Install Dev Extension` button (or the {#action zed::InstallDevExtension} action) and select the directory containing your extension.
+From the extensions page, click the `Install Dev Extension` button (or the {#action zode::InstallDevExtension} action) and select the directory containing your extension.
 
-If you need to troubleshoot, check Zode.log ({#action zed::OpenLog}) for additional output. For debug output, close and relaunch Zode from the command line with `zode --foreground`, which shows more verbose INFO-level logs.
+If you need to troubleshoot, check Zode.log ({#action zode::OpenLog}) for additional output. For debug output, close and relaunch Zode from the command line with `zode --foreground`, which shows more verbose INFO-level logs.
 
 If you already have the published version of the extension installed, the published version will be uninstalled prior to the installation of the dev extension. After successful installation, the `Extensions` page will indicate that the upstream extension is "Overridden by dev extension".
 
@@ -82,7 +82,7 @@ crate-type = ["cdylib"]
 zed_extension_api = "0.1.0"
 ```
 
-Use the latest version of the [`zed_extension_api`](https://crates.io/crates/zed_extension_api) available on crates.io. Make sure it's still [compatible with Zode versions](https://github.com/zed-industries/zed/blob/main/crates/extension_api#compatible-zed-versions) you want to support.
+Use the latest version of the [`zed_extension_api`](https://crates.io/crates/zed_extension_api) available on crates.io. Make sure it's still [compatible with Zode versions](https://github.com/tgiap04/zode/blob/develop/crates/extension_api#compatible-zed-versions) you want to support.
 
 In the `src/lib.rs` file in your Rust crate you will need to define a struct for your extension and implement the `Extension` trait, as well as use the `register_extension!` macro to register your extension:
 
@@ -93,7 +93,7 @@ struct MyExtension {
     // ... state
 }
 
-impl zed::Extension for MyExtension {
+impl zode::Extension for MyExtension {
     // ...
 }
 
@@ -106,7 +106,7 @@ zed::register_extension!(MyExtension);
 
 1. Fork the repo
 
-> **Note:** It is very helpful if you fork the `zed-industries/extensions` repo to a personal GitHub account instead of a GitHub organization, as this allows Zode staff to push any needed changes to your PR to expedite the publishing process.
+> **Note:** It is very helpful if you fork the `zed-industries/extensions` repo to a personal GitHub account instead of a GitHub organization, as this allows Zed staff to push any needed changes to your PR to expedite the publishing process.
 
 2. Clone the repo to your local machine
 

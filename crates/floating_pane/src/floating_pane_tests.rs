@@ -1898,8 +1898,8 @@ mod dropping {
             .add_window_view(|window, cx| workspace::MultiWorkspace::test_new(project, window, cx));
         cx.run_until_parked();
 
-        cx.dispatch_action(zed_actions::floating_pane::ToggleFloatingPane);
-        cx.dispatch_action(zed_actions::floating_pane::NewTerminal);
+        cx.dispatch_action(zode_actions::floating_pane::ToggleFloatingPane);
+        cx.dispatch_action(zode_actions::floating_pane::NewTerminal);
         cx.run_until_parked();
         cx.update(|_window, _cx| {});
         cx.run_until_parked();
@@ -1908,7 +1908,7 @@ mod dropping {
             .debug_bounds("floating-pane-tab-bar-add")
             .expect("a tab bar with a tab in it must draw its own new-item button");
 
-        cx.dispatch_action(zed_actions::floating_pane::SplitRight);
+        cx.dispatch_action(zode_actions::floating_pane::SplitRight);
         cx.run_until_parked();
         cx.update(|_window, _cx| {});
         cx.run_until_parked();
@@ -2103,10 +2103,10 @@ mod new_entries {
         });
     }
 
-    /// `NewMarkdownNote` and `OpenMarkdownNote` are declared in `zed_actions`
+    /// `NewMarkdownNote` and `OpenMarkdownNote` are declared in `zode_actions`
     /// but were registered nowhere -- reachable only through the `+` menu's
     /// own click handler, the same gap this crate's own doc points at for
-    /// `zed_actions::floating_pane`'s two note actions. Reachability rather
+    /// `zode_actions::floating_pane`'s two note actions. Reachability rather
     /// than a full dispatch: `OpenMarkdownNote` ends in a system file dialog,
     /// which the test platform has no double for (`prompt_for_paths` is
     /// `unimplemented!()` there), so a real dispatch of it would panic for a
@@ -2125,11 +2125,11 @@ mod new_entries {
 
         cx.update(|window, cx| {
             assert!(
-                window.is_action_available(&zed_actions::floating_pane::NewMarkdownNote, cx),
+                window.is_action_available(&zode_actions::floating_pane::NewMarkdownNote, cx),
                 "NewMarkdownNote must reach a registered handler"
             );
             assert!(
-                window.is_action_available(&zed_actions::floating_pane::OpenMarkdownNote, cx),
+                window.is_action_available(&zode_actions::floating_pane::OpenMarkdownNote, cx),
                 "OpenMarkdownNote must reach a registered handler"
             );
         });

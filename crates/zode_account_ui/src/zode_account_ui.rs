@@ -2,7 +2,7 @@
 //! dispatches.
 //!
 //! The rail button itself lives in `sidebar`, beside the other rail items, and
-//! reaches this crate only through [`zed_actions::account`] — so the sidebar
+//! reaches this crate only through [`zode_actions::account`] — so the sidebar
 //! does not depend on the account's UI, and this crate does not depend on the
 //! sidebar.
 
@@ -71,7 +71,7 @@ pub fn refresh_plan(cx: &mut App) {
 
 fn sign_in(
     workspace: &mut Workspace,
-    _: &zed_actions::account::SignIn,
+    _: &zode_actions::account::SignIn,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -90,7 +90,7 @@ fn sign_in(
 
 fn sign_out(
     _: &mut Workspace,
-    _: &zed_actions::account::SignOut,
+    _: &zode_actions::account::SignOut,
     _window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -104,13 +104,13 @@ fn sign_out(
 
 fn open_account_on_web(
     _: &mut Workspace,
-    _: &zed_actions::account::OpenAccountOnWeb,
+    _: &zode_actions::account::OpenAccountOnWeb,
     _window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
     // `web_url`, not `api_url`. Stripping `/api` off the API base was right
     // only while the API answered on the site's own host; once it moved to
-    // `api.zodekit.site` this opened a link to a host that serves no pages.
+    // `api.zodekit.com` this opened a link to a host that serves no pages.
     cx.open_url(&format!("{}{ACCOUNT_WEB_PATH}", zode_account::web_url()));
 }
 
@@ -123,7 +123,7 @@ fn sync_settings(
     // The window is opened from the spawned task below, once the keychain has
     // answered, so this borrow is not the one that opens it.
     _workspace: &mut Workspace,
-    _: &zed_actions::account::SyncSettings,
+    _: &zode_actions::account::SyncSettings,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -183,7 +183,7 @@ fn watch_for_divergence(
 
 fn show_recovery_key(
     workspace: &mut Workspace,
-    _: &zed_actions::account::ShowRecoveryKey,
+    _: &zode_actions::account::ShowRecoveryKey,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -197,7 +197,7 @@ fn show_recovery_key(
 
 fn enter_recovery_key(
     workspace: &mut Workspace,
-    _: &zed_actions::account::EnterRecoveryKey,
+    _: &zode_actions::account::EnterRecoveryKey,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -216,7 +216,7 @@ fn enter_recovery_key(
 /// that still opens whatever it already downloaded.
 fn rotate_recovery_key(
     workspace: &mut Workspace,
-    _: &zed_actions::account::RotateRecoveryKey,
+    _: &zode_actions::account::RotateRecoveryKey,
     window: &mut Window,
     cx: &mut Context<Workspace>,
 ) {
@@ -353,8 +353,8 @@ mod tests {
             },
             team: None,
             grandfather_env_until: None,
-            upgrade_url: "https://zodekit.site/pricing".into(),
-            manage_url: "https://zodekit.site/account/billing".into(),
+            upgrade_url: "https://zodekit.com/pricing".into(),
+            manage_url: "https://zodekit.com/account/billing".into(),
         }
     }
 

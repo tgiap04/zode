@@ -37,7 +37,7 @@ The extension doesn't attempt to download `lldb-dap` if it's not found.
       "command": "swift",
       "args": ["build"]
     },
-    "program": "$ZED_WORKTREE_ROOT/swift-app/.build/arm64-apple-macosx/debug/swift-app",
+    "program": "$ZODE_WORKTREE_ROOT/swift-app/.build/arm64-apple-macosx/debug/swift-app",
     "request": "launch",
     "adapter": "Swift"
   }

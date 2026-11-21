@@ -12,10 +12,10 @@ ParseZedWorkspace
 Write-Host "Uploading nightly for target: $target"
 
 $bucketName = "zed-nightly-host"
-$releaseVersion = & "$PSScriptRoot\get-crate-version.ps1" zed
+$releaseVersion = & "$PSScriptRoot\get-crate-version.ps1" zode
 $version = "$releaseVersion+nightly.$env:GITHUB_RUN_NUMBER.$env:GITHUB_SHA"
 
-$remoteServerFiles = Get-ChildItem -Path "target" -Filter "zed-remote-server-windows-*.zip" -Recurse -File -ErrorAction SilentlyContinue
+$remoteServerFiles = Get-ChildItem -Path "target" -Filter "zode-remote-server-windows-*.zip" -Recurse -File -ErrorAction SilentlyContinue
 
 foreach ($file in $remoteServerFiles) {
     UploadToBlobStore -BucketName $bucketName -FileToUpload $file.FullName -BlobStoreKey "nightly/$($file.Name)"

@@ -11,8 +11,11 @@
 [target.'cfg(all())']
 rustflags = ["-D", "warnings"]
 
-# We don't need fullest debug information for dev stuff (tests etc.) in CI.
+# CI builds from scratch, so incremental data is only extra writes, and sccache refuses to cache
+# crates compiled incrementally. Line tables keep panic backtraces readable with less to compile
+# and link than "limited".
 [profile.dev]
-debug = "limited"
+debug = "line-tables-only"
+incremental = false
 
 

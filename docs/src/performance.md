@@ -51,7 +51,7 @@ Download the profiler:
 
 ## Usage
 
-Open the profiler (tracy-profiler), you should see zed in the list of `Discovered clients` click it.
+Open the profiler (tracy-profiler), you should see Zode in the list of `Discovered clients` click it.
 
 <img width="392" height="auto" alt="image" src="https://github.com/user-attachments/assets/b6f06fc3-6b25-41c7-ade9-558cc93d6033" style="display: block; margin: 0 auto;"/>
 
@@ -96,7 +96,7 @@ let _enter = span.enter(); // span guard, when this is dropped the span ends (an
 
 # Task/Async profiling
 
-Get a profile of the zed foreground executor and background executors. Check if
+Get a profile of the Zode foreground executor and background executors. Check if
 anything is blocking the foreground too long or taking too much (clock) time in
 the background.
 
@@ -122,7 +122,7 @@ Download the importer
 
 ## To Save a Trace:
 
-- Run the action: `zed open performance profiler`
+- Run the action: `zode: open performance profiler`
 - Hit the save button. This opens a save dialog or if that fails to open the trace gets saved in your working directory.
 - Convert the profile so it can be imported in tracy using the importer: `./tracy-import-miniprofiler <path to performance_profile.miniprof.json> output.tracy`
 - Go to <https://tracy.nereid.pl/> hit the 'power button' in the top left and then open saved trace.

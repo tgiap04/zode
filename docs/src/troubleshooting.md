@@ -15,15 +15,15 @@ Other times, troubleshooting means gathering the right information (logs, profil
 
 When reporting issues or seeking help, it's useful to know your Zode version and system specifications. You can retrieve this information using the following actions from the command palette:
 
-- {#action zed::About}: Find your Zode version number
-- {#action zed::CopySystemSpecsIntoClipboard}: Populate your clipboard with Zode version number, operating system version, and hardware specs
-- {#action zed::CopyInstalledExtensionsIntoClipboard}: Populate your clipboard with a list of your installed extensions and versions
+- {#action zode::About}: Find your Zode version number
+- {#action zode::CopySystemSpecsIntoClipboard}: Populate your clipboard with Zode version number, operating system version, and hardware specs
+- {#action zode::CopyInstalledExtensionsIntoClipboard}: Populate your clipboard with a list of your installed extensions and versions
 
 ## Zode Log
 
 Often, a good first place to look when troubleshooting any issue in Zode is the Zode log, which might contain clues about what's going wrong.
-You can review the most recent 1000 lines of the log by running the {#action zed::OpenLog} action from the command palette.
-If you want to view the full file, you can reveal it in your operating system's native file manager via {#action zed::RevealLogInFileManager} from the command palette.
+You can review the most recent 1000 lines of the log by running the {#action zode::OpenLog} action from the command palette.
+If you want to view the full file, you can reveal it in your operating system's native file manager via {#action zode::RevealLogInFileManager} from the command palette.
 
 You'll find the Zode log in the respective location on each operating system:
 
@@ -31,10 +31,10 @@ You'll find the Zode log in the respective location on each operating system:
 - Windows: `C:\Users\YOU\AppData\Local\Zode\logs\Zode.log`
 - Linux: `~/.local/share/zode/logs/Zode.log`, or `$XDG_DATA_HOME/zode/logs/Zode.log` when `XDG_DATA_HOME` is set
 
-> **Note:** In some cases, it might be useful to monitor the log live, such as when [developing a Zode extension](https://zed.dev/docs/extensions/developing-extensions).
+> **Note:** In some cases, it might be useful to monitor the log live, such as when [developing a Zode extension](https://zodekit.com/docs/extensions/developing-extensions).
 > Example: `tail -f ~/Library/Logs/Zode/Zode.log`
 
-The log may contain enough context to help you debug the issue yourself, or you may find specific errors that are useful when filing a [GitHub issue](https://github.com/zed-industries/zed/issues/new/choose) or when talking to Zode staff in our [Discord server](https://zed.dev/community-links#forums-and-discussions).
+The log may contain enough context to help you debug the issue yourself, or you may find specific errors that are useful when filing a [GitHub issue](https://github.com/tgiap04/zode/issues/new/choose) or when talking to the Zode maintainers on the [issue tracker](https://github.com/tgiap04/zode/issues).
 
 ## Performance Issues (Profiling)
 
@@ -55,7 +55,7 @@ Xcode Instruments (which comes bundled with your [Xcode](https://apps.apple.com/
    ![A completed Time Profiler recording in Instruments](https://images.zed.dev/docs/troubleshooting/instruments-recording.webp)
 1. Save the trace file
 1. Compress the trace file into a zip archive
-1. File a [GitHub issue](https://github.com/zed-industries/zed/issues/new/choose) with the trace zip attached
+1. File a [GitHub issue](https://github.com/tgiap04/zode/issues/new/choose) with the trace zip attached
 
 <!--### Windows-->
 
@@ -82,7 +82,7 @@ If you're experiencing startup issues, you can test whether it's workspace-relat
 > **Note**: Moving the workspace database will cause Zode to create a fresh one.
 > Your recent projects, open tabs, etc. will be reset to "factory".
 
-If your issue persists after regenerating the database, please [file an issue](https://github.com/zed-industries/zed/issues/new/choose).
+If your issue persists after regenerating the database, please [file an issue](https://github.com/tgiap04/zode/issues/new/choose).
 
 ## Language Server Issues
 

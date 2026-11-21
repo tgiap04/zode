@@ -2,8 +2,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Feature request
-    url: https://github.com/zed-industries/zed/discussions/new/choose
-    about: To request a feature, open a new discussion under one of the appropriate categories.
-  - name: Our Discord community
-    url: https://discord.com/invite/zedindustries
-    about: Join our Discord server for real-time discussion and user support.
+    url: https://github.com/tgiap04/zode/issues
+    about: Search the existing issues first, then describe the feature you need in a new issue.

@@ -43,7 +43,7 @@ impl Sidebar {
                     } else {
                         "Show Database"
                     },
-                    &zed_actions::database::ToggleDatabase,
+                    &zode_actions::database::ToggleDatabase,
                     cx,
                 )
             })
@@ -52,7 +52,7 @@ impl Sidebar {
             // the workspace. Same trap as `render_rail_footer` and
             // `render_rail_agents`.
             .on_click(|_, window, cx| {
-                window.dispatch_action(Box::new(zed_actions::database::ToggleDatabase), cx)
+                window.dispatch_action(Box::new(zode_actions::database::ToggleDatabase), cx)
             })
             .into_any_element()
     }
@@ -87,7 +87,7 @@ mod tests {
         cx.run_until_parked();
 
         cx.update(|window, cx| {
-            window.dispatch_action(Box::new(zed_actions::database::ToggleDatabase), cx)
+            window.dispatch_action(Box::new(zode_actions::database::ToggleDatabase), cx)
         });
         cx.run_until_parked();
         cx.update(|window, _| window.refresh());
@@ -117,7 +117,7 @@ mod tests {
         });
 
         cx.update(|window, cx| {
-            window.dispatch_action(Box::new(zed_actions::database::ToggleDatabase), cx)
+            window.dispatch_action(Box::new(zode_actions::database::ToggleDatabase), cx)
         });
         cx.run_until_parked();
 

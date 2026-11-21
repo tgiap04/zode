@@ -114,7 +114,7 @@ impl BranchPanel {
         // Both reads below are awaited before the panel is built, and that
         // ordering is load-bearing, not incidental. `BranchPanel::load`
         // completing on the first poll of the `futures::join!` in
-        // `zed.rs:593` (`initialize_panels`) is what stops `starts_open: true`
+        // `zode.rs:593` (`initialize_panels`) is what stops `starts_open: true`
         // collapsing a dock stack that is being restored -- see
         // docs/journals/2026-09-11-dock-state-read-from-the-wrong-owner.md,
         // "Latent, recorded, not fixed" #1. Removing this await is a change to

@@ -5,8 +5,8 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: '0'
   RUST_BACKTRACE: '1'
-  ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
-  ZED_EVAL_TELEMETRY: '1'
+  ZODE_CLIENT_CHECKSUM_SEED: ${{ secrets.ZODE_CLIENT_CHECKSUM_SEED }}
+  ZODE_EVAL_TELEMETRY: '1'
   MODEL_NAME: ${{ inputs.model_name }}
 on:
   workflow_dispatch:
@@ -54,7 +54,7 @@ jobs:
         R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
         R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
         R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        SCCACHE_BUCKET: sccache-zed
+        SCCACHE_BUCKET: sccache-zode
     - name: ./script/run-unit-evals
       run: ./script/run-unit-evals
       env:

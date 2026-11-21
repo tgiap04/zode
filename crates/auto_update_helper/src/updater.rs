@@ -23,7 +23,7 @@ use crate::windows_impl::WM_JOB_UPDATED;
 
 /// The app binary's name inside the install directory.
 ///
-/// `script/bundle-windows.ps1` copies `zode.exe` to `Zode.exe` and `zed.iss` installs that
+/// `script/bundle-windows.ps1` copies `zode.exe` to `Zode.exe` and `zode.iss` installs that
 /// name, so this is the file the update has to move aside and replace. It was `Zed.exe`
 /// here for as long as the helper went unrun: every job below failed to find that file,
 /// rolled back, and reported success at rolling back.
@@ -469,20 +469,20 @@ mod test {
             Job {
                 apply: Box::new(|_| {
                     std::thread::sleep(Duration::from_millis(1000));
-                    if let Ok(config) = std::env::var("ZED_AUTO_UPDATE") {
+                    if let Ok(config) = std::env::var("ZODE_AUTO_UPDATE") {
                         match config.as_str() {
                             "err1" => {
                                 Err(std::io::Error::other("Simulated error")).context("Anyhow!")
                             }
                             "err2" => Ok(()),
-                            _ => panic!("Unknown ZED_AUTO_UPDATE value: {}", config),
+                            _ => panic!("Unknown ZODE_AUTO_UPDATE value: {}", config),
                         }
                     } else {
                         Ok(())
                     }
                 }),
                 rollback: Box::new(|_| {
-                    unsafe { std::env::set_var("ZED_AUTO_UPDATE_RB", "rollback1") };
+                    unsafe { std::env::set_var("ZODE_AUTO_UPDATE_RB", "rollback1") };
                     Ok(())
                 }),
             },
@@ -504,13 +504,13 @@ mod test {
             Job {
                 apply: Box::new(|_| {
                     std::thread::sleep(Duration::from_millis(1000));
-                    if let Ok(config) = std::env::var("ZED_AUTO_UPDATE") {
+                    if let Ok(config) = std::env::var("ZODE_AUTO_UPDATE") {
                         match config.as_str() {
                             "err1" => Ok(()),
                             "err2" => {
                                 Err(std::io::Error::other("Simulated error")).context("Anyhow!")
                             }
-                            _ => panic!("Unknown ZED_AUTO_UPDATE value: {}", config),
+                            _ => panic!("Unknown ZODE_AUTO_UPDATE value: {}", config),
                         }
                     } else {
                         Ok(())
@@ -531,7 +531,7 @@ mod test {
         let app_dir = tempfile::tempdir().unwrap();
         let app_dir = app_dir.path();
         // Simulate a timeout
-        unsafe { std::env::set_var("ZED_AUTO_UPDATE", "err1") };
+        unsafe { std::env::set_var("ZODE_AUTO_UPDATE", "err1") };
         let ret = run_jobs(&*SIMULATED_JOBS, app_dir, None, false);
         assert!(
             ret.is_err_and(|e| e.to_string().as_str() == "Autoupdate failed, nothing to rollback")
@@ -540,12 +540,12 @@ mod test {
         let app_dir = tempfile::tempdir().unwrap();
         let app_dir = app_dir.path();
         // Simulate a timeout
-        unsafe { std::env::set_var("ZED_AUTO_UPDATE", "err2") };
+        unsafe { std::env::set_var("ZODE_AUTO_UPDATE", "err2") };
         let ret = run_jobs(&*SIMULATED_JOBS, app_dir, None, false);
         assert!(
             ret.is_err_and(|e| e.to_string().as_str() == "Autoupdate failed, rollback successful")
         );
-        assert!(std::env::var("ZED_AUTO_UPDATE_RB").is_ok_and(|e| e == "rollback1"));
+        assert!(std::env::var("ZODE_AUTO_UPDATE_RB").is_ok_and(|e| e == "rollback1"));
     }
 
     fn write(app_dir: &Path, relative: &str, contents: &str) {
@@ -560,7 +560,7 @@ mod test {
     }
 
     /// The layout a 0.1.5 install leaves behind, with an update staged in `install\` the
-    /// way `zed.iss` stages one.
+    /// way `zode.iss` stages one.
     fn stage_update_over_0_1_5_install(app_dir: &Path) {
         write(app_dir, "Zode.exe", "old app");
         write(app_dir, "bin\\zed.exe", "old cli");

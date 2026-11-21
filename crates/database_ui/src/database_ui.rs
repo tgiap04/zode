@@ -70,7 +70,7 @@ pub fn init(cx: &mut App) {
         // Put away rather than closed: closing would end every open session and
         // lose a half-written statement over the second press.
         workspace.register_action(
-            |workspace, _: &zed_actions::database::ToggleDatabase, window, cx| {
+            |workspace, _: &zode_actions::database::ToggleDatabase, window, cx| {
                 if standalone::put_away(workspace, window, cx) {
                     return;
                 }
@@ -83,12 +83,12 @@ pub fn init(cx: &mut App) {
         // takes a shorter road that happens to work -- the note on `AddConnection`
         // below is why that matters here.
         workspace.register_action(
-            |workspace, _: &zed_actions::database::OpenInEditorTab, window, cx| {
+            |workspace, _: &zode_actions::database::OpenInEditorTab, window, cx| {
                 standalone::open_in_editor_tab(workspace, window, cx);
             },
         );
         workspace.register_action(
-            |workspace, _: &zed_actions::database::OpenInFloatingWindow, window, cx| {
+            |workspace, _: &zode_actions::database::OpenInFloatingWindow, window, cx| {
                 standalone::open_in_floating_window(workspace, window, cx);
             },
         );
@@ -101,7 +101,7 @@ pub fn init(cx: &mut App) {
         // process. Both buttons dispatch this action rather than one of them
         // taking a shorter road that happens to work.
         workspace.register_action(
-            |workspace, _: &zed_actions::database::AddConnection, window, cx| {
+            |workspace, _: &zode_actions::database::AddConnection, window, cx| {
                 let handle = cx.weak_entity();
                 let drivers = driver_registry::for_project(workspace.project(), cx);
                 workspace.toggle_modal(window, cx, move |window, cx| {

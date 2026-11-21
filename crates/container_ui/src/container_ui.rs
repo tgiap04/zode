@@ -132,7 +132,7 @@ pub fn init(cx: &mut App) {
         // kill the listener over the second press of a button whose whole job is
         // to be pressed twice.
         workspace.register_action(
-            |workspace, _: &zed_actions::container::ToggleContainer, window, cx| {
+            |workspace, _: &zode_actions::container::ToggleContainer, window, cx| {
                 if standalone::put_away(workspace, window, cx) {
                     return;
                 }
@@ -143,12 +143,12 @@ pub fn init(cx: &mut App) {
         // one forward. Two lists of the same thing side by side is a reasonable
         // thing to want; arriving at one by accident is not.
         workspace.register_action(
-            |workspace, _: &zed_actions::container::OpenInEditorTab, window, cx| {
+            |workspace, _: &zode_actions::container::OpenInEditorTab, window, cx| {
                 standalone::open_in_editor_tab(workspace, window, cx);
             },
         );
         workspace.register_action(
-            |workspace, _: &zed_actions::container::OpenInFloatingWindow, window, cx| {
+            |workspace, _: &zode_actions::container::OpenInFloatingWindow, window, cx| {
                 standalone::open_in_floating_window(workspace, window, cx);
             },
         );

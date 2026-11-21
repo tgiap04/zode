@@ -15,7 +15,7 @@ path = "src/database_ui.rs"
 anyhow.workspace = true
 chrono.workspace = true
 credentials_provider.workspace = true
-zed_credentials_provider.workspace = true
+zode_credentials_provider.workspace = true
 database = { workspace = true, features = ["client"] }
 collections.workspace = true
 db.workspace = true
@@ -40,7 +40,7 @@ ui.workspace = true
 ui_input.workspace = true
 util.workspace = true
 workspace.workspace = true
-zed_actions.workspace = true
+zode_actions.workspace = true
 zode_account.workspace = true
 zode_env_sync.workspace = true
 zode_team_vault.workspace = true

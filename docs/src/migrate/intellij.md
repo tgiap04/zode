@@ -35,7 +35,7 @@ This maps familiar shortcuts like `Shift Shift` for Search Everywhere, `Cmd+O` f
 
 ## Set Up Editor Preferences
 
-You can configure most settings in the Settings Editor ({#kb zed::OpenSettings}). For advanced settings, run `zed: open settings file` from the Command Palette to edit your settings file directly.
+You can configure most settings in the Settings Editor ({#kb zode::OpenSettings}). For advanced settings, run `zode: open settings file` from the Command Palette to edit your settings file directly.
 
 Settings IntelliJ users typically configure first:
 
@@ -47,7 +47,7 @@ Settings IntelliJ users typically configure first:
 | `inlay_hints`           | Show parameter names and type hints inline, like IntelliJ's hints.              |
 | `relative_line_numbers` | Useful if you're coming from IdeaVim.                                           |
 
-Zode also supports per-project settings. Create a `.zed/settings.json` file in your project root to override global settings for that project, similar to how you might use `.idea` folders in IntelliJ.
+Zode also supports per-project settings. Create a `.zode/settings.json` file in your project root to override global settings for that project, similar to how you might use `.idea` folders in IntelliJ.
 
 > **Tip:** If you're joining an existing project, check `format_on_save` before making your first commit. Otherwise you might accidentally reformat an entire file when you only meant to change one line.
 
@@ -115,7 +115,7 @@ If you chose the JetBrains keymap during onboarding, most of your shortcuts shou
 ### How to Customize Keybindings
 
 - Open the Command Palette (`Cmd+Shift+A` or `Shift Shift`)
-- Run `Zed: Open Keymap Editor`
+- Run `zode: open keymap`
 
 This opens a list of all available bindings. You can override individual shortcuts or remove conflicts.
 
@@ -171,8 +171,8 @@ This means:
 
 **How to adapt:**
 
-- Create a `.zed/settings.json` in your project root for project-specific settings
-- Define common commands in `tasks.json` (open via Command Palette: `zed: open tasks`):
+- Create a `.zode/settings.json` in your project root for project-specific settings
+- Define common commands in `tasks.json` (open via Command Palette: `zode: open tasks`):
 
 ```json
 [
@@ -186,7 +186,7 @@ This means:
   },
   {
     "label": "test current file",
-    "command": "./gradlew test --tests $ZED_STEM"
+    "command": "./gradlew test --tests $ZODE_STEM"
   }
 ]
 ```
@@ -268,8 +268,8 @@ You won't find one-to-one replacements for every IntelliJ plugin, especially for
 IntelliJ offers Code With Me as a separate plugin for collaboration. Zode has collaboration built into the core experience.
 
 - Open the Collab Panel in the left dock
-- Create a channel and [invite your collaborators](https://zed.dev/docs/collaboration#inviting-a-collaborator) to join
-- [Share your screen or your codebase](https://zed.dev/docs/collaboration#share-a-project) directly
+- Create a channel and [invite your collaborators](https://zodekit.com/docs/collaboration#inviting-a-collaborator) to join
+- [Share your screen or your codebase](https://zodekit.com/docs/collaboration#share-a-project) directly
 
 Once connected, you'll see each other's cursors, selections, and edits in real time. Voice chat is included. There's no need for separate tools or third-party logins.
 
@@ -290,9 +290,9 @@ Once signed in, just start typing. Zode will offer suggestions inline for you to
 
 To use other AI models in Zode, you have several options:
 
-- Use Zode's hosted models, with higher rate limits. Requires [authentication](https://zed.dev/docs/authentication) and subscription to [Zed Pro](https://zed.dev/docs/ai/subscription.html).
-- Bring your own [API keys](https://zed.dev/docs/ai/llm-providers.html), no authentication needed
-- Use [external agents like Claude Agent](https://zed.dev/docs/ai/external-agents.html)
+- Zode has no hosted models or subscription: AI features use your own keys or agents.
+- Bring your own [API keys](https://zodekit.com/docs/ai/llm-providers.html), no authentication needed
+- Use [external agents like Claude Agent](https://zodekit.com/docs/ai/external-agents.html)
 
 ## Advanced Config and Productivity Tweaks
 

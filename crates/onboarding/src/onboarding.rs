@@ -21,22 +21,20 @@ use workspace::{
     item::{Item, ItemEvent},
     open_new, register_serializable_item, with_active_or_new_workspace,
 };
-use zed_actions::OpenOnboarding;
+use zode_actions::OpenOnboarding;
 
 mod base_keymap_picker;
 mod basics_page;
 pub mod multibuffer_hint;
 
 pub const FIRST_OPEN: &str = "first_open";
-pub const DOCS_URL: &str = "https://zed.dev/docs/";
+pub const DOCS_URL: &str = "https://zodekit.com/docs/";
 
 actions!(
     onboarding,
     [
         /// Finish the onboarding process.
         Finish,
-        /// Sign in while in the onboarding flow.
-        /// Open the user account in zed.dev while in the onboarding flow.
         /// Resets the welcome screen hints to their initial state.
         ResetHints
     ]
@@ -504,11 +502,8 @@ mod name_tests {
                 if line.trim_start().starts_with("//") {
                     continue;
                 }
-                // `zed.dev` links point at documentation that is real and still
-                // applies; the fork has none of its own to point at instead.
-                let without_urls = line.replace("zed.dev", "").replace("zed://", "");
                 assert!(
-                    !without_urls.contains("Zed"),
+                    !line.contains("Zed"),
                     "{path}:{} still names Zed: {line}",
                     number + 1
                 );

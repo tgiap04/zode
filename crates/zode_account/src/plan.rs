@@ -276,8 +276,8 @@ impl std::fmt::Display for PlanLimit {
 
 /// Whether `candidate` is a page on the web app at `web_url`.
 ///
-/// A plain prefix test is not enough: `https://zodekit.site.example` starts
-/// with `https://zodekit.site`. The origin must end where the candidate's path,
+/// A plain prefix test is not enough: `https://zodekit.com.example` starts
+/// with `https://zodekit.com`. The origin must end where the candidate's path,
 /// query or fragment begins.
 pub fn on_web_origin(candidate: &str, web_url: &str) -> bool {
     let origin = web_url.trim_end_matches('/');
@@ -302,7 +302,7 @@ fn web_link(candidate: Option<String>, web_url: &str, path: &str) -> String {
 mod tests {
     use super::*;
 
-    const WEB: &str = "https://zodekit.site";
+    const WEB: &str = "https://zodekit.com";
 
     fn full_plan() -> serde_json::Value {
         serde_json::json!({
@@ -319,8 +319,8 @@ mod tests {
             },
             "team": { "id": "t1", "name": "Acme", "role": "admin", "keyVersion": 2 },
             "grandfather": null,
-            "upgradeUrl": "https://zodekit.site/pricing",
-            "manageUrl": "https://zodekit.site/account/billing"
+            "upgradeUrl": "https://zodekit.com/pricing",
+            "manageUrl": "https://zodekit.com/account/billing"
         })
     }
 
@@ -353,8 +353,8 @@ mod tests {
                 key_version: 2,
             })
         );
-        assert_eq!(plan.upgrade_url, "https://zodekit.site/pricing");
-        assert_eq!(plan.manage_url, "https://zodekit.site/account/billing");
+        assert_eq!(plan.upgrade_url, "https://zodekit.com/pricing");
+        assert_eq!(plan.manage_url, "https://zodekit.com/account/billing");
     }
 
     #[test]
@@ -379,8 +379,8 @@ mod tests {
             plan.grandfather_env_until.as_ref().map(|at| at.as_ref()),
             Some("2027-11-03T00:00:00.000Z")
         );
-        assert_eq!(plan.upgrade_url, "https://zodekit.site/pricing");
-        assert_eq!(plan.manage_url, "https://zodekit.site/account/billing");
+        assert_eq!(plan.upgrade_url, "https://zodekit.com/pricing");
+        assert_eq!(plan.manage_url, "https://zodekit.com/account/billing");
     }
 
     #[test]
@@ -403,30 +403,30 @@ mod tests {
     #[test]
     fn links_to_another_origin_are_replaced_with_the_web_pages() {
         let mut body = full_plan();
-        body["upgradeUrl"] = "https://zodekit.site.evil.example/pricing".into();
+        body["upgradeUrl"] = "https://zodekit.com.evil.example/pricing".into();
         body["manageUrl"] = "javascript:alert(1)".into();
         let plan = PlanSummary::parse(&body.to_string(), WEB).expect("a valid plan");
-        assert_eq!(plan.upgrade_url, "https://zodekit.site/pricing");
-        assert_eq!(plan.manage_url, "https://zodekit.site/account/billing");
+        assert_eq!(plan.upgrade_url, "https://zodekit.com/pricing");
+        assert_eq!(plan.manage_url, "https://zodekit.com/account/billing");
     }
 
     #[test]
     fn the_origin_check_ends_where_the_path_begins() {
-        assert!(on_web_origin("https://zodekit.site", WEB));
-        assert!(on_web_origin("https://zodekit.site/pricing", WEB));
-        assert!(on_web_origin("https://zodekit.site/pricing?plan=pro", WEB));
+        assert!(on_web_origin("https://zodekit.com", WEB));
+        assert!(on_web_origin("https://zodekit.com/pricing", WEB));
+        assert!(on_web_origin("https://zodekit.com/pricing?plan=pro", WEB));
         assert!(on_web_origin(
-            "https://zodekit.site/pricing",
-            "https://zodekit.site/"
+            "https://zodekit.com/pricing",
+            "https://zodekit.com/"
         ));
         assert!(!on_web_origin(
-            "https://zodekit.site.evil.example/pricing",
+            "https://zodekit.com.evil.example/pricing",
             WEB
         ));
-        assert!(!on_web_origin("https://zodekit.siteevil.example", WEB));
-        assert!(!on_web_origin("http://zodekit.site/pricing", WEB));
+        assert!(!on_web_origin("https://zodekit.comevil.example", WEB));
+        assert!(!on_web_origin("http://zodekit.com/pricing", WEB));
         assert!(!on_web_origin(
-            "https://evil.example/?https://zodekit.site",
+            "https://evil.example/?https://zodekit.com",
             WEB
         ));
         assert!(!on_web_origin("", WEB));
@@ -448,16 +448,13 @@ mod tests {
                 "limit": 2,
                 "used": 3,
                 "tier": "free",
-                "upgradeUrl": "https://zodekit.site/pricing?from=editor"
+                "upgradeUrl": "https://zodekit.com/pricing?from=editor"
             });
             let limit = PlanLimit::from_body(&body.to_string(), WEB);
             assert_eq!(limit.reason, reason, "{slug}");
             assert_eq!(limit.limit, Some(2));
             assert_eq!(limit.used, Some(3));
-            assert_eq!(
-                limit.upgrade_url,
-                "https://zodekit.site/pricing?from=editor"
-            );
+            assert_eq!(limit.upgrade_url, "https://zodekit.com/pricing?from=editor");
             assert!(!limit.sentence().is_empty(), "{slug} has nothing to say");
         }
     }
@@ -467,7 +464,7 @@ mod tests {
         let limit = PlanLimit::from_body(r#"{"error":"sync_device_limit"}"#, WEB);
         assert_eq!(limit.reason, PlanLimitReason::SyncDeviceLimit);
         assert_eq!(limit.limit, None);
-        assert_eq!(limit.upgrade_url, "https://zodekit.site/pricing");
+        assert_eq!(limit.upgrade_url, "https://zodekit.com/pricing");
     }
 
     #[test]
@@ -479,7 +476,7 @@ mod tests {
                 PlanLimitReason::Other("http_402".into()),
                 "{body:?}"
             );
-            assert_eq!(limit.upgrade_url, "https://zodekit.site/pricing");
+            assert_eq!(limit.upgrade_url, "https://zodekit.com/pricing");
         }
     }
 
@@ -496,7 +493,7 @@ mod tests {
             r#"{"error":"env_sync_not_in_plan","upgradeUrl":"https://evil.example/pricing"}"#,
             WEB,
         );
-        assert_eq!(limit.upgrade_url, "https://zodekit.site/pricing");
+        assert_eq!(limit.upgrade_url, "https://zodekit.com/pricing");
     }
 
     #[test]

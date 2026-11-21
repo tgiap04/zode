@@ -11,7 +11,7 @@ Shell Scripts (bash, zsh, dash, sh) are supported natively by Zode.
 
 ## Settings
 
-Configure settings in Settings ({#kb zed::OpenSettings}) under Languages > Shell Script, or add to your settings file:
+Configure settings in Settings ({#kb zode::OpenSettings}) under Languages > Shell Script, or add to your settings file:
 
 ```json [settings]
   "languages": {
@@ -44,7 +44,7 @@ which shfmt
 shfmt --version
 ```
 
-3. Configure formatting in Settings ({#kb zed::OpenSettings}) under Languages > Shell Script, or add to your settings file:
+3. Configure formatting in Settings ({#kb zode::OpenSettings}) under Languages > Shell Script, or add to your settings file:
 
 ```json [settings]
   "languages": {

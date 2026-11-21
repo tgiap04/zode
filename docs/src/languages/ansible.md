@@ -16,7 +16,7 @@ Support for Ansible in Zode is provided via a community-maintained [Ansible exte
 
 To avoid mishandling non-Ansible YAML files, the Ansible Language is not associated with any file extensions by default.
 
-To change this behavior, you can add a `"file_types"` section to Zode settings inside your project (`.zed/settings.json`) or your Zode user settings (`~/.config/zode/settings.json`) to match your folder/naming conventions. For example:
+To change this behavior, you can add a `"file_types"` section to Zode settings inside your project (`.zode/settings.json`) or your Zode user settings (`~/.config/zode/settings.json`) to match your folder/naming conventions. For example:
 
 ```json [settings]
 {
@@ -57,7 +57,7 @@ If your inventory file is in the YAML format, you can either:
 # yaml-language-server: $schema=https://raw.githubusercontent.com/ansible/ansible-lint/main/src/ansiblelint/schemas/inventory.json
 ```
 
-- or, configure the YAML language server settings to set this schema for all your inventory files, that match your inventory pattern, under your Zode settings ([ref](https://zed.dev/docs/languages/yaml)):
+- or, configure the YAML language server settings to set this schema for all your inventory files, that match your inventory pattern, under your Zode settings ([ref](https://zodekit.com/docs/languages/yaml)):
 
 ```json [settings]
 {

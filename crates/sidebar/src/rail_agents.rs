@@ -4,7 +4,7 @@ use agent_ui::AgentView;
 use gpui::{AnyElement, App, Context, Window};
 use project::AgentId;
 use ui::{ContextMenu, ContextMenuEntry, Tooltip, prelude::*, right_click_menu};
-use zed_actions::agent::{NewAgent, PermissionPrompts, ToggleAgent};
+use zode_actions::agent::{NewAgent, PermissionPrompts, ToggleAgent};
 
 impl Sidebar {
     /// Whether a tab for this agent is open anywhere in the editor's panes.
@@ -158,7 +158,7 @@ mod tests {
     use fs::FakeFs;
     use gpui::{AppContext as _, TestAppContext};
     use project::Project;
-    use zed_actions::agent::AgentViewMode;
+    use zode_actions::agent::AgentViewMode;
 
     use workspace::MultiWorkspace;
 

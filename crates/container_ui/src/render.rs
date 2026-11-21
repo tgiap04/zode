@@ -406,13 +406,13 @@ impl ContainerPanel {
                     .tooltip(|_window, cx| {
                         ui::Tooltip::for_action(
                             "Open in a Floating Window",
-                            &zed_actions::container::OpenInFloatingWindow,
+                            &zode_actions::container::OpenInFloatingWindow,
                             cx,
                         )
                     })
                     .on_click(|_event, window, cx| {
                         window.dispatch_action(
-                            Box::new(zed_actions::container::OpenInFloatingWindow),
+                            Box::new(zode_actions::container::OpenInFloatingWindow),
                             cx,
                         )
                     }),
@@ -687,17 +687,17 @@ impl ContainerPanel {
             // above the panel.
             .on_action(cx.listener(|this, _: &menu::Cancel, _window, cx| this.clear_selection(cx)))
             .on_action(cx.listener(
-                |this, _: &zed_actions::container::ToggleRowSelection, _window, cx| {
+                |this, _: &zode_actions::container::ToggleRowSelection, _window, cx| {
                     this.toggle_cursor_row(cx)
                 },
             ))
             .on_action(cx.listener(
-                |this, _: &zed_actions::container::SelectAllRows, _window, cx| {
+                |this, _: &zode_actions::container::SelectAllRows, _window, cx| {
                     this.select_all_rows(cx)
                 },
             ))
             .on_action(cx.listener(
-                |this, _: &zed_actions::container::RemoveSelectedRows, window, cx| {
+                |this, _: &zode_actions::container::RemoveSelectedRows, window, cx| {
                     this.remove_selected_rows(window, cx)
                 },
             ))

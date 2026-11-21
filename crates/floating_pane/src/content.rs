@@ -35,7 +35,7 @@ impl FloatingPane {
                 project,
                 Default::default(),
                 None,
-                zed_actions::floating_pane::NewTerminal.boxed_clone(),
+                zode_actions::floating_pane::NewTerminal.boxed_clone(),
                 false,
                 window,
                 cx,

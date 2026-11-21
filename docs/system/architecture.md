@@ -2,7 +2,7 @@
 
 <!-- Stack: Rust workspace (generic-source profile), native GPUI desktop app ("Zode", a Zed fork).
      Verified via root Cargo.toml (189 crate members + 4 extensions + 3 tooling crates, resolver "2"),
-     and direct [dependencies] inspection of crates/zed, crates/workspace, crates/project, crates/editor,
+     and direct [dependencies] inspection of crates/zode, crates/workspace, crates/project, crates/editor,
      crates/extension_host, crates/git_ui, crates/sidebar, crates/title_bar, crates/client, crates/rpc,
      crates/proto, crates/remote, crates/remote_server, crates/remote_connection, crates/collections
      Cargo.toml [dependencies] sections (see scout-report.md for full per-crate inventory).
@@ -19,7 +19,7 @@
 
 ## System Architecture
 
-The binary `crates/zed` (`default-members`) statically links the great majority of the workspace's
+The binary `crates/zode` (`default-members`) statically links the great majority of the workspace's
 in-workspace library crates (196 workspace members, 189 of them under `crates/`; 184 carry a lib
 target, the remainder being the binary itself plus benchmark, tooling and test-only crates). There
 is no client/server split, no collaboration backend, and no in-editor AI chat surface or
@@ -36,7 +36,7 @@ checks / telemetry upload).
 ```mermaid
 graph TB
     subgraph "Application Shell"
-        ZED[crates/zed — binary entry point]
+        ZED[crates/zode — binary entry point]
         WS[workspace — panes/docks/panels, multi-workspace + hibernation]
         SIDEBAR[sidebar — always-visible project rail]
         TITLEBAR[title_bar — window chrome + search bar]

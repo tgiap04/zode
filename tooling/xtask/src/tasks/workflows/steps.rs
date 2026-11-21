@@ -11,7 +11,7 @@ pub(crate) fn use_clang(job: Job) -> Job {
         .add_env(Env::new("CXX", "clang++"))
 }
 
-const SCCACHE_R2_BUCKET: &str = "sccache-zed";
+const SCCACHE_R2_BUCKET: &str = "sccache-zode";
 
 pub(crate) const BASH_SHELL: &str = "bash -euxo pipefail {0}";
 // https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsshell
@@ -811,8 +811,8 @@ pub(crate) fn generate_token<'a>(
 pub fn authenticate_as_zippy() -> GenerateAppToken<'static> {
     generate_token_with_job_name(
         named::path!(),
-        vars::ZED_ZIPPY_APP_ID,
-        vars::ZED_ZIPPY_APP_PRIVATE_KEY,
+        vars::ZODE_ZIPPY_APP_ID,
+        vars::ZODE_ZIPPY_APP_PRIVATE_KEY,
     )
 }
 

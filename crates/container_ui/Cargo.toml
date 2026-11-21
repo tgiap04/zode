@@ -18,7 +18,7 @@ path = "src/container_ui.rs"
 anyhow.workspace = true
 container.workspace = true
 editor.workspace = true
-# Direct rather than through an action that `crates/zed` wires up: `agent_ui`,
+# Direct rather than through an action that `crates/zode` wires up: `agent_ui`,
 # `debugger_ui` and `repl` all take it the same way, and an action carrying a
 # command as payload would be a second, weaker copy of what this trait already
 # hands back. Checked with `cargo tree` -- it brings nothing this crate did not
@@ -35,7 +35,7 @@ project.workspace = true
 ui.workspace = true
 util.workspace = true
 workspace.workspace = true
-zed_actions.workspace = true
+zode_actions.workspace = true
 
 [dev-dependencies]
 # Deliberately minimal, matching `database_ui`: pulling `sidebar` in here to

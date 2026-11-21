@@ -12,7 +12,7 @@
 #
 # Requires from the environment:
 #   ZODE_DRIVER_UPLOAD_TOKEN  -- bearer token the backend's upload endpoint checks
-#   ZODE_DRIVER_UPLOAD_URL    -- base API URL, e.g. https://api.zodekit.site/api
+#   ZODE_DRIVER_UPLOAD_URL    -- base API URL, e.g. https://api.zodekit.com/api
 #   ZODE_DRIVER_SIGNING_KEY   -- the manifest signing key: the base64 of the
 #                                PKCS#8 file, on one line. This is the CI secret.
 #   ZODE_DRIVER_SIGNING_KEY_FILE
@@ -129,7 +129,7 @@ if [[ -n "${ZODE_DRIVER_SIGNING_KEY_FILE:-}" ]]; then
     signing_key_file="$(cd "$(dirname "${ZODE_DRIVER_SIGNING_KEY_FILE}")" && pwd)/$(basename "${ZODE_DRIVER_SIGNING_KEY_FILE}")"
 fi
 
-base_url="${ZODE_DRIVER_UPLOAD_URL:-https://api.zodekit.site/api}"
+base_url="${ZODE_DRIVER_UPLOAD_URL:-https://api.zodekit.com/api}"
 manifest_path="${asset_directory}/zode-db-drivers-manifest.json"
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 

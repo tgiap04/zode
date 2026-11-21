@@ -290,7 +290,7 @@ fn switches_menu_on_hover(hover_enter: bool, this_menu_open: bool, any_menu_open
 
 pub(crate) fn show_menus(cx: &mut App) -> bool {
     TitleBarSettings::get_global(cx).show_menus
-        && (cfg!(not(target_os = "macos")) || option_env!("ZED_USE_CROSS_PLATFORM_MENU").is_some())
+        && (cfg!(not(target_os = "macos")) || option_env!("ZODE_USE_CROSS_PLATFORM_MENU").is_some())
 }
 
 impl Render for ApplicationMenu {

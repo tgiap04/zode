@@ -44,7 +44,7 @@ pub use turn_tracker::TurnEvent;
 use gpui::App;
 use project::AgentId;
 use workspace::Workspace;
-use zed_actions::agent::{NewAgent, OpenAgent, ToggleAgent};
+use zode_actions::agent::{NewAgent, OpenAgent, ToggleAgent};
 
 pub fn init(cx: &mut App) {
     // The agent is an item of the editor's panes, so the workspace's own
@@ -62,7 +62,7 @@ pub fn init(cx: &mut App) {
         // Hiding leaves the panel in the dock, so its search text and expanded
         // rows survive the round trip.
         workspace.register_action(
-            |workspace, _: &zed_actions::agent::ToggleHistory, window, cx| {
+            |workspace, _: &zode_actions::agent::ToggleHistory, window, cx| {
                 workspace.toggle_panel_focus::<AgentHistoryPanel>(window, cx);
             },
         );

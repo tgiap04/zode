@@ -5,7 +5,7 @@ description: "Configure HTML language support in Zode, including language server
 
 # HTML
 
-HTML support is available through the [HTML extension](https://github.com/zed-industries/zed/tree/main/extensions/html).
+HTML support is available through the [HTML extension](https://github.com/tgiap04/zode/tree/develop/extensions/html).
 
 - Tree-sitter: [tree-sitter/tree-sitter-html](https://github.com/tree-sitter/tree-sitter-html)
 - Language Server: [microsoft/vscode-html-languageservice](https://github.com/microsoft/vscode-html-languageservice)
@@ -24,7 +24,7 @@ This extension is automatically installed, but if you do not want to use it, you
 
 By default Zode uses [Prettier](https://prettier.io/) for formatting HTML.
 
-Configure formatting in Settings ({#kb zed::OpenSettings}) under Languages > HTML, or add to your settings file:
+Configure formatting in Settings ({#kb zode::OpenSettings}) under Languages > HTML, or add to your settings file:
 
 ```json [settings]
   "languages": {
@@ -38,7 +38,7 @@ You can still trigger formatting manually with {#kb editor::Format} or by openin
 
 ### LSP Formatting
 
-To use the `vscode-html-language-server` language server auto-formatting instead of Prettier, configure the formatter in Settings ({#kb zed::OpenSettings}) under Languages > HTML, or add to your settings file:
+To use the `vscode-html-language-server` language server auto-formatting instead of Prettier, configure the formatter in Settings ({#kb zode::OpenSettings}) under Languages > HTML, or add to your settings file:
 
 ```json [settings]
   "languages": {

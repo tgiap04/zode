@@ -1,0 +1,15 @@
+---
+title: Prisma
+description: "Configure Prisma language support in Zode, including language servers, formatting, and debugging."
+---
+
+# Prisma
+
+Hỗ trợ Prisma có sẵn qua [extension Prisma](https://github.com/zed-extensions/prisma).
+
+- Tree-sitter: [victorhqc/tree-sitter-prisma](https://github.com/victorhqc/tree-sitter-prisma)
+- Language-Server: [prisma/language-tools](https://github.com/prisma/language-tools)
+
+<!--
+TBD: Prisma usage and configuration documentation
+-->

@@ -167,7 +167,7 @@ dependencies = [
  "util",
  "uuid",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -956,7 +956,7 @@ dependencies = [
  "semver",
  "util",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -2188,7 +2188,7 @@ dependencies = [
  "ui",
  "util",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -2408,8 +2408,8 @@ dependencies = [
  "ui_input",
  "util",
  "workspace",
- "zed_actions",
  "zlog",
+ "zode_actions",
 ]
 
 [[package]]
@@ -3392,10 +3392,10 @@ dependencies = [
  "ui_input",
  "util",
  "workspace",
- "zed_actions",
- "zed_credentials_provider",
  "zeroize",
  "zode_account",
+ "zode_actions",
+ "zode_credentials_provider",
  "zode_env_sync",
  "zode_team_vault",
 ]
@@ -3417,7 +3417,7 @@ dependencies = [
  "tempfile",
  "util",
  "uuid",
- "zed_env_vars",
+ "zode_env_vars",
 ]
 
 [[package]]
@@ -3517,8 +3517,8 @@ dependencies = [
  "unindent",
  "util",
  "workspace",
- "zed_actions",
  "zlog",
+ "zode_actions",
 ]
 
 [[package]]
@@ -3730,8 +3730,8 @@ dependencies = [
  "unindent",
  "util",
  "workspace",
- "zed_actions",
  "zlog",
+ "zode_actions",
 ]
 
 [[package]]
@@ -4095,8 +4095,8 @@ dependencies = [
  "uuid",
  "vim_mode_setting",
  "workspace",
- "zed_actions",
  "zlog",
+ "zode_actions",
  "ztracing",
 ]
 
@@ -4602,7 +4602,7 @@ dependencies = [
  "util",
  "vim_mode_setting",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -4745,7 +4745,7 @@ dependencies = [
  "urlencoding",
  "util",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -4781,8 +4781,8 @@ dependencies = [
  "ui",
  "util",
  "workspace",
- "zed_actions",
  "zlog",
+ "zode_actions",
 ]
 
 [[package]]
@@ -4907,7 +4907,7 @@ dependencies = [
  "theme_settings",
  "ui",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -5884,9 +5884,9 @@ dependencies = [
  "watch",
  "windows 0.61.3",
  "workspace",
- "zed_actions",
  "zeroize",
  "zlog",
+ "zode_actions",
  "ztracing",
 ]
 
@@ -7351,7 +7351,7 @@ dependencies = [
  "util",
  "util_macros",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -7883,7 +7883,7 @@ dependencies = [
  "ui_input",
  "util",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -8111,8 +8111,8 @@ dependencies = [
  "ui",
  "util",
  "workspace",
- "zed_actions",
  "zlog",
+ "zode_actions",
 ]
 
 [[package]]
@@ -8676,7 +8676,7 @@ dependencies = [
  "urlencoding",
  "util",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -9038,7 +9038,7 @@ dependencies = [
  "theme_settings",
  "util",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -9524,7 +9524,7 @@ dependencies = [
  "gpui",
  "ui",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -10089,7 +10089,7 @@ dependencies = [
  "util",
  "vim_mode_setting",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -10323,7 +10323,7 @@ dependencies = [
  "ui",
  "util",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -10357,7 +10357,7 @@ dependencies = [
  "util",
  "workspace",
  "worktree",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -11170,7 +11170,7 @@ dependencies = [
  "ui",
  "ui_input",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -11268,7 +11268,7 @@ dependencies = [
  "ui",
  "windows 0.61.3",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -11759,9 +11759,9 @@ dependencies = [
  "wax",
  "which 6.0.3",
  "worktree",
- "zed_credentials_provider",
  "zeroize",
  "zlog",
+ "zode_credentials_provider",
  "ztracing",
 ]
 
@@ -11842,7 +11842,7 @@ dependencies = [
  "util",
  "workspace",
  "worktree",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -12550,8 +12550,8 @@ dependencies = [
  "windows-registry 0.6.1",
  "workspace",
  "worktree",
- "zed_actions",
  "zode_account",
+ "zode_actions",
 ]
 
 [[package]]
@@ -12974,7 +12974,7 @@ dependencies = [
  "util",
  "uuid",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -13711,7 +13711,7 @@ dependencies = [
  "util",
  "util_macros",
  "workspace",
- "zed_actions",
+ "zode_actions",
  "ztracing",
 ]
 
@@ -14057,7 +14057,7 @@ dependencies = [
  "theme_settings",
  "ui",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -14096,7 +14096,7 @@ dependencies = [
  "ui",
  "util",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -14213,9 +14213,9 @@ dependencies = [
  "ui",
  "util",
  "workspace",
- "zed_actions",
  "zode_account",
  "zode_account_ui",
+ "zode_actions",
 ]
 
 [[package]]
@@ -14827,7 +14827,7 @@ dependencies = [
  "multi_buffer",
  "ui",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -15284,7 +15284,7 @@ dependencies = [
  "sha2 0.10.9",
  "shellexpand",
  "util",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -15310,7 +15310,7 @@ dependencies = [
  "ui",
  "util",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -15442,7 +15442,7 @@ dependencies = [
  "ui",
  "util",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -15540,7 +15540,7 @@ dependencies = [
  "ui",
  "util",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -15778,7 +15778,7 @@ dependencies = [
  "util",
  "windows 0.61.3",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -17076,7 +17076,7 @@ dependencies = [
  "util_macros",
  "vim_mode_setting",
  "workspace",
- "zed_actions",
+ "zode_actions",
 ]
 
 [[package]]
@@ -19451,8 +19451,8 @@ dependencies = [
  "uuid",
  "vim_mode_setting",
  "windows 0.61.3",
- "zed_actions",
  "zlog",
+ "zode_actions",
 ]
 
 [[package]]
@@ -19951,37 +19951,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zed_actions"
-version = "0.1.0"
-dependencies = [
- "gpui",
- "schemars",
- "serde",
- "util",
-]
-
-[[package]]
-name = "zed_credentials_provider"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "credentials_provider",
- "futures 0.3.32",
- "gpui",
- "paths",
- "release_channel",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "zed_env_vars"
-version = "0.1.0"
-dependencies = [
- "env_var",
-]
-
-[[package]]
 name = "zed_extension_api"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -20346,14 +20315,14 @@ dependencies = [
  "windows 0.61.3",
  "winresource",
  "workspace",
- "zed_actions",
- "zed_env_vars",
  "zlog",
  "zlog_settings",
  "zode_account",
  "zode_account_ui",
+ "zode_actions",
  "zode_env_sync",
  "zode_env_sync_ui",
+ "zode_env_vars",
  "zode_sync",
  "ztracing",
 ]
@@ -20413,9 +20382,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sysinfo 0.37.2",
- "zed_credentials_provider",
- "zed_env_vars",
  "zode_account",
+ "zode_credentials_provider",
+ "zode_env_vars",
 ]
 
 [[package]]
@@ -20433,9 +20402,33 @@ dependencies = [
  "ui_input",
  "util",
  "workspace",
- "zed_actions",
  "zode_account",
+ "zode_actions",
  "zode_sync",
+]
+
+[[package]]
+name = "zode_actions"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "schemars",
+ "serde",
+ "util",
+]
+
+[[package]]
+name = "zode_credentials_provider"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "credentials_provider",
+ "futures 0.3.32",
+ "gpui",
+ "paths",
+ "release_channel",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -20479,12 +20472,19 @@ dependencies = [
  "ui_input",
  "util",
  "workspace",
- "zed_actions",
  "zeroize",
  "zode_account",
+ "zode_actions",
  "zode_env_sync",
  "zode_sync",
  "zode_team_vault",
+]
+
+[[package]]
+name = "zode_env_vars"
+version = "0.1.0"
+dependencies = [
+ "env_var",
 ]
 
 [[package]]

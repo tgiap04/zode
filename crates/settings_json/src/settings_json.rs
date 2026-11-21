@@ -2665,16 +2665,16 @@ mod tests {
         }
 
         check_first_key(
-            "// header\n// see https://zed.dev/docs\n{}\n",
-            "// header\n// see https://zed.dev/docs\n{\n  \"vim_mode\": true\n}\n",
+            "// header\n// see https://zodekit.com/docs\n{}\n",
+            "// header\n// see https://zodekit.com/docs\n{\n  \"vim_mode\": true\n}\n",
         );
         check_first_key(
-            "// header\n// see https://zed.dev/docs\n{\n}\n",
-            "// header\n// see https://zed.dev/docs\n{\n  \"vim_mode\": true\n}\n",
+            "// header\n// see https://zodekit.com/docs\n{\n}\n",
+            "// header\n// see https://zodekit.com/docs\n{\n  \"vim_mode\": true\n}\n",
         );
         check_first_key(
-            "{\n  // inside\n  // see https://zed.dev/docs\n}\n",
-            "{\n  // inside\n  // see https://zed.dev/docs\n  \"vim_mode\": true\n}\n",
+            "{\n  // inside\n  // see https://zodekit.com/docs\n}\n",
+            "{\n  // inside\n  // see https://zodekit.com/docs\n  \"vim_mode\": true\n}\n",
         );
         check_first_key("{}\n", "{\n  \"vim_mode\": true\n}\n");
     }

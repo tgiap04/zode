@@ -11,7 +11,7 @@ Build a release .tar.gz for Linux.
 
 Options:
   -h, --help     Display this help and exit.
-  --flatpak      Set ZED_BUNDLE_TYPE=flatpak so that this can be included in system info
+  --flatpak      Set ZODE_BUNDLE_TYPE=flatpak so that this can be included in system info
   "
 }
 
@@ -23,7 +23,7 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         --flatpak)
-            export ZED_BUNDLE_TYPE=flatpak
+            export ZODE_BUNDLE_TYPE=flatpak
             shift
             ;;
         --)
@@ -43,9 +43,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-export ZED_BUNDLE=true
+export ZODE_BUNDLE=true
 
-channel=$(<crates/zed/RELEASE_CHANNEL)
+channel=$(<crates/zode/RELEASE_CHANNEL)
 target_dir="${CARGO_TARGET_DIR:-target}"
 
 version="$(script/get-crate-version zode)"
@@ -86,13 +86,15 @@ if ! command -v sentry-cli >/dev/null 2>&1; then
     echo "sentry-cli not found. skipping sentry upload."
     echo "install with: 'curl -sL https://sentry.io/get-cli | bash'"
 else
-    if [[ -n "${SENTRY_AUTH_TOKEN:-}" ]]; then
-        echo "Uploading zed debug symbols to sentry..."
+    if [[ -n "${SENTRY_AUTH_TOKEN:-}" && -z "${SENTRY_ORG:-}" ]]; then
+        echo "SENTRY_ORG is not set. skipping sentry upload."
+    elif [[ -n "${SENTRY_AUTH_TOKEN:-}" ]]; then
+        echo "Uploading zode debug symbols to sentry..."
         # note: this uploads the unstripped binary which is needed because it contains
         # .eh_frame data for stack unwinding. see https://github.com/getsentry/symbolic/issues/783
         for attempt in 1 2 3; do
             echo "Attempting sentry upload (attempt $attempt/3)..."
-            if sentry-cli debug-files upload --include-sources --wait -p zode -o zed-dev \
+            if sentry-cli debug-files upload --include-sources --wait -p zode -o "${SENTRY_ORG}" \
                 "${target_dir}/${target_triple}"/release/zode; then
                 echo "Sentry upload successful on attempt $attempt"
                 break
@@ -153,9 +155,9 @@ cp $(find_libs) "${zed_dir}/lib"
 
 # Icons
 mkdir -p "${zed_dir}/share/icons/hicolor/512x512/apps"
-cp "crates/zed/resources/app-icon$suffix.png" "${zed_dir}/share/icons/hicolor/512x512/apps/zode.png"
+cp "crates/zode/resources/app-icon$suffix.png" "${zed_dir}/share/icons/hicolor/512x512/apps/zode.png"
 mkdir -p "${zed_dir}/share/icons/hicolor/1024x1024/apps"
-cp "crates/zed/resources/app-icon$suffix@2x.png" "${zed_dir}/share/icons/hicolor/1024x1024/apps/zode.png"
+cp "crates/zode/resources/app-icon$suffix@2x.png" "${zed_dir}/share/icons/hicolor/1024x1024/apps/zode.png"
 
 # .desktop
 export DO_STARTUP_NOTIFY="true"
@@ -177,7 +179,7 @@ else
 fi
 
 mkdir -p "${zed_dir}/share/applications"
-envsubst < "crates/zed/resources/zed.desktop.in" > "${zed_dir}/share/applications/$APP_ID.desktop"
+envsubst < "crates/zode/resources/zode.desktop.in" > "${zed_dir}/share/applications/$APP_ID.desktop"
 chmod +x "${zed_dir}/share/applications/$APP_ID.desktop"
 
 # Copy generated licenses so they'll end up in archive too
@@ -188,7 +190,7 @@ arch=$(uname -m)
 archive="zode-linux-${arch}.tar.gz"
 
 rm -rf "${archive}"
-remove_match="zo?de(-[a-zA-Z0-9]+)?-linux-$(uname -m)\.tar\.gz"
+remove_match="(zed|zode)(-[a-zA-Z0-9]+)?-linux-$(uname -m)\.tar\.gz"
 ls "${target_dir}/release" | grep -E ${remove_match} | xargs -d "\n" -I {} rm -f "${target_dir}/release/{}" || true
 tar -czvf "${target_dir}/release/$archive" -C ${temp_dir} "zode$suffix.app"
 
@@ -203,7 +205,7 @@ if ! tar -tzf "${target_dir}/release/$archive" | grep -x "zode$suffix.app/libexe
 fi
 
 # Release builds run as root inside a container, where the CLI refuses to start.
-reported_editor="$(ZED_ALLOW_ROOT=true "${zed_dir}/bin/zode" --version)"
+reported_editor="$(ZODE_ALLOW_ROOT=true "${zed_dir}/bin/zode" --version)"
 case "$reported_editor" in
     *"/zode$suffix.app/libexec/zode-editor") ;;
     *)

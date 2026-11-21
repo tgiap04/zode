@@ -83,7 +83,7 @@ impl PasswordPrompt {
     /// only gesture anyone would reach for to undo a mistyped one.
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let password = self.password_editor.read(cx).text(cx);
-        let credentials = zed_credentials_provider::global(cx);
+        let credentials = zode_credentials_provider::global(cx);
         let key = self.key.clone();
 
         let written: Task<anyhow::Result<()>> = if password.is_empty() {

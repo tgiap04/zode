@@ -67,7 +67,7 @@ pub fn init(cx: &mut App) {
         // reach the same code and cannot drift apart.
         workspace.register_action({
             let view = view.downgrade();
-            move |_workspace, _: &zed_actions::floating_pane::ToggleFloatingPane, window, cx| {
+            move |_workspace, _: &zode_actions::floating_pane::ToggleFloatingPane, window, cx| {
                 view.update(cx, |this, cx| this.toggle(window, cx)).ok();
             }
         });
@@ -77,26 +77,26 @@ pub fn init(cx: &mut App) {
         // opening a new tab is what every other tab bar in the editor does.
         workspace.register_action({
             let view = view.downgrade();
-            move |_workspace, _: &zed_actions::floating_pane::NewTerminal, window, cx| {
+            move |_workspace, _: &zode_actions::floating_pane::NewTerminal, window, cx| {
                 view.update(cx, |this, cx| this.open_terminal(window, cx))
                     .ok();
             }
         });
-        // Declared alongside `NewTerminal` in `zed_actions` but never wired to
+        // Declared alongside `NewTerminal` in `zode_actions` but never wired to
         // anything -- reachable only through the `+` menu's own click handler.
         // `NewMarkdownNote` and `OpenMarkdownNote` for a keybinding to bind
         // under the `FloatingPane` context, the same way every other action
         // here is.
         workspace.register_action({
             let view = view.downgrade();
-            move |_workspace, _: &zed_actions::floating_pane::NewMarkdownNote, window, cx| {
+            move |_workspace, _: &zode_actions::floating_pane::NewMarkdownNote, window, cx| {
                 view.update(cx, |this, cx| this.new_markdown_note(window, cx))
                     .ok();
             }
         });
         workspace.register_action({
             let view = view.downgrade();
-            move |_workspace, _: &zed_actions::floating_pane::OpenMarkdownNote, window, cx| {
+            move |_workspace, _: &zode_actions::floating_pane::OpenMarkdownNote, window, cx| {
                 view.update(cx, |this, cx| this.open_markdown_note(window, cx))
                     .ok();
             }
@@ -107,7 +107,7 @@ pub fn init(cx: &mut App) {
         // the keyboard is more dangerous than the mouse.
         workspace.register_action({
             let view = view.downgrade();
-            move |_workspace, _: &zed_actions::floating_pane::CloseFloatingPane, window, cx| {
+            move |_workspace, _: &zode_actions::floating_pane::CloseFloatingPane, window, cx| {
                 view.update(cx, |this, cx| this.confirm_shut_down(window, cx))
                     .ok();
             }
@@ -120,7 +120,7 @@ pub fn init(cx: &mut App) {
         // bindings, matching the three siblings above.
         workspace.register_action({
             let view = view.downgrade();
-            move |_workspace, _: &zed_actions::floating_pane::SplitRight, window, cx| {
+            move |_workspace, _: &zode_actions::floating_pane::SplitRight, window, cx| {
                 view.update(cx, |this, cx| {
                     this.split_active(SplitDirection::Right, window, cx)
                 })
@@ -129,7 +129,7 @@ pub fn init(cx: &mut App) {
         });
         workspace.register_action({
             let view = view.downgrade();
-            move |_workspace, _: &zed_actions::floating_pane::SplitLeft, window, cx| {
+            move |_workspace, _: &zode_actions::floating_pane::SplitLeft, window, cx| {
                 view.update(cx, |this, cx| {
                     this.split_active(SplitDirection::Left, window, cx)
                 })
@@ -138,7 +138,7 @@ pub fn init(cx: &mut App) {
         });
         workspace.register_action({
             let view = view.downgrade();
-            move |_workspace, _: &zed_actions::floating_pane::SplitUp, window, cx| {
+            move |_workspace, _: &zode_actions::floating_pane::SplitUp, window, cx| {
                 view.update(cx, |this, cx| {
                     this.split_active(SplitDirection::Up, window, cx)
                 })
@@ -147,7 +147,7 @@ pub fn init(cx: &mut App) {
         });
         workspace.register_action({
             let view = view.downgrade();
-            move |_workspace, _: &zed_actions::floating_pane::SplitDown, window, cx| {
+            move |_workspace, _: &zode_actions::floating_pane::SplitDown, window, cx| {
                 view.update(cx, |this, cx| {
                     this.split_active(SplitDirection::Down, window, cx)
                 })

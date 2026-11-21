@@ -8,8 +8,8 @@ description: "Configure which folders Zode trusts for running code and extension
 A worktree in Zode is either a directory or a single file that Zode opens as a standalone "project".
 Zode opens a worktree each time you run `zode some/path`, drag a file or directory into Zode, or open your user settings file.
 
-Every worktree opened may contain a `.zed/settings.json` file with extra configuration options that may require installing and spawning language servers or MCP servers.
-To let users choose based on their own threat model and risk tolerance, all worktrees start in Restricted Mode. Restricted Mode prevents downloading and running related items from `.zed/settings.json`. Until a worktree is trusted, Zode does not run related untrusted actions and waits for user confirmation. This gives users a chance to review project settings, MCP servers, and language servers.
+Every worktree opened may contain a `.zode/settings.json` file with extra configuration options that may require installing and spawning language servers or MCP servers.
+To let users choose based on their own threat model and risk tolerance, all worktrees start in Restricted Mode. Restricted Mode prevents downloading and running related items from `.zode/settings.json`. Until a worktree is trusted, Zode does not run related untrusted actions and waits for user confirmation. This gives users a chance to review project settings, MCP servers, and language servers.
 
 Zode still trusts tools it installs globally. Global MCP servers and global language servers such as Prettier and Copilot are installed and started as usual, independent of worktree trust.
 
@@ -24,13 +24,13 @@ This feature works locally and on SSH and WSL remote hosts. Zode tracks trust in
 
 Restricted Mode prevents:
 
-- Project settings (`.zed/settings.json`) from being parsed and applied
+- Project settings (`.zode/settings.json`) from being parsed and applied
 - Language servers from being installed and spawned
 - MCP servers from being installed and spawned
 
 ## Configuring broad worktree trust
 
-By default, Zode does not trust new worktrees. Users must trust each new worktree individually. Though not recommended, users can trust all worktrees with this setting ([how to edit](./configuring-zed.md#settings-files)):
+By default, Zode does not trust new worktrees. Users must trust each new worktree individually. Though not recommended, users can trust all worktrees with this setting ([how to edit](./configuring-zode.md#settings-files)):
 
 ```json [settings]
 "session": {
@@ -48,7 +48,7 @@ Zode has multiple layers of trust, based on the requests, from the least to most
 - "single file worktree"
 
 After opening an empty Zode window, you can open a single file. You can also open a file outside the current directory after opening a directory.
-A common example is `zed: open settings file`, which may start a language server for that file and create a new single-file worktree.
+A common example is `zode: open settings file`, which may start a language server for that file and create a new single-file worktree.
 
 Spawning a language server presents a risk should the language server experience a supply-chain attack; therefore, Zode restricts that by default. Each single file worktree requires a separate trust grant, unless the directory containing it is trusted or all worktrees are trusted.
 

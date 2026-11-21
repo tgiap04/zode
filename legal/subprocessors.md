@@ -14,7 +14,7 @@ edit stays on your machine.
 
 One optional feature does involve a server. If you sign in and turn on settings sync, your
 `settings.json`, your `keymap.json` and the list of extension identifiers you have
-installed are stored at `api.zodekit.site`. They are encrypted on your machine before they
+installed are stored at `api.zodekit.com`. They are encrypted on your machine before they
 are sent, with a key generated locally that the server never receives — so what is stored
 is ciphertext nobody operating that service can read, and there is no server-held wrapping
 key that could change that. Sync is off until you sign in; if you never do, nothing is
@@ -32,7 +32,7 @@ Paid plans for the hosted service are bought on the website, not in the editor. 
 needs — your email address, your payment details and your billing address — and tells the
 service which plan your account has. Polar never receives your synced data, which is
 ciphertext in any case. The editor itself only reads the resulting plan from
-`api.zodekit.site` and never talks to Polar.
+`api.zodekit.com` and never talks to Polar.
 
 | Subprocessor | Purpose | Data |
 |---|---|---|

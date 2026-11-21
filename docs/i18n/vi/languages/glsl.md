@@ -1,0 +1,11 @@
+---
+title: GLSL
+description: "Configure GLSL language support in Zode, including language servers, formatting, and debugging."
+---
+
+# GLSL
+
+GLSL (OpenGL Shading Language) được hỗ trợ qua [extension GLSL](https://github.com/tgiap04/zode/tree/develop/extensions/glsl/)
+
+- Tree-sitter: [theHamsta/tree-sitter-glsl](https://github.com/theHamsta/tree-sitter-glsl)
+- Language Server: [nolanderc/glsl_analyzer](https://github.com/nolanderc/glsl_analyzer)

@@ -288,8 +288,8 @@ impl PasswordProxy {
         }
     }
 }
-/// The main function for when Zed is running in netcat mode for use in askpass.
-/// Called from both the remote server binary and the zed binary in their respective main functions.
+/// The main function for when Zode is running in netcat mode for use in askpass.
+/// Called from both the remote server binary and the zode binary in their respective main functions.
 pub fn main(socket: &str) {
     use net::UnixStream;
     use std::io::{self, Read, Write};

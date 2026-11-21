@@ -92,7 +92,7 @@ mod tests {
             }
         }
 
-        // `ui_font_family` defaults to `Inter`, and `.ZedSans` resolves to it too
+        // `ui_font_family` defaults to `Inter`, and `.ZodeSans` resolves to it too
         // (`gpui::font_name_with_fallbacks`), so both routes land here. Only these
         // four styles: the UI asks for regular and semibold, upright and italic,
         // and `Assets::load_fonts` takes `.ttf` alone -- the `.otf` and variable

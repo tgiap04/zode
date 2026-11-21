@@ -48,7 +48,7 @@ use settings::Settings;
 use stack_frame_list::StackFrameList;
 use task::{
     BuildTaskDefinition, DebugScenario, SharedTaskContext, Shell, ShellBuilder, SpawnInTerminal,
-    TaskContext, ZedDebugConfig, substitute_variables_in_str,
+    TaskContext, ZodeDebugConfig, substitute_variables_in_str,
 };
 use terminal_view::TerminalView;
 use ui::{
@@ -684,8 +684,8 @@ impl RunningState {
                     .for_each(|value| Self::substitute_variables_in_config(value, context));
             }
             serde_json::Value::String(s) => {
-                // Some built-in zed tasks wrap their arguments in quotes as they might contain spaces.
-                if s.starts_with("\"$ZED_") && s.ends_with('"') {
+                // Some built-in tasks wrap their arguments in quotes as they might contain spaces.
+                if (s.starts_with("\"$ZODE_") || s.starts_with("\"$ZED_")) && s.ends_with('"') {
                     *s = s[1..s.len() - 1].to_string();
                 }
                 if let Some(substituted) = substitute_variables_in_str(s, context) {
@@ -746,8 +746,8 @@ impl RunningState {
                     .for_each(|value| Self::relativize_paths(None, value, context));
             }
             serde_json::Value::String(s) if key == Some("program") || key == Some("cwd") => {
-                // Some built-in zed tasks wrap their arguments in quotes as they might contain spaces.
-                if s.starts_with("\"$ZED_") && s.ends_with('"') {
+                // Some built-in tasks wrap their arguments in quotes as they might contain spaces.
+                if (s.starts_with("\"$ZODE_") || s.starts_with("\"$ZED_")) && s.ends_with('"') {
                     *s = s[1..s.len() - 1].to_string();
                 }
                 resolve_path(s);
@@ -1202,7 +1202,7 @@ impl RunningState {
                     })?
                     .await?;
 
-                let zed_config = ZedDebugConfig {
+                let zed_config = ZodeDebugConfig {
                     label: label.clone(),
                     adapter: adapter.clone(),
                     request,

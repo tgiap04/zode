@@ -67,8 +67,8 @@ jobs:
       max-parallel: 1
     uses: ./.github/workflows/extension_bump.yml
     secrets:
-      app-id: ${{ secrets.ZED_ZIPPY_APP_ID }}
-      app-secret: ${{ secrets.ZED_ZIPPY_APP_PRIVATE_KEY }}
+      app-id: ${{ secrets.ZODE_ZIPPY_APP_ID }}
+      app-secret: ${{ secrets.ZODE_ZIPPY_APP_PRIVATE_KEY }}
     with:
       working-directory: ${{ matrix.extension }}
       force-bump: false

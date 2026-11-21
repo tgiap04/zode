@@ -57,7 +57,7 @@ The core components of a Theme object include:
 
 ## Designing Your Theme
 
-You can use [Zode's Theme Builder](https://zed.dev/theme-builder) to design your own custom theme based on an existing one.
+You can use [Zed's Theme Builder](https://zed.dev/theme-builder) to design your own custom theme based on an existing one.
 
 This tool lets you fine-tune and preview how surfaces in Zode will look.
 You can then export the JSON and publish it in Zode's extension store.
