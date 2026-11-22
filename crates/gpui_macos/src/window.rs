@@ -79,6 +79,12 @@ static mut BLURRED_VIEW_CLASS: *const Class = ptr::null();
 /// `NSVisualEffectMaterialFullScreenUI`, the material Electron's `fullscreen-ui`
 /// vibrancy names. Not in the `cocoa` crate's enum.
 const NS_VISUAL_EFFECT_MATERIAL_FULL_SCREEN_UI: NSInteger = 15;
+/// `NSVisualEffectMaterialPopover`, what menu bar extras' panels are drawn with.
+const NS_VISUAL_EFFECT_MATERIAL_POPOVER: NSInteger = 6;
+/// Matches the rounding a pop-up's content draws (`rounded_xl`).
+const POP_UP_CORNER_RADIUS: f64 = 12.0;
+/// How opaque a pop-up's material is drawn.
+const POP_UP_MATERIAL_ALPHA: f64 = 0.8;
 
 #[allow(non_upper_case_globals)]
 const NSWindowStyleMaskNonactivatingPanel: NSWindowStyleMask =
@@ -432,6 +438,9 @@ struct MacWindowState {
     native_window: id,
     native_view: NonNull<Object>,
     blurred_view: Option<id>,
+    /// A pop-up's material is clipped to rounded corners and uses the popover
+    /// material, like a menu bar extra's panel.
+    pop_up: bool,
     background_appearance: WindowBackgroundAppearance,
     content_opacity: f32,
     display_link: Option<DisplayLink>,
@@ -758,6 +767,7 @@ impl MacWindow {
                 native_window,
                 native_view: NonNull::new_unchecked(native_view),
                 blurred_view: None,
+                pop_up: matches!(kind, WindowKind::PopUp),
                 background_appearance: WindowBackgroundAppearance::Opaque,
                 content_opacity: 1.0,
                 display_link: None,
@@ -1424,6 +1434,20 @@ impl PlatformWindow for MacWindow {
         let opaque = background_appearance == WindowBackgroundAppearance::Opaque;
         this.renderer.update_transparency(!opaque);
 
+        if this.pop_up {
+            // A pop-up draws rounded content into a rectangular window. The
+            // renderer also draws the background image across the whole
+            // drawable, so its layer is clipped to the same corners.
+            unsafe {
+                let view = this.native_view.as_ptr() as id;
+                let layer: id = msg_send![view, layer];
+                if !layer.is_null() {
+                    let _: () = msg_send![layer, setCornerRadius: POP_UP_CORNER_RADIUS];
+                    let _: () = msg_send![layer, setMasksToBounds: YES];
+                }
+            }
+        }
+
         unsafe {
             this.native_window.setOpaque_(opaque as BOOL);
             let background_color = if opaque {
@@ -1466,8 +1490,25 @@ impl PlatformWindow for MacWindow {
                     if background_appearance == WindowBackgroundAppearance::Vibrancy {
                         // The system material, tint and saturation kept, as Tabby
                         // and other Electron apps get from `setVibrancy`.
-                        let _: () = msg_send![blur_view, setMaterial: NS_VISUAL_EFFECT_MATERIAL_FULL_SCREEN_UI];
+                        let material = if this.pop_up {
+                            NS_VISUAL_EFFECT_MATERIAL_POPOVER
+                        } else {
+                            NS_VISUAL_EFFECT_MATERIAL_FULL_SCREEN_UI
+                        };
+                        let _: () = msg_send![blur_view, setMaterial: material];
                         NSVisualEffectView::setState_(blur_view, NSVisualEffectState::Active);
+                    }
+                    if this.pop_up {
+                        // The window is a rectangle; without this its corners show
+                        // the material outside the content's rounded edge. A mask
+                        // image rather than a layer corner radius: the material is
+                        // drawn behind the window by the window server, and clipping
+                        // the view's layer can leave it drawing nothing at all.
+                        let mask = rounded_mask_image(POP_UP_CORNER_RADIUS);
+                        let _: () = msg_send![blur_view, setMaskImage: mask];
+                        // Thinner than the system's popover, so more of what is
+                        // behind the panel shows through.
+                        let _: () = msg_send![blur_view, setAlphaValue: POP_UP_MATERIAL_ALPHA];
                     }
                     blur_view.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable);
 
@@ -2796,7 +2837,7 @@ where
     }
 }
 
-unsafe fn display_id_for_screen(screen: id) -> CGDirectDisplayID {
+pub(crate) unsafe fn display_id_for_screen(screen: id) -> CGDirectDisplayID {
     unsafe {
         let device_description = NSScreen::deviceDescription(screen);
         let screen_number_key: id = ns_string("NSScreenNumber");
@@ -2980,5 +3021,57 @@ mod tests {
         let before = frame(39.0, 45.0, 1730.0, 1005.0);
         assert!(!frame_changed(before, before));
         assert!(!frame_changed(before, frame(39.25, 45.0, 1730.0, 1004.75)));
+    }
+}
+
+/// A black rounded rectangle that stretches to any size, its corners kept, for
+/// an `NSVisualEffectView`'s `maskImage`.
+unsafe fn rounded_mask_image(radius: f64) -> id {
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct NSEdgeInsets {
+        top: f64,
+        left: f64,
+        bottom: f64,
+        right: f64,
+    }
+    unsafe impl objc::Encode for NSEdgeInsets {
+        fn encode() -> objc::Encoding {
+            unsafe { objc::Encoding::from_str("{NSEdgeInsets=dddd}") }
+        }
+    }
+    /// `NSImageResizingModeStretch`.
+    const RESIZING_MODE_STRETCH: NSInteger = 1;
+
+    unsafe {
+        let side = radius * 2. + 1.;
+        let draw = ConcreteBlock::new(move |rect: NSRect| -> BOOL {
+            let black: id = msg_send![class!(NSColor), blackColor];
+            let _: () = msg_send![black, set];
+            let path: id = msg_send![
+                class!(NSBezierPath),
+                bezierPathWithRoundedRect: rect
+                xRadius: radius
+                yRadius: radius
+            ];
+            let _: () = msg_send![path, fill];
+            YES
+        })
+        .copy();
+        let image: id = msg_send![
+            class!(NSImage),
+            imageWithSize: NSSize::new(side, side)
+            flipped: NO
+            drawingHandler: &*draw
+        ];
+        let insets = NSEdgeInsets {
+            top: radius,
+            left: radius,
+            bottom: radius,
+            right: radius,
+        };
+        let _: () = msg_send![image, setCapInsets: insets];
+        let _: () = msg_send![image, setResizingMode: RESIZING_MODE_STRETCH];
+        image
     }
 }

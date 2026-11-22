@@ -359,6 +359,50 @@ impl TestAppContext {
         self.test_platform.display_wake_reasons.borrow().clone()
     }
 
+    /// The tray icon the app has set, if any.
+    pub fn tray_icon(&self) -> Option<crate::TrayIcon> {
+        self.test_platform.tray_icon.borrow().clone()
+    }
+
+    /// Sets where the tray icon is and whether it can be seen.
+    pub fn set_tray_icon_placement(&self, anchor: Option<crate::TrayIconAnchor>, visible: bool) {
+        *self.test_platform.tray_icon_anchor.borrow_mut() = anchor;
+        *self.test_platform.tray_icon_visible.borrow_mut() = visible;
+    }
+
+    /// Clicks the tray icon, as the platform would.
+    pub fn simulate_tray_click(&mut self) {
+        let anchor = *self.test_platform.tray_icon_anchor.borrow();
+        let callback = self.test_platform.tray_icon_click.borrow_mut().take();
+        if let Some(mut callback) = callback {
+            callback(anchor);
+            self.test_platform
+                .tray_icon_click
+                .borrow_mut()
+                .get_or_insert(callback);
+        }
+        self.run_until_parked();
+    }
+
+    /// Presses a mouse button outside every window, as the platform would report it.
+    pub fn simulate_outside_mouse_down(&mut self) {
+        let callback = self.test_platform.outside_mouse_down.borrow_mut().take();
+        if let Some(mut callback) = callback {
+            callback();
+            self.test_platform
+                .outside_mouse_down
+                .borrow_mut()
+                .get_or_insert(callback);
+        }
+        self.run_until_parked();
+    }
+
+    /// Sets what the platform reports for `system_idle_time`. `None` is "cannot
+    /// tell", the answer of a platform without the query.
+    pub fn set_system_idle_time(&self, idle: Option<std::time::Duration>) {
+        *self.test_platform.system_idle_time.borrow_mut() = idle;
+    }
+
     /// Sets what the platform reports for `on_battery`. `None` is "cannot tell".
     pub fn set_on_battery(&self, on_battery: Option<bool>) {
         *self.test_platform.on_battery.borrow_mut() = on_battery;
@@ -1150,5 +1194,27 @@ mod notification_tests {
         cx.simulate_notification_click("agent-finished");
 
         assert_eq!(clicked_id.borrow().as_deref(), Some("agent-finished"));
+    }
+
+    #[gpui::test]
+    fn every_registered_handler_hears_a_click(cx: &mut TestAppContext) {
+        let heard = Rc::new(RefCell::new(Vec::new()));
+        for name in ["agents", "pairing"] {
+            let heard = heard.clone();
+            cx.app.borrow().on_notification_activated(move |id| {
+                heard.borrow_mut().push(format!("{name}:{id}"))
+            });
+        }
+
+        cx.simulate_notification_click("remote-control-pairing-7");
+
+        assert_eq!(
+            *heard.borrow(),
+            [
+                "agents:remote-control-pairing-7",
+                "pairing:remote-control-pairing-7"
+            ],
+            "a second handler must not replace the first"
+        );
     }
 }

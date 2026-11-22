@@ -41,6 +41,17 @@ pub(crate) struct TestPlatform {
     /// tell" a desktop gives -- so a test that does not care is not silently
     /// pretending to be a laptop.
     pub on_battery: RefCell<Option<bool>>,
+    /// What `system_idle_time` should answer. Defaults to `None`, the answer of
+    /// a platform that cannot tell.
+    pub system_idle_time: RefCell<Option<std::time::Duration>>,
+    /// The tray icon set by the app, if any.
+    pub tray_icon: RefCell<Option<crate::TrayIcon>>,
+    /// What `tray_icon_anchor` answers.
+    pub tray_icon_anchor: RefCell<Option<crate::TrayIconAnchor>>,
+    /// What `tray_icon_visible` answers.
+    pub tray_icon_visible: RefCell<bool>,
+    pub(crate) tray_icon_click: RefCell<Option<Box<dyn FnMut(Option<crate::TrayIconAnchor>)>>>,
+    pub(crate) outside_mouse_down: RefCell<Option<Box<dyn FnMut()>>>,
     /// Whether `keep_display_awake` can answer at all. `false` stands in for a
     /// platform with no implementation -- which is every platform but macOS
     /// today -- so the policy layer's "this machine cannot" state is reachable
@@ -156,6 +167,12 @@ impl TestPlatform {
             opened_url: Default::default(),
             display_wake_reasons: Default::default(),
             on_battery: Default::default(),
+            system_idle_time: Default::default(),
+            tray_icon: Default::default(),
+            tray_icon_anchor: Default::default(),
+            tray_icon_visible: Default::default(),
+            tray_icon_click: Default::default(),
+            outside_mouse_down: Default::default(),
             display_wake_supported: RefCell::new(true),
             posted_notifications: Default::default(),
             notifications_supported: RefCell::new(false),
@@ -274,6 +291,30 @@ impl Platform for TestPlatform {
 
     fn keyboard_layout(&self) -> Box<dyn PlatformKeyboardLayout> {
         Box::new(TestKeyboardLayout)
+    }
+
+    fn set_tray_icon(&self, icon: Option<crate::TrayIcon>) {
+        *self.tray_icon.borrow_mut() = icon;
+    }
+
+    fn on_tray_icon_click(&self, callback: Box<dyn FnMut(Option<crate::TrayIconAnchor>)>) {
+        *self.tray_icon_click.borrow_mut() = Some(callback);
+    }
+
+    fn tray_icon_anchor(&self) -> Option<crate::TrayIconAnchor> {
+        *self.tray_icon_anchor.borrow()
+    }
+
+    fn tray_icon_visible(&self) -> bool {
+        *self.tray_icon_visible.borrow()
+    }
+
+    fn on_outside_mouse_down(&self, callback: Option<Box<dyn FnMut()>>) {
+        *self.outside_mouse_down.borrow_mut() = callback;
+    }
+
+    fn system_idle_time(&self) -> Option<std::time::Duration> {
+        *self.system_idle_time.borrow()
     }
 
     fn on_battery(&self) -> Option<bool> {

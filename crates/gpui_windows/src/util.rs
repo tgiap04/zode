@@ -148,6 +148,23 @@ pub(crate) fn configure_dwm_dark_mode(hwnd: HWND, appearance: WindowAppearance) 
     }
 }
 
+/// Asks Windows 11 to round the window's corners. A frameless pop-up gets
+/// square corners otherwise, which shows around a rounded, translucent panel.
+/// Earlier versions ignore the attribute.
+pub(crate) fn round_window_corners(hwnd: HWND) {
+    let preference = DWMWCP_ROUND;
+    unsafe {
+        if let Err(error) = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &preference as *const _ as _,
+            std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+        ) {
+            log::debug!("could not round the window's corners: {error}");
+        }
+    }
+}
+
 #[inline]
 pub(crate) fn logical_point(x: f32, y: f32, scale_factor: f32) -> Point<Pixels> {
     Point {

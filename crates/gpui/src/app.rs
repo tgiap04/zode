@@ -49,8 +49,8 @@ use crate::{
     PlatformKeyboardLayout, PlatformKeyboardMapper, Point, Priority, PromptBuilder, PromptButton,
     PromptHandle, PromptLevel, Render, RenderImage, RenderablePromptHandle, Reservation,
     ScreenCaptureSource, SharedString, SubscriberSet, Subscription, SvgRenderer, Task,
-    TextRenderingMode, TextSystem, ThermalState, Window, WindowAppearance, WindowButtonLayout,
-    WindowHandle, WindowId, WindowInvalidator,
+    TextRenderingMode, TextSystem, ThermalState, TrayIcon, TrayIconAnchor, Window,
+    WindowAppearance, WindowButtonLayout, WindowHandle, WindowId, WindowInvalidator,
     colors::{Colors, GlobalColors},
     hash, init_app_menus,
 };
@@ -609,6 +609,9 @@ pub struct App {
     pub(crate) quit_observers: SubscriberSet<(), QuitHandler>,
     pub(crate) restart_observers: SubscriberSet<(), Handler>,
     pub(crate) window_closed_observers: SubscriberSet<(), WindowClosedHandler>,
+    /// Everyone who asked to hear about a clicked notification. The platform
+    /// keeps a single callback, so it is given one that tells all of these.
+    notification_activation_handlers: Rc<RefCell<Vec<Box<dyn FnMut(String)>>>>,
 
     /// Per-App element arena. This isolates element allocations between different
     /// App instances (important for tests where multiple Apps run concurrently).
@@ -716,6 +719,7 @@ impl App {
                 keyboard_mapper,
                 global_action_listeners: FxHashMap::default(),
                 pending_effects: VecDeque::new(),
+                notification_activation_handlers: Rc::default(),
                 pending_notifications: FxHashSet::default(),
                 pending_global_notifications: FxHashSet::default(),
                 observers: SubscriberSet::new(),
@@ -1231,6 +1235,13 @@ impl App {
         self.platform.on_battery()
     }
 
+    /// How long since the last input anywhere on the system; `None` where the
+    /// platform cannot say, in which case a caller falls back to its own idea of
+    /// activity.
+    pub fn system_idle_time(&self) -> Option<std::time::Duration> {
+        self.platform.system_idle_time()
+    }
+
     /// Posts a notification to the OS notification centre. Does not block --
     /// see [`Platform::post_notification`].
     pub fn post_notification(&self, notification: Notification) {
@@ -1244,11 +1255,29 @@ impl App {
 
     /// Register a handler to be invoked when the user activates (clicks) a
     /// posted notification. The `String` is the notification's own `id`.
-    pub fn on_notification_activated<F>(&self, mut callback: F)
+    pub fn on_notification_activated<F>(&self, callback: F)
     where
         F: 'static + FnMut(String),
     {
-        self.platform.on_notification_activated(Box::new(callback));
+        let first = self.notification_activation_handlers.borrow().is_empty();
+        self.notification_activation_handlers
+            .borrow_mut()
+            .push(Box::new(callback));
+        if !first {
+            return;
+        }
+        let handlers = self.notification_activation_handlers.clone();
+        self.platform.on_notification_activated(Box::new(move |id| {
+            // Taken out while they run, so a handler that registers another
+            // does not find the list already borrowed.
+            let mut running = std::mem::take(&mut *handlers.borrow_mut());
+            for handler in &mut running {
+                handler(id.clone());
+            }
+            let mut registered = handlers.borrow_mut();
+            running.append(&mut registered);
+            *registered = running;
+        }));
     }
 
     /// Invokes a handler when the thermal state changes
@@ -2188,6 +2217,49 @@ impl App {
     /// Sets the right click menu for the app icon in the dock
     pub fn set_dock_menu(&self, menus: Vec<MenuItem>) {
         self.platform.set_dock_menu(menus, &self.keymap.borrow())
+    }
+
+    /// Shows `icon` in the system tray, replaces it, or removes it with `None`.
+    pub fn set_tray_icon(&self, icon: Option<TrayIcon>) {
+        self.platform.set_tray_icon(icon)
+    }
+
+    /// Calls `callback` with where the tray icon is whenever it is clicked.
+    pub fn on_tray_icon_click(
+        &self,
+        mut callback: impl FnMut(Option<TrayIconAnchor>, &mut App) + 'static,
+    ) {
+        let app = self.this.clone();
+        self.platform.on_tray_icon_click(Box::new(move |anchor| {
+            if let Some(app) = app.upgrade() {
+                callback(anchor, &mut app.borrow_mut());
+            }
+        }));
+    }
+
+    /// Where the tray icon is now, if anywhere.
+    pub fn tray_icon_anchor(&self) -> Option<TrayIconAnchor> {
+        self.platform.tray_icon_anchor()
+    }
+
+    /// Whether the tray icon can be seen right now.
+    pub fn tray_icon_visible(&self) -> bool {
+        self.platform.tray_icon_visible()
+    }
+
+    /// Calls `callback` on every mouse press outside this app's pop-up windows, until
+    /// replaced or cleared with `None`.
+    pub fn on_outside_mouse_down(&self, callback: Option<Box<dyn FnMut(&mut App)>>) {
+        let Some(mut callback) = callback else {
+            self.platform.on_outside_mouse_down(None);
+            return;
+        };
+        let app = self.this.clone();
+        self.platform.on_outside_mouse_down(Some(Box::new(move || {
+            if let Some(app) = app.upgrade() {
+                callback(&mut app.borrow_mut());
+            }
+        })));
     }
 
     /// Performs the action associated with the given dock menu item, only used on Windows for now.

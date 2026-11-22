@@ -8,11 +8,12 @@ use cocoa::{
     appkit::{
         NSApplication, NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular,
         NSControl as _, NSEventModifierFlags, NSMenu, NSMenuItem, NSModalResponse, NSOpenPanel,
-        NSSavePanel, NSVisualEffectState, NSVisualEffectView, NSWindow,
+        NSSavePanel, NSScreen, NSVisualEffectState, NSVisualEffectView, NSWindow,
     },
     base::{BOOL, NO, YES, id, nil, selector},
     foundation::{
-        NSArray, NSAutoreleasePool, NSBundle, NSInteger, NSProcessInfo, NSString, NSUInteger, NSURL,
+        NSArray, NSAutoreleasePool, NSBundle, NSInteger, NSProcessInfo, NSRect, NSSize, NSString,
+        NSUInteger, NSURL,
     },
 };
 use core_foundation::{
@@ -133,6 +134,10 @@ unsafe fn build_classes() {
                 menu_will_open as extern "C" fn(&mut Object, Sel, id),
             );
             decl.add_method(
+                sel!(trayIconClicked:),
+                tray_icon_clicked as extern "C" fn(&mut Object, Sel, id),
+            );
+            decl.add_method(
                 sel!(applicationDockMenu:),
                 handle_dock_menu as extern "C" fn(&mut Object, Sel, id) -> id,
             );
@@ -192,6 +197,13 @@ pub(crate) struct MacPlatformState {
     open_urls: Option<Box<dyn FnMut(Vec<String>)>>,
     finish_launching: Option<Box<dyn FnOnce()>>,
     dock_menu: Option<id>,
+    /// The retained `NSStatusItem` shown in the menu bar, once one was asked for.
+    status_item: Option<id>,
+    tray_icon_click: Option<Box<dyn FnMut(Option<gpui::TrayIconAnchor>)>>,
+    /// The global `NSEvent` monitor behind `on_outside_mouse_down`, and its callback.
+    /// The global and the local `NSEvent` monitors behind `on_outside_mouse_down`.
+    outside_mouse_monitors: Vec<id>,
+    outside_mouse_down: Option<Box<dyn FnMut()>>,
     menus: Option<Vec<OwnedMenu>>,
     keyboard_mapper: Rc<MacKeyboardMapper>,
     pub(crate) on_notification_activated: Option<Box<dyn FnMut(String)>>,
@@ -227,6 +239,10 @@ impl MacPlatform {
             open_urls: None,
             finish_launching: None,
             dock_menu: None,
+            status_item: None,
+            tray_icon_click: None,
+            outside_mouse_monitors: Vec::new(),
+            outside_mouse_down: None,
             on_keyboard_layout_change: None,
             on_thermal_state_change: None,
             menus: None,
@@ -982,6 +998,18 @@ impl Platform for MacPlatform {
         }))
     }
 
+    fn system_idle_time(&self) -> Option<std::time::Duration> {
+        /// `kCGEventSourceStateCombinedSessionState`: input from every source in
+        /// the login session.
+        const COMBINED_SESSION_STATE: i32 = 0;
+        /// `kCGAnyInputEventType`.
+        const ANY_INPUT_EVENT: u32 = !0;
+        let seconds = unsafe {
+            CGEventSourceSecondsSinceLastEventType(COMBINED_SESSION_STATE, ANY_INPUT_EVENT)
+        };
+        (seconds.is_finite() && seconds >= 0.0).then(|| std::time::Duration::from_secs_f64(seconds))
+    }
+
     fn on_battery(&self) -> Option<bool> {
         let sources = unsafe { IOPSCopyPowerSourcesInfo() };
         if sources.is_null() {
@@ -1046,6 +1074,98 @@ impl Platform for MacPlatform {
             let new = self.create_dock_menu(menu, NSWindow::delegate(app), actions, keymap);
             if let Some(old) = state.dock_menu.replace(new) {
                 CFRelease(old as _)
+            }
+        }
+    }
+
+    fn set_tray_icon(&self, icon: Option<gpui::TrayIcon>) {
+        unsafe {
+            let mut state = self.0.lock();
+            if let Some(old) = state.status_item.take() {
+                let status_bar: id = msg_send![class!(NSStatusBar), systemStatusBar];
+                let _: () = msg_send![status_bar, removeStatusItem: old];
+                let _: () = msg_send![old, release];
+            }
+            if let Some(icon) = icon {
+                state.status_item = Some(create_status_item(&icon));
+            }
+        }
+    }
+
+    fn on_tray_icon_click(&self, callback: Box<dyn FnMut(Option<gpui::TrayIconAnchor>)>) {
+        self.0.lock().tray_icon_click = Some(callback);
+    }
+
+    fn tray_icon_anchor(&self) -> Option<gpui::TrayIconAnchor> {
+        let item = self.0.lock().status_item?;
+        unsafe { status_item_anchor(item) }
+    }
+
+    fn tray_icon_visible(&self) -> bool {
+        /// `NSWindowOcclusionStateVisible`.
+        const OCCLUSION_VISIBLE: NSUInteger = 1 << 1;
+        let Some(item) = self.0.lock().status_item else {
+            return false;
+        };
+        unsafe {
+            let button: id = msg_send![item, button];
+            let window: id = msg_send![button, window];
+            if window.is_null() {
+                return false;
+            }
+            let occlusion: NSUInteger = msg_send![window, occlusionState];
+            occlusion & OCCLUSION_VISIBLE != 0
+        }
+    }
+
+    fn on_outside_mouse_down(&self, callback: Option<Box<dyn FnMut()>>) {
+        /// `NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown`.
+        const MOUSE_DOWN_MASK: u64 = (1 << 1) | (1 << 3);
+        unsafe {
+            let mut state = self.0.lock();
+            for monitor in state.outside_mouse_monitors.drain(..) {
+                let _: () = msg_send![class!(NSEvent), removeMonitor: monitor];
+                let _: () = msg_send![monitor, release];
+            }
+            state.outside_mouse_down = callback;
+            if state.outside_mouse_down.is_none() {
+                return;
+            }
+            // Clicks in other applications, the menu bar included where the
+            // system draws it in a process of its own.
+            let global = ConcreteBlock::new(|_event: id| fire_outside_mouse_down()).copy();
+            let monitor: id = msg_send![
+                class!(NSEvent),
+                addGlobalMonitorForEventsMatchingMask: MOUSE_DOWN_MASK
+                handler: &*global
+            ];
+            if !monitor.is_null() {
+                let _: id = msg_send![monitor, retain];
+                state.outside_mouse_monitors.push(monitor);
+            }
+            // Clicks in this application's own windows other than a pop-up: the
+            // panel the callback closes is one, so clicks inside it are left
+            // alone. The event itself always goes on to its window.
+            let local = ConcreteBlock::new(|event: id| -> id {
+                let window: id = msg_send![event, window];
+                let in_a_pop_up = !window.is_null() && {
+                    let level: NSInteger = msg_send![window, level];
+                    level >= POP_UP_WINDOW_LEVEL
+                };
+                if !in_a_pop_up {
+                    fire_outside_mouse_down();
+                }
+                event
+            })
+            .copy();
+            let monitor: id = msg_send![
+                class!(NSEvent),
+                addLocalMonitorForEventsMatchingMask: MOUSE_DOWN_MASK
+                handler: &*local
+            ];
+            if !monitor.is_null() {
+                let _: id = msg_send![monitor, retain];
+                state.outside_mouse_monitors.push(monitor);
             }
         }
     }
@@ -1459,6 +1579,127 @@ extern "C" fn menu_will_open(this: &mut Object, _: Sel, _: id) {
             callback();
             platform.0.lock().will_open_menu.get_or_insert(callback);
         }
+    }
+}
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGEventSourceSecondsSinceLastEventType(source_state: i32, event_type: u32) -> f64;
+}
+
+/// A menu bar item showing `icon`, retained for as long as it is shown: the status bar drops
+/// an item as soon as nothing holds it. Clicks, left or right, go to the app delegate's
+/// `trayIconClicked:`.
+unsafe fn create_status_item(icon: &gpui::TrayIcon) -> id {
+    /// `NSVariableStatusItemLength`: as wide as the image.
+    const VARIABLE_LENGTH: f64 = -1.0;
+    /// Menu bar extras are drawn 18 points tall; the image carries twice as many pixels for
+    /// Retina displays.
+    const ICON_POINTS: f64 = 18.0;
+    /// `NSEventMaskLeftMouseDown | NSEventMaskRightMouseDown`: act on press, as menu bar
+    /// extras do.
+    const CLICK_MASK: u64 = (1 << 1) | (1 << 3);
+
+    unsafe {
+        let status_bar: id = msg_send![class!(NSStatusBar), systemStatusBar];
+        let item: id = msg_send![status_bar, statusItemWithLength: VARIABLE_LENGTH];
+        let item: id = msg_send![item, retain];
+        let button: id = msg_send![item, button];
+        let data: id = msg_send![
+            class!(NSData),
+            dataWithBytes: icon.image.as_ptr()
+            length: icon.image.len() as NSUInteger
+        ];
+        let image: id = msg_send![class!(NSImage), alloc];
+        let image: id = msg_send![image, initWithData: data];
+        if image.is_null() {
+            log::error!("the tray icon is not an image macOS can read");
+        } else {
+            let template = if icon.template { YES } else { NO };
+            let _: () = msg_send![image, setTemplate: template];
+            let _: () = msg_send![image, setSize: NSSize::new(ICON_POINTS, ICON_POINTS)];
+            let _: () = msg_send![button, setImage: image];
+            let _: () = msg_send![image, release];
+        }
+        let _: () = msg_send![button, setToolTip: ns_string(&icon.tooltip)];
+        let app: id = msg_send![APP_CLASS, sharedApplication];
+        let delegate: id = msg_send![app, delegate];
+        let _: () = msg_send![button, setTarget: delegate];
+        let _: () = msg_send![button, setAction: sel!(trayIconClicked:)];
+        let _: NSInteger = msg_send![button, sendActionOn: CLICK_MASK];
+        item
+    }
+}
+
+/// Where `item`'s button is, in the coordinates of the display it is on.
+unsafe fn status_item_anchor(item: id) -> Option<gpui::TrayIconAnchor> {
+    unsafe {
+        let button: id = msg_send![item, button];
+        let window: id = msg_send![button, window];
+        if window.is_null() {
+            return None;
+        }
+        let screen: id = msg_send![window, screen];
+        if screen.is_null() {
+            return None;
+        }
+        let frame: NSRect = msg_send![window, frame];
+        let screen_frame = NSScreen::frame(screen);
+        let x = frame.origin.x - screen_frame.origin.x;
+        let y =
+            screen_frame.size.height - (frame.origin.y - screen_frame.origin.y) - frame.size.height;
+        Some(gpui::TrayIconAnchor {
+            bounds: gpui::Bounds::new(
+                gpui::point(gpui::px(x as f32), gpui::px(y as f32)),
+                gpui::size(
+                    gpui::px(frame.size.width as f32),
+                    gpui::px(frame.size.height as f32),
+                ),
+            ),
+            display_id: Some(gpui::DisplayId::new(crate::window::display_id_for_screen(
+                screen,
+            ))),
+            edge: gpui::TrayEdge::Top,
+        })
+    }
+}
+
+/// `NSPopUpWindowLevel`, the level GPUI gives `WindowKind::PopUp` windows.
+const POP_UP_WINDOW_LEVEL: NSInteger = 101;
+
+/// Runs the `on_outside_mouse_down` callback, with the state lock released while
+/// it runs: it closes windows, and those reach back into the platform.
+fn fire_outside_mouse_down() {
+    unsafe {
+        let app: id = msg_send![APP_CLASS, sharedApplication];
+        let delegate: id = msg_send![app, delegate];
+        if delegate.is_null() {
+            return;
+        }
+        let platform = get_mac_platform(&mut *delegate);
+        let callback = platform.0.lock().outside_mouse_down.take();
+        if let Some(mut callback) = callback {
+            callback();
+            platform.0.lock().outside_mouse_down.get_or_insert(callback);
+        }
+    }
+}
+
+extern "C" fn tray_icon_clicked(this: &mut Object, _: Sel, _: id) {
+    unsafe {
+        let platform = get_mac_platform(this);
+        let (item, callback) = {
+            let mut state = platform.0.lock();
+            (state.status_item, state.tray_icon_click.take())
+        };
+        let Some(mut callback) = callback else {
+            return;
+        };
+        // The state lock is released first: the callback opens windows, and those reach
+        // back into the platform.
+        let anchor = item.and_then(|item| status_item_anchor(item));
+        callback(anchor);
+        platform.0.lock().tray_icon_click.get_or_insert(callback);
     }
 }
 
