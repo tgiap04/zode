@@ -195,7 +195,11 @@ mod tray {
     async fn the_tray_icon_click_toggles_the_panel(cx: &mut TestAppContext) {
         init(cx);
         cx.set_tray_icon_placement(Some(anchor(700., TrayEdge::Top)), true);
-        assert!(cx.tray_icon().is_some_and(|icon| icon.template));
+        // Only macOS draws the glyph as a template; other trays get the color icon.
+        assert!(
+            cx.tray_icon()
+                .is_some_and(|icon| icon.template == cfg!(target_os = "macos"))
+        );
 
         cx.simulate_tray_click();
         assert!(cx.update(|cx| panel_is_open(cx)));

@@ -11,18 +11,23 @@ pub const RAIL_WIDTH: Pixels = px(48.0);
 /// Every glyph in the column is drawn by this, so they cannot drift apart.
 ///
 /// `ButtonSize` and `IconSize` are rems against the UI font size, not pixels. On
-/// the shipped 15px font `Large` draws 30px and `Medium` 15px, just under the 32px
-/// project squares, while the column's own 48px width does not move.
+/// the shipped 15px font `Large` draws about 34px and `Medium` 15px, while the
+/// column's own 48px width does not move.
+///
+/// The width is pinned to the same `Large` length as the height: left to its
+/// content, a button is only as wide as its glyph plus padding, which matches
+/// the height only for one particular button scale.
 pub(crate) fn rail_button(id: impl Into<ElementId>, icon: IconName) -> IconButton {
     IconButton::new(id, icon)
         .size(ButtonSize::Large)
+        .width(ButtonSize::Large.rems())
         .icon_size(IconSize::Medium)
 }
 
 /// Absolute, not a spacing helper: those are rems against the UI font, and the
 /// column's width does not shrink with the font, so neither should the air
-/// between its buttons. Small because a 30px button already pads its 15px glyph
-/// by 7.5px on each side; this is added on top of that.
+/// between its buttons. Small because a `Large` button already pads its 15px
+/// glyph by about 9px on each side; this is added on top of that.
 pub(crate) const RAIL_ICON_GAP: Pixels = px(4.0);
 
 /// Between a block's first or last glyph and the rule that separates it from
@@ -290,7 +295,7 @@ mod tests {
 
     /// Every glyph in the column is one size, whichever block draws it. A
     /// button drawn by hand with its own `IconButton::new` would leave the
-    /// default 22px box among 32px ones, and nothing but a measurement notices.
+    /// default-sized box among `Large` ones, and nothing but a measurement notices.
     #[gpui::test]
     async fn every_rail_glyph_button_is_large(cx: &mut TestAppContext) {
         let (TwoProjects { .. }, cx) = two_projects(cx).await;
