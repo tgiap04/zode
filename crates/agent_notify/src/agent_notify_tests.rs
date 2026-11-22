@@ -48,7 +48,15 @@ fn set_enabled(cx: &mut TestAppContext, enabled: bool) {
 pub(crate) async fn open_tab(
     cx: &mut TestAppContext,
 ) -> (Entity<Workspace>, EntityId, &mut VisualTestContext) {
-    cx.set_notifications_supported(true);
+    open_tab_where(cx, true).await
+}
+
+/// [`open_tab`] on a platform that can, or cannot, post notifications.
+pub(crate) async fn open_tab_where(
+    cx: &mut TestAppContext,
+    can_post_notifications: bool,
+) -> (Entity<Workspace>, EntityId, &mut VisualTestContext) {
+    cx.set_notifications_supported(can_post_notifications);
     cx.update(|cx| {
         let store = settings::SettingsStore::test(cx);
         cx.set_global(store);

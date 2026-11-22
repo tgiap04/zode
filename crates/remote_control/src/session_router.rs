@@ -4,6 +4,7 @@
 //!
 //! The host carries out what comes back.
 
+use remote_relay_client::web_push_crypto::PushSubscriptionKeys;
 use remote_relay_protocol::{
     Control, RELAY_PROTOCOL_VERSION, RPC_PROTOCOL_VERSION, error_code, reject_unknown_version,
 };
@@ -30,6 +31,17 @@ pub const IDE_CAPABILITY: &str = "ide";
 /// The capability that says this host lists the agent sessions of the folders
 /// open on it, and opens a tab on one for a device.
 pub const SESSIONS_CAPABILITY: &str = "sessions";
+
+/// The capability that says this host reads push subscriptions and page
+/// visibility, and may send `push_status`. Always announced: push being
+/// switched off is a state, told by `push_status`, not a missing ability. A
+/// host sends `push_status` only to a device whose own hello lists it, since a
+/// browser that predates it fails on a message type it does not know.
+pub const PUSH_CAPABILITY: &str = "push";
+
+/// The longest agent id a device may say it is looking at. Agent ids are this
+/// host's own, and far shorter.
+const MAX_VIEWED_AGENT_ID_LEN: usize = 128;
 
 /// The code for a request that is understood and not served. Not one of the
 /// protocol's seven: a recognised message the host declines is a different
@@ -107,17 +119,35 @@ pub enum RouterAction {
         request_id: u32,
         request: SessionRequest,
     },
+    /// Keep these keys to push to this device while it is away.
+    PushSubscribe {
+        keys: PushSubscriptionKeys,
+    },
+    /// Forget this device's push keys.
+    PushUnsubscribe,
+    /// The device's page is, or is not, on screen, showing `agent_id`.
+    PageVisibility {
+        visible: bool,
+        agent_id: Option<String>,
+    },
 }
 
 /// What the router needs to remember about one session.
 #[derive(Debug, Default)]
 pub struct RouterState {
     hello_done: bool,
+    push_capable: bool,
 }
 
 impl RouterState {
     pub fn hello_done(&self) -> bool {
         self.hello_done
+    }
+
+    /// Whether the device's hello listed [`PUSH_CAPABILITY`], so that it may be
+    /// sent `push_status`.
+    pub fn push_capable(&self) -> bool {
+        self.push_capable
     }
 }
 
@@ -152,6 +182,7 @@ pub fn hello_ack(facts: &HostFacts<'_>) -> Control {
     if facts.sessions_available {
         capabilities.push(SESSIONS_CAPABILITY.to_string());
     }
+    capabilities.push(PUSH_CAPABILITY.to_string());
     Control::HelloAck {
         relay_protocol: RELAY_PROTOCOL_VERSION,
         app_version: facts.app_version.to_string(),
@@ -278,11 +309,18 @@ pub fn route_control(
     }
 
     match control {
-        Control::Hello { relay_protocol, .. } => {
+        Control::Hello {
+            relay_protocol,
+            capabilities,
+            ..
+        } => {
             if let Some(refusal) = reject_unknown_version(relay_protocol) {
                 return vec![RouterAction::Refuse(refusal)];
             }
             state.hello_done = true;
+            state.push_capable = capabilities
+                .iter()
+                .any(|capability| capability == PUSH_CAPABILITY);
             vec![RouterAction::Reply(hello_ack(facts))]
         }
         Control::Ping => vec![RouterAction::Reply(Control::Pong)],
@@ -363,6 +401,28 @@ pub fn route_control(
             request_id,
             SessionRequest::Resume { session_id, fork },
         )],
+        Control::PushSubscribe { p256dh, auth } => {
+            match PushSubscriptionKeys::decode(&p256dh, &auth) {
+                Some(keys) => vec![RouterAction::PushSubscribe { keys }],
+                None => vec![RouterAction::Reply(error(
+                    error_code::MALFORMED,
+                    "a push subscription carries a P-256 public key and a 16-byte secret",
+                ))],
+            }
+        }
+        Control::PushUnsubscribe => vec![RouterAction::PushUnsubscribe],
+        Control::PageVisibility { visible, agent_id } => {
+            if agent_id
+                .as_ref()
+                .is_some_and(|agent_id| agent_id.len() > MAX_VIEWED_AGENT_ID_LEN)
+            {
+                return vec![RouterAction::Reply(error(
+                    error_code::MALFORMED,
+                    "that is not an agent this host lists",
+                ))];
+            }
+            vec![RouterAction::PageVisibility { visible, agent_id }]
+        }
         // A peer's own error is its business; there is nothing to answer.
         Control::Error { .. } => Vec::new(),
         // Messages only this side sends. A device sending one is confused
@@ -378,7 +438,8 @@ pub fn route_control(
         | Control::FileReadReply { .. }
         | Control::DiffReply { .. }
         | Control::SessionsListReply { .. }
-        | Control::SessionResumed { .. } => vec![RouterAction::Reply(error(
+        | Control::SessionResumed { .. }
+        | Control::PushStatus { .. } => vec![RouterAction::Reply(error(
             error_code::MALFORMED,
             "that message is not one a device sends",
         ))],
@@ -467,7 +528,7 @@ mod tests {
                 relay_protocol: 1,
                 app_version: "9.9.9".into(),
                 rpc_protocol: 1,
-                capabilities: vec!["terminal".into()],
+                capabilities: vec!["terminal".into(), "push".into()],
             })]
         );
         assert!(state.hello_done());
@@ -722,14 +783,14 @@ mod tests {
         assert!(matches!(
             &actions[0],
             RouterAction::Reply(Control::HelloAck { capabilities, .. })
-                if capabilities == &["terminal".to_string(), "ide".to_string()]
+                if capabilities == &["terminal".to_string(), "ide".to_string(), "push".to_string()]
         ));
         let mut without = RouterState::default();
         let actions = route_control(&mut without, hello(1), &facts(false));
         assert!(matches!(
             &actions[0],
             RouterAction::Reply(Control::HelloAck { capabilities, .. })
-                if capabilities == &["terminal".to_string()]
+                if capabilities == &["terminal".to_string(), "push".to_string()]
         ));
     }
 
@@ -821,14 +882,14 @@ mod tests {
         assert!(matches!(
             &actions[0],
             RouterAction::Reply(Control::HelloAck { capabilities, .. })
-                if capabilities == &["terminal".to_string(), "files".to_string()]
+                if capabilities == &["terminal".to_string(), "files".to_string(), "push".to_string()]
         ));
         let mut without = RouterState::default();
         let actions = route_control(&mut without, hello(1), &facts(false));
         assert!(matches!(
             &actions[0],
             RouterAction::Reply(Control::HelloAck { capabilities, .. })
-                if capabilities == &["terminal".to_string()]
+                if capabilities == &["terminal".to_string(), "push".to_string()]
         ));
     }
 
@@ -888,7 +949,7 @@ mod tests {
     }
 
     #[test]
-    fn the_sessions_capability_comes_last_and_only_when_sessions_are_served() {
+    fn the_sessions_capability_comes_last_but_push_and_only_when_sessions_are_served() {
         let advertised = |facts: &HostFacts<'_>| {
             let mut state = RouterState::default();
             let actions = route_control(&mut state, hello(1), facts);
@@ -897,8 +958,11 @@ mod tests {
             };
             capabilities.clone()
         };
-        assert_eq!(advertised(&facts(false)), ["terminal"]);
-        assert_eq!(advertised(&sessions_facts()), ["terminal", "sessions"]);
+        assert_eq!(advertised(&facts(false)), ["terminal", "push"]);
+        assert_eq!(
+            advertised(&sessions_facts()),
+            ["terminal", "sessions", "push"]
+        );
         let everything = HostFacts {
             ide_available: true,
             files_available: true,
@@ -907,7 +971,7 @@ mod tests {
         };
         assert_eq!(
             advertised(&everything),
-            ["terminal", "files", "ide", "sessions"]
+            ["terminal", "files", "ide", "sessions", "push"]
         );
     }
 
@@ -1165,5 +1229,166 @@ mod tests {
                 RouterAction::Reply(Control::Error { request_id: Some(id), .. }) if *id == request_id
             ));
         }
+    }
+
+    fn hello_with(capabilities: &[&str]) -> Control {
+        Control::Hello {
+            relay_protocol: RELAY_PROTOCOL_VERSION,
+            app_version: "0.1.5".into(),
+            rpc_protocol: 1,
+            capabilities: capabilities.iter().map(|name| name.to_string()).collect(),
+        }
+    }
+
+    const P256DH: &str = concat!(
+        // Split so the spell checker does not read a word into the key.
+        "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkN",
+        "toIAiw4"
+    );
+    const AUTH: &str = "BTBZMqHH6r4Tts7J_aSIgg";
+
+    #[test]
+    fn a_device_that_lists_push_may_be_told_the_push_status_and_others_may_not() {
+        let mut modern = RouterState::default();
+        route_control(
+            &mut modern,
+            hello_with(&["terminal", "push"]),
+            &facts(false),
+        );
+        assert!(modern.push_capable());
+
+        let mut old = RouterState::default();
+        route_control(&mut old, hello_with(&["terminal", "files"]), &facts(false));
+        assert!(!old.push_capable());
+
+        let mut refused = RouterState::default();
+        let mut too_new = hello_with(&["push"]);
+        if let Control::Hello { relay_protocol, .. } = &mut too_new {
+            *relay_protocol = 2;
+        }
+        route_control(&mut refused, too_new, &facts(false));
+        assert!(!refused.push_capable(), "a refused hello says nothing");
+    }
+
+    #[test]
+    fn a_push_subscription_with_usable_keys_becomes_an_action() {
+        let mut state = greeted();
+        let actions = route_control(
+            &mut state,
+            Control::PushSubscribe {
+                p256dh: P256DH.into(),
+                auth: AUTH.into(),
+            },
+            &facts(false),
+        );
+        let expected = PushSubscriptionKeys::decode(P256DH, AUTH).expect("the keys decode");
+        assert_eq!(
+            actions,
+            vec![RouterAction::PushSubscribe { keys: expected }]
+        );
+        assert_eq!(
+            route_control(&mut state, Control::PushUnsubscribe, &facts(false)),
+            vec![RouterAction::PushUnsubscribe]
+        );
+    }
+
+    #[test]
+    fn push_keys_that_cannot_be_used_are_malformed_and_the_session_survives() {
+        let mut state = greeted();
+        for (p256dh, auth) in [
+            ("short", AUTH),
+            (P256DH, "short"),
+            ("", ""),
+            ("not base64 at all!", AUTH),
+        ] {
+            let actions = route_control(
+                &mut state,
+                Control::PushSubscribe {
+                    p256dh: p256dh.into(),
+                    auth: auth.into(),
+                },
+                &facts(false),
+            );
+            assert_eq!(actions.len(), 1);
+            assert_eq!(
+                error_code_of(&actions[0]),
+                error_code::MALFORMED,
+                "{p256dh} {auth}"
+            );
+            assert!(matches!(&actions[0], RouterAction::Reply(_)));
+        }
+    }
+
+    #[test]
+    fn page_visibility_becomes_an_action_unless_the_agent_id_is_absurd() {
+        let mut state = greeted();
+        assert_eq!(
+            route_control(
+                &mut state,
+                Control::PageVisibility {
+                    visible: true,
+                    agent_id: Some("terminal-7".into()),
+                },
+                &facts(false),
+            ),
+            vec![RouterAction::PageVisibility {
+                visible: true,
+                agent_id: Some("terminal-7".into()),
+            }]
+        );
+        assert_eq!(
+            route_control(
+                &mut state,
+                Control::PageVisibility {
+                    visible: false,
+                    agent_id: None,
+                },
+                &facts(false),
+            ),
+            vec![RouterAction::PageVisibility {
+                visible: false,
+                agent_id: None,
+            }]
+        );
+        let actions = route_control(
+            &mut state,
+            Control::PageVisibility {
+                visible: true,
+                agent_id: Some("x".repeat(MAX_VIEWED_AGENT_ID_LEN + 1)),
+            },
+            &facts(false),
+        );
+        assert_eq!(error_code_of(&actions[0]), error_code::MALFORMED);
+        assert!(matches!(&actions[0], RouterAction::Reply(_)));
+    }
+
+    #[test]
+    fn push_messages_are_not_acted_on_before_hello_and_push_status_is_not_a_devices_to_send() {
+        for message in [
+            Control::PushSubscribe {
+                p256dh: P256DH.into(),
+                auth: AUTH.into(),
+            },
+            Control::PushUnsubscribe,
+            Control::PageVisibility {
+                visible: true,
+                agent_id: None,
+            },
+        ] {
+            let mut state = RouterState::default();
+            let actions = route_control(&mut state, message, &facts(false));
+            assert!(matches!(&actions[0], RouterAction::Refuse(_)));
+        }
+        let mut state = greeted();
+        let actions = route_control(
+            &mut state,
+            Control::PushStatus {
+                enabled: true,
+                reason: None,
+            },
+            &facts(false),
+        );
+        assert_eq!(error_code_of(&actions[0]), error_code::MALFORMED);
+        assert!(matches!(&actions[0], RouterAction::Reply(_)));
     }
 }

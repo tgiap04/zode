@@ -16,8 +16,8 @@ use std::{
 use futures::{FutureExt as _, select_biased};
 use gpui::{Context, Entity, Subscription, Task, WeakEntity};
 use remote_relay_client::{
-    CredentialError, OpenMode, PinnedDevice, RelayClient, RelayCredential, RelayCredentials,
-    SendError, TrustStore, list_devices, sanitize_device_name,
+    CredentialError, OpenMode, PinnedDevice, PushKeyStore, RelayClient, RelayCredential,
+    RelayCredentials, SendError, TrustStore, list_devices, local_device_name, sanitize_device_name,
     secure_session::{ResponderHandshakes, SecureChannel},
 };
 use remote_relay_protocol::{
@@ -25,6 +25,7 @@ use remote_relay_protocol::{
     PairingMessage, SessionCursor, build_prologue, decode_control, encode_control, error_code,
     random_nonce,
 };
+use zode_account::PlanSummary;
 
 use crate::{
     agent_mirror::AgentMirror,
@@ -32,6 +33,7 @@ use crate::{
     ide_bridge::{self, IdeBridge, IdeLaunch, IdeOutput},
     ide_heartbeat::RequestDetector,
     pairing_flow::{MAX_PAIRING_REQUESTS_PER_HOUR, PairingFlow, PairingHistory, PairingRefusal},
+    push_notifications::PushSend,
     remote_control_settings::RemoteControlSettings,
     remote_host::{RemoteHost, RemoteHostEvent},
     session_history::{self, SessionRequest},
@@ -148,6 +150,12 @@ pub(crate) struct ActiveSession {
     /// session, so a tab is never opened for a device that has gone.
     resume: Option<Task<()>>,
     next_host_stream: u32,
+    /// When the device last said its page is on screen, and which agent it
+    /// shows; a device looking at an agent is not pushed to about it. A page
+    /// that is on screen says so again every minute, so an old "visible" is a
+    /// phone that locked or a browser that died without saying so.
+    pub(crate) page_visible_since: Option<Instant>,
+    pub(crate) page_agent: Option<String>,
 }
 
 /// What a finished request had been holding, so that it can be given back.
@@ -341,6 +349,12 @@ impl OutboundQueue {
 }
 
 impl ActiveSession {
+    /// Whether this device said hello listing `push`, so that it may be sent
+    /// `push_status`.
+    pub(crate) fn push_capable(&self) -> bool {
+        self.router.hello_done() && self.router.push_capable()
+    }
+
     /// Whether one more request that may be answered with [`MAX_REPLY_BYTES`]
     /// fits this device's allowance: how many it may have being worked on, and
     /// how much it may have waiting for the relay on top of what the ones
@@ -386,11 +400,30 @@ pub(crate) struct Hosting {
     pub(crate) trust: TrustStore,
     pub(crate) client: Entity<RelayClient>,
     pub(crate) credentials: Arc<dyn RelayCredentials>,
-    http_client: Arc<dyn http_client::HttpClient>,
-    api_url: String,
+    pub(crate) http_client: Arc<dyn http_client::HttpClient>,
+    pub(crate) api_url: String,
     pub(crate) agents: Entity<AgentMirror>,
     pub(crate) terminals: Entity<TerminalMirror>,
     files: Option<Entity<FileBrowser>>,
+    /// The push keys of the paired devices that allowed notifications.
+    pub(crate) push_keys: PushKeyStore,
+    /// The account service said the plan does not include pushes. Nothing is
+    /// pushed until the account's plan is read again or the host restarts.
+    pub(crate) push_not_in_plan: bool,
+    /// Pushes on their way to the account service, by ticket. Each removes
+    /// itself when it is answered or gives up; dropping them with the host
+    /// cancels them.
+    pub(crate) push_sends: HashMap<u64, PushSend>,
+    /// The account's plan as last seen, and how many times it has changed, so
+    /// that a refusal for want of a plan is believed only for the plan it was
+    /// made under.
+    pub(crate) seen_plan: Option<PlanSummary>,
+    pub(crate) plan_generation: u64,
+    pub(crate) next_push_ticket: u64,
+    /// The `push_status` push-capable devices were last told.
+    pub(crate) announced_push_status: Option<Control>,
+    /// What a push says sent it.
+    pub(crate) host_name: String,
     /// Whether this host answers for its agent session history.
     pub(crate) sessions_available: bool,
     /// When each device may next have a session opened for it, by device id.
@@ -438,6 +471,8 @@ pub(crate) struct HostingParts {
     pub(crate) agents: Entity<AgentMirror>,
     pub(crate) terminals: Entity<TerminalMirror>,
     pub(crate) files: Option<Entity<FileBrowser>>,
+    pub(crate) push_keys: PushKeyStore,
+    pub(crate) plan: Option<PlanSummary>,
     pub(crate) sessions_available: bool,
     pub(crate) pairing_history: PairingHistory,
     pub(crate) app_version: String,
@@ -494,6 +529,14 @@ impl Hosting {
             agents: parts.agents,
             terminals: parts.terminals,
             files: parts.files,
+            push_keys: parts.push_keys,
+            push_not_in_plan: false,
+            push_sends: HashMap::default(),
+            seen_plan: parts.plan,
+            plan_generation: 0,
+            next_push_ticket: 0,
+            announced_push_status: None,
+            host_name: local_device_name(),
             sessions_available: parts.sessions_available,
             resume_cooldowns: HashMap::default(),
             next_file_ticket: 0,
@@ -514,13 +557,13 @@ impl Hosting {
         }
     }
 
-    fn now(cx: &gpui::App) -> Instant {
+    pub(crate) fn now(cx: &gpui::App) -> Instant {
         // The scheduler's own clock, so a test can move it. In the running app
         // it is `Instant::now()`.
         cx.background_executor().now()
     }
 
-    fn local_device_id(&self, cx: &gpui::App) -> Option<String> {
+    pub(crate) fn local_device_id(&self, cx: &gpui::App) -> Option<String> {
         self.client
             .read(cx)
             .credential()
@@ -535,7 +578,7 @@ impl Hosting {
             .clone()
     }
 
-    fn mark_changed(&mut self, cx: &mut Context<RemoteHost>) {
+    pub(crate) fn mark_changed(&mut self, cx: &mut Context<RemoteHost>) {
         self.changed = true;
         cx.emit(RemoteHostEvent::Changed);
     }
@@ -1082,6 +1125,8 @@ impl Hosting {
                 file_tasks: HashMap::default(),
                 resume: None,
                 next_host_stream: HOST_STREAM_BASE,
+                page_visible_since: None,
+                page_agent: None,
             },
         );
     }
@@ -1177,6 +1222,7 @@ impl Hosting {
         }
         if greeted_now && self.sessions.contains_key(&session_id) {
             self.send_lists(session_id, cx);
+            self.send_push_status_to(session_id, cx);
         }
     }
 
@@ -1230,6 +1276,12 @@ impl Hosting {
             } => {
                 self.note_activity(session_id, cx);
                 self.serve_sessions(session_id, request_id, request, cx);
+            }
+            RouterAction::PushSubscribe { keys } => self.subscribe_push(session_id, keys, cx),
+            RouterAction::PushUnsubscribe => self.unsubscribe_push(session_id, cx),
+            RouterAction::PageVisibility { visible, agent_id } => {
+                let now = Self::now(cx);
+                self.note_page_visibility(session_id, visible, agent_id, now);
             }
             RouterAction::ReportSize { terminal_id } => {
                 let size = self.terminals.read(cx).dimensions_of(&terminal_id, cx);

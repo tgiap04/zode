@@ -255,7 +255,68 @@ fn sample_controls() -> Vec<Control> {
             request_id: 9,
             open_agent_id: Some("terminal-42".into()),
         },
+        Control::PushSubscribe {
+            p256dh: PUSH_P256DH.into(),
+            auth: PUSH_AUTH.into(),
+        },
+        Control::PushUnsubscribe,
+        Control::PageVisibility {
+            visible: true,
+            agent_id: Some("terminal-42".into()),
+        },
+        Control::PushStatus {
+            enabled: false,
+            reason: Some("not_in_plan".into()),
+        },
     ]
+}
+
+// Split so the spell checker does not read a word out of the base64.
+const PUSH_P256DH: &str = concat!(
+    "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkN",
+    "toIAiw4"
+);
+const PUSH_AUTH: &str = "BTBZMqHH6r4Tts7J_aSIgg";
+
+/// The strings the browser asserts too; a change to either side breaks both.
+#[test]
+fn the_push_messages_encode_to_the_published_vectors() {
+    assert_encodes_to(
+        &Control::PushSubscribe {
+            p256dh: PUSH_P256DH.into(),
+            auth: PUSH_AUTH.into(),
+        },
+        &format!(r#"{{"t":"push_subscribe","p256dh":"{PUSH_P256DH}","auth":"{PUSH_AUTH}"}}"#),
+    );
+    assert_encodes_to(&Control::PushUnsubscribe, r#"{"t":"push_unsubscribe"}"#);
+    assert_encodes_to(
+        &Control::PageVisibility {
+            visible: true,
+            agent_id: Some("terminal-42".into()),
+        },
+        r#"{"t":"page_visibility","visible":true,"agent_id":"terminal-42"}"#,
+    );
+    assert_encodes_to(
+        &Control::PageVisibility {
+            visible: false,
+            agent_id: None,
+        },
+        r#"{"t":"page_visibility","visible":false}"#,
+    );
+    assert_encodes_to(
+        &Control::PushStatus {
+            enabled: true,
+            reason: None,
+        },
+        r#"{"t":"push_status","enabled":true}"#,
+    );
+    assert_encodes_to(
+        &Control::PushStatus {
+            enabled: false,
+            reason: Some("not_in_plan".into()),
+        },
+        r#"{"t":"push_status","enabled":false,"reason":"not_in_plan"}"#,
+    );
 }
 
 const SESSION_ID: &str = "0d6c6a52-9a3f-4a51-9f0e-6c1b2a3d4e5f";
@@ -293,7 +354,7 @@ fn every_control_message_round_trips() {
         let tag = value["t"].as_str().expect("tagged").to_string();
         assert!(tags.insert(tag), "two messages share a tag");
     }
-    assert_eq!(tags.len(), 25);
+    assert_eq!(tags.len(), 29);
 }
 
 fn assert_encodes_to(control: &Control, expected: &str) {

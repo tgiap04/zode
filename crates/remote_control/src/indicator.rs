@@ -36,6 +36,26 @@ pub(crate) fn upgrade_offered(state: &HostState) -> bool {
     )
 }
 
+/// What the indicator adds while pushes are refused for want of a plan.
+pub(crate) const PUSH_NEEDS_PRO: &str = "Push notifications to your devices need Pro.";
+
+/// [`idle_status`], with a word about pushes when the plan stopped them.
+pub(crate) fn idle_status_with_push(
+    state: &HostState,
+    push_needs_upgrade: bool,
+) -> Option<(String, Color)> {
+    let (tooltip, color) = idle_status(state)?;
+    if !push_needs_upgrade {
+        return Some((tooltip, color));
+    }
+    let color = if color == Color::Muted {
+        Color::Warning
+    } else {
+        color
+    };
+    Some((format!("{tooltip} {PUSH_NEEDS_PRO}"), color))
+}
+
 /// "Controlled by Ada's laptop", "Controlled by 2 devices".
 pub(crate) fn controlled_by(sessions: &[SessionInfo]) -> String {
     match sessions {
@@ -109,6 +129,80 @@ fn shows_toast(window: &Window, cx: &App) -> bool {
     )
 }
 
+/// Puts the question a device is waiting on in `workspace`, unless it is
+/// already there. `false` when nothing is waiting, or when another modal that
+/// cannot be dismissed keeps its place: the question is then asked for again
+/// the next time the host changes or a window comes forward, rather than being
+/// counted as shown.
+pub(crate) fn open_pairing_question(
+    host: Entity<RemoteHost>,
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> bool {
+    let Some(pending) = host.read(cx).pending_pairing().cloned() else {
+        return false;
+    };
+    let session_id = pending.session_id;
+    let shows_it = |workspace: &Workspace, cx: &App| {
+        workspace
+            .active_modal::<PairingModal>(cx)
+            .is_some_and(|modal| modal.read(cx).session_id() == session_id)
+    };
+    if !shows_it(workspace, cx)
+        && let Some(elsewhere) = window_showing_question(session_id, window.window_handle(), cx)
+    {
+        // A second copy would be a second way to turn the device away: closing
+        // either one dismisses the request. The open one is brought forward.
+        cx.defer(move |cx| {
+            elsewhere
+                .update(cx, |_, window, _| window.activate_window())
+                .log_err();
+        });
+        return true;
+    }
+    if !shows_it(workspace, cx) {
+        let modal_host = host.clone();
+        workspace.toggle_modal(window, cx, move |window, cx| {
+            PairingModal::new(modal_host, pending, window, cx)
+        });
+    }
+    let on_screen = shows_it(workspace, cx);
+    if on_screen {
+        host.update(cx, |host, _| host.claim_pairing_presentation(session_id));
+    }
+    on_screen
+}
+
+/// The workspace window, other than `except`, whose modal is the question for
+/// `session_id`.
+fn window_showing_question(
+    session_id: u32,
+    except: gpui::AnyWindowHandle,
+    cx: &App,
+) -> Option<gpui::WindowHandle<MultiWorkspace>> {
+    cx.windows()
+        .into_iter()
+        .filter(|handle| *handle != except)
+        .filter_map(|handle| handle.downcast::<MultiWorkspace>())
+        .find(|handle| {
+            handle.read(cx).is_ok_and(|multi| {
+                multi
+                    .workspace()
+                    .read(cx)
+                    .active_modal::<PairingModal>(cx)
+                    .is_some_and(|modal| modal.read(cx).session_id() == session_id)
+            })
+        })
+}
+
+const PAIRING_NOTIFICATION_PREFIX: &str = "remote-control-pairing-";
+
+pub(crate) fn is_pairing_notification(id: &str) -> bool {
+    id.strip_prefix(PAIRING_NOTIFICATION_PREFIX)
+        .is_some_and(|session| session.parse::<u32>().is_ok())
+}
+
 /// What the OS shows when somebody asks to pair while Zode is in the
 /// background. The id is how a click is told apart from the agent
 /// notifications', which share the platform's one click handler.
@@ -120,7 +214,7 @@ fn pairing_notification(session_id: u32, device_name: &str) -> Notification {
         format!("{device_name} wants to control this Zode")
     };
     Notification {
-        id: format!("remote-control-pairing-{session_id}").into(),
+        id: format!("{PAIRING_NOTIFICATION_PREFIX}{session_id}").into(),
         title: title.into(),
         body: "Switch to Zode to compare the six digits.".into(),
     }
@@ -250,30 +344,15 @@ impl RemoteControlIndicator {
             self.call_back_about_pairing(&pending, cx);
             return;
         }
-        let session_id = pending.session_id;
-        if self.host.read(cx).pairing_is_presented(session_id) {
+        if self.host.read(cx).pairing_is_presented(pending.session_id) {
             return;
         }
         let host = self.host.clone();
-        let on_screen = self
-            .workspace
+        self.workspace
             .update(cx, |workspace, cx| {
-                workspace.toggle_modal(window, cx, move |window, cx| {
-                    PairingModal::new(host, pending, window, cx)
-                });
-                // A modal that cannot be dismissed keeps its place, and the
-                // question is then not on screen: it is asked for again the
-                // next time this looks, rather than being counted as shown.
-                workspace
-                    .active_modal::<PairingModal>(cx)
-                    .is_some_and(|modal| modal.read(cx).session_id() == session_id)
+                open_pairing_question(host, workspace, window, cx);
             })
-            .log_err()
-            .unwrap_or(false);
-        if on_screen {
-            self.host
-                .update(cx, |host, _| host.claim_pairing_presentation(session_id));
-        }
+            .log_err();
     }
 
     /// The question cannot be put on screen because no window is in front, and
@@ -302,35 +381,37 @@ impl RemoteControlIndicator {
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<ContextMenu> {
-        let upgrade = upgrade_offered(host.read(cx).state());
+        let push_needs_upgrade = host.read(cx).push_needs_upgrade();
+        let upgrade = upgrade_offered(host.read(cx).state()) || push_needs_upgrade;
         ContextMenu::build(window, cx, move |menu, _window, _cx| {
             let disconnect_host = host.clone();
             let manage_host = host.clone();
-            menu.when(upgrade, |menu| {
-                menu.entry("Upgrade\u{2026}", None, |_window, cx| {
-                    cx.open_url(&zode_account::pricing_url());
+            menu.when(push_needs_upgrade, |menu| menu.label(PUSH_NEEDS_PRO))
+                .when(upgrade, |menu| {
+                    menu.entry("Upgrade\u{2026}", None, |_window, cx| {
+                        cx.open_url(&zode_account::pricing_url());
+                    })
+                    .separator()
+                })
+                .when(anyone_connected, |menu| {
+                    menu.entry("Disconnect All Devices", None, move |_window, cx| {
+                        disconnect_host.update(cx, |host, cx| host.disconnect_all(cx));
+                    })
+                })
+                .entry("Turn Off Remote Control", None, |_window, cx| {
+                    crate::disable_remote_control(cx);
                 })
                 .separator()
-            })
-            .when(anyone_connected, |menu| {
-                menu.entry("Disconnect All Devices", None, move |_window, cx| {
-                    disconnect_host.update(cx, |host, cx| host.disconnect_all(cx));
+                .entry("Manage Trusted Devices\u{2026}", None, move |window, cx| {
+                    let host = manage_host.clone();
+                    workspace
+                        .update(cx, |workspace, cx| {
+                            workspace.toggle_modal(window, cx, move |window, cx| {
+                                TrustedDevicesModal::new(host, window, cx)
+                            });
+                        })
+                        .log_err();
                 })
-            })
-            .entry("Turn Off Remote Control", None, |_window, cx| {
-                crate::disable_remote_control(cx);
-            })
-            .separator()
-            .entry("Manage Trusted Devices\u{2026}", None, move |window, cx| {
-                let host = manage_host.clone();
-                workspace
-                    .update(cx, |workspace, cx| {
-                        workspace.toggle_modal(window, cx, move |window, cx| {
-                            TrustedDevicesModal::new(host, window, cx)
-                        });
-                    })
-                    .log_err();
-            })
         })
     }
 }
@@ -341,7 +422,9 @@ impl RemoteControlIndicator {
     /// element stays in the bar either way, so it can never be the thing a
     /// settings toggle forgot to bring back.
     fn render_idle(&self, cx: &App) -> AnyElement {
-        let Some((tooltip, color)) = idle_status(self.host.read(cx).state()) else {
+        let host = self.host.read(cx);
+        let Some((tooltip, color)) = idle_status_with_push(host.state(), host.push_needs_upgrade())
+        else {
             return div().into_any_element();
         };
         let host = self.host.clone();
@@ -369,6 +452,60 @@ impl RemoteControlIndicator {
 
 impl Render for RemoteControlIndicator {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let status = self.render_status(cx);
+        match self.render_waiting_request(cx) {
+            Some(request) => h_flex()
+                .gap_1()
+                .child(request)
+                .child(status)
+                .into_any_element(),
+            None => status,
+        }
+    }
+}
+
+impl RemoteControlIndicator {
+    /// A request is answered in a modal that only opens by itself in a window
+    /// that is in front. This button is the way to it from any window, at any
+    /// time, for as long as the device is waiting.
+    fn render_waiting_request(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let device = self
+            .host
+            .read(cx)
+            .pending_pairing()?
+            .peer_name
+            .trim()
+            .to_string();
+        let tooltip = if device.is_empty() {
+            "A device wants to control this Zode. Click to compare the six digits.".to_string()
+        } else {
+            format!("{device} wants to control this Zode. Click to compare the six digits.")
+        };
+        let host = self.host.clone();
+        let workspace = self.workspace.clone();
+        // Wrapped so a test can find its bounds and click it.
+        Some(
+            div()
+                .debug_selector(|| "remote-control-review-pairing".into())
+                .child(
+                    Button::new("remote-control-review-pairing", "Pairing Request")
+                        .style(ButtonStyle::Tinted(ui::TintColor::Accent))
+                        .label_size(LabelSize::Small)
+                        .start_icon(Icon::new(IconName::Screen).size(IconSize::Small))
+                        .tooltip(Tooltip::text(tooltip))
+                        .on_click(move |_, window, cx| {
+                            workspace
+                                .update(cx, |workspace, cx| {
+                                    open_pairing_question(host.clone(), workspace, window, cx);
+                                })
+                                .log_err();
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_status(&self, cx: &mut Context<Self>) -> AnyElement {
         let sessions = self.host.read(cx).sessions();
         if sessions.is_empty() {
             return self.render_idle(cx);
@@ -498,7 +635,21 @@ mod tests {
         assert_eq!(color, Color::Error);
         assert!(tooltip.contains("allowance"));
         assert!(tooltip.contains("resets 00:00 UTC"), "{tooltip}");
-        assert!(tooltip.contains("Pro raises it"), "{tooltip}");
+        assert!(tooltip.contains("Pro has no daily limit"), "{tooltip}");
+    }
+
+    #[test]
+    fn a_plan_without_pushes_is_said_while_remote_control_is_on() {
+        let (tooltip, color) = idle_status_with_push(&HostState::Online, true).expect("shown");
+        assert!(tooltip.contains(PUSH_NEEDS_PRO), "{tooltip}");
+        assert_eq!(color, Color::Warning);
+        let (tooltip, color) = idle_status_with_push(&HostState::Online, false).expect("shown");
+        assert!(!tooltip.contains(PUSH_NEEDS_PRO));
+        assert_eq!(color, Color::Muted);
+        let (_, color) =
+            idle_status_with_push(&HostState::Failed("no keychain".into()), true).expect("shown");
+        assert_eq!(color, Color::Error, "a louder state keeps its colour");
+        assert_eq!(idle_status_with_push(&HostState::Disabled, true), None);
     }
 
     #[test]

@@ -54,6 +54,38 @@ struct Rig {
     keychain: Arc<InMemoryKeychain>,
     host_public_key: Arc<Mutex<Option<[u8; KEY_LEN]>>>,
     registrations: Arc<Mutex<usize>>,
+    /// The bodies of the pushes posted to the account service.
+    pushes: Arc<Mutex<Vec<serde_json::Value>>>,
+    /// What the account service answers a push with.
+    push_answer: Arc<Mutex<(u16, &'static str)>>,
+    /// While set, a push waits for it before it is answered.
+    push_hold: Arc<Mutex<Option<futures::future::Shared<futures::channel::oneshot::Receiver<()>>>>>,
+    /// The tier the account service says the plan is.
+    plan_tier: Arc<Mutex<&'static str>>,
+}
+
+impl Rig {
+    /// Holds every push from now on until the sender is used or dropped.
+    fn hold_pushes(&self) -> futures::channel::oneshot::Sender<()> {
+        let (release, held) = futures::channel::oneshot::channel();
+        *self.push_hold.lock() = Some(futures::FutureExt::shared(held));
+        release
+    }
+}
+
+fn plan_body(tier: &str) -> String {
+    serde_json::json!({
+        "tier": tier,
+        "source": if tier == "free" { "free" } else { "subscription" },
+        "status": "active",
+        "limits": {
+            "syncDevices": { "used": 1, "max": null },
+            "envSync": tier != "free",
+            "relayDailyBytes": null,
+            "teamVault": false
+        }
+    })
+    .to_string()
 }
 
 fn set_remote_control(cx: &mut TestAppContext, enabled: bool, idle_timeout_minutes: Option<u64>) {
@@ -104,7 +136,7 @@ async fn rig_with_files(
     status: AccountStatus,
     with_files: bool,
 ) -> Rig {
-    build_rig(cx, enabled, status, with_files, false).await
+    build_rig(cx, enabled, status, with_files, false, false).await
 }
 
 /// A rig whose host is set up the way `init` sets up the app's: switched off
@@ -121,16 +153,20 @@ async fn installed_rig(cx: &mut TestAppContext) -> Rig {
         }),
         false,
         true,
+        false,
     )
     .await
 }
 
+/// `with_agent_notifier` sets up what tells the host an agent wants
+/// attention, as the running app does.
 async fn build_rig(
     cx: &mut TestAppContext,
     enabled: bool,
     status: AccountStatus,
     with_files: bool,
     installed: bool,
+    with_agent_notifier: bool,
 ) -> Rig {
     cx.executor().allow_parking();
     cx.update(|cx| {
@@ -139,20 +175,64 @@ async fn build_rig(
         theme_settings::init(theme::LoadThemes::JustBase, cx);
         cx.set_global(db::AppDatabase::test_new());
     });
+    // The platform is left unable to post notifications, as an unbundled
+    // macOS build is: pushes must not depend on it.
+    if with_agent_notifier {
+        cx.update(agent_notify::init);
+    }
     set_remote_control(cx, enabled, None);
 
     let relay = FakeRelay::new();
     let keychain = InMemoryKeychain::new();
     let host_public_key = Arc::new(Mutex::new(None));
     let registrations = Arc::new(Mutex::new(0));
+    let pushes = Arc::new(Mutex::new(Vec::new()));
+    let push_answer = Arc::new(Mutex::new((202, "")));
+    let push_hold: Arc<
+        Mutex<Option<futures::future::Shared<futures::channel::oneshot::Receiver<()>>>>,
+    > = Arc::new(Mutex::new(None));
+    let plan_tier = Arc::new(Mutex::new("free"));
     let http_client: Arc<dyn HttpClient> = FakeHttpClient::create({
         let host_public_key = host_public_key.clone();
         let registrations = registrations.clone();
+        let pushes = pushes.clone();
+        let push_answer = push_answer.clone();
+        let push_hold = push_hold.clone();
+        let plan_tier = plan_tier.clone();
         move |request| {
             let host_public_key = host_public_key.clone();
             let registrations = registrations.clone();
+            let pushes = pushes.clone();
+            let push_answer = push_answer.clone();
+            let push_hold = push_hold.clone();
+            let plan_tier = plan_tier.clone();
             async move {
                 let (parts, mut body) = request.into_parts();
+                if parts.uri.path().ends_with("/account/plan") {
+                    let tier = *plan_tier.lock();
+                    return Ok(Response::builder()
+                        .status(200)
+                        .body(AsyncBody::from(plan_body(tier)))
+                        .expect("a response"));
+                }
+                if parts.method == "POST" && parts.uri.path().ends_with("/remote/push") {
+                    let mut text = String::new();
+                    body.read_to_string(&mut text)
+                        .await
+                        .expect("a request body");
+                    pushes
+                        .lock()
+                        .push(serde_json::from_str(&text).expect("json"));
+                    let hold = push_hold.lock().clone();
+                    if let Some(hold) = hold {
+                        hold.await.ok();
+                    }
+                    let (status, answer) = *push_answer.lock();
+                    return Ok(Response::builder()
+                        .status(status)
+                        .body(AsyncBody::from(answer))
+                        .expect("a response"));
+                }
                 if parts.method == "PUT" {
                     let mut text = String::new();
                     body.read_to_string(&mut text)
@@ -175,7 +255,20 @@ async fn build_rig(
         }
     });
 
-    let account = cx.update(|cx| cx.new(|_| Account::for_test(status)));
+    // The push tests read the plan, so their account has a client behind it.
+    let account = if with_agent_notifier {
+        let http_client = http_client.clone();
+        let keychain = keychain.clone();
+        cx.update(|cx| {
+            cx.new(|_| {
+                let mut account = Account::for_test_with(status, http_client, keychain);
+                account.set_tokens_for_test();
+                account
+            })
+        })
+    } else {
+        cx.update(|cx| cx.new(|_| Account::for_test(status)))
+    };
     let account_handle = account.clone();
     let environment = HostEnvironment {
         credentials: Arc::new(StaticCredentials::new(USER_ID, HOST_DEVICE, "access-token")),
@@ -227,6 +320,10 @@ async fn build_rig(
         keychain,
         host_public_key,
         registrations,
+        pushes,
+        push_answer,
+        push_hold,
+        plan_tier,
     }
 }
 
@@ -524,7 +621,7 @@ async fn a_paired_browser_sees_the_lists_and_can_drive_a_terminal(cx: &mut TestA
         matches!(
             &controls[0],
             Control::HelloAck { relay_protocol: 1, rpc_protocol: 1, app_version, capabilities }
-                if app_version == "9.9.9" && capabilities == &vec!["terminal".to_string()]
+                if app_version == "9.9.9" && capabilities == &vec!["terminal".to_string(), "push".to_string()]
         ),
         "{controls:?}"
     );
@@ -2323,6 +2420,112 @@ mod with_a_window {
     }
 
     #[gpui::test]
+    async fn clicking_the_pairing_notification_brings_the_question_on_screen(
+        cx: &mut TestAppContext,
+    ) {
+        let rig = rig(cx, true).await;
+        cx.set_notifications_supported(true);
+        cx.update(|cx| {
+            RemoteHost::set_global(rig.host.clone(), cx);
+            crate::route_pairing_notification_clicks(cx);
+        });
+        let (workspace, cx) = window(cx, &rig).await;
+        cx.deactivate_window();
+        let browser = Browser::new(&rig, "browser-1");
+        let session_id = ask_the_question(&rig, &browser, cx);
+        assert!(!pairing_modal_is_open(&workspace, cx));
+
+        cx.simulate_notification_click(&format!("remote-control-pairing-{session_id}"));
+        cx.run_until_parked();
+
+        assert!(
+            pairing_modal_is_open(&workspace, cx),
+            "the click itself must put the question on screen, not wait for a window to come forward"
+        );
+        assert!(cx.update(|window, _| window.is_window_active()));
+    }
+
+    #[gpui::test]
+    async fn a_waiting_request_can_be_opened_by_hand(cx: &mut TestAppContext) {
+        let rig = rig(cx, true).await;
+        cx.update(|cx| RemoteHost::set_global(rig.host.clone(), cx));
+        let (workspace, cx) = window(cx, &rig).await;
+        cx.deactivate_window();
+        let browser = Browser::new(&rig, "browser-1");
+        ask_the_question(&rig, &browser, cx);
+        assert!(!pairing_modal_is_open(&workspace, cx));
+
+        cx.dispatch_action(crate::ReviewPairingRequest);
+        cx.run_until_parked();
+        assert!(pairing_modal_is_open(&workspace, cx), "the action opens it");
+
+        cx.dispatch_action(crate::ReviewPairingRequest);
+        cx.run_until_parked();
+        assert!(
+            pairing_modal_is_open(&workspace, cx),
+            "asking again while it is open keeps it open instead of toggling it away"
+        );
+    }
+
+    #[gpui::test]
+    async fn a_second_window_does_not_open_the_question_twice(cx: &mut TestAppContext) {
+        let rig = rig(cx, true).await;
+        cx.update(|cx| RemoteHost::set_global(rig.host.clone(), cx));
+        let (first, cx) = window(cx, &rig).await;
+        cx.deactivate_window();
+        let browser = Browser::new(&rig, "browser-1");
+        ask_the_question(&rig, &browser, cx);
+        cx.dispatch_action(crate::ReviewPairingRequest);
+        cx.run_until_parked();
+        assert!(pairing_modal_is_open(&first, cx));
+
+        let (second, cx) = window(cx, &rig).await;
+        cx.dispatch_action(crate::ReviewPairingRequest);
+        cx.run_until_parked();
+
+        assert!(
+            !pairing_modal_is_open(&second, cx),
+            "one question, one place: closing either copy would turn the device away"
+        );
+        assert!(pairing_modal_is_open(&first, cx), "the open one stays");
+        assert!(
+            rig.host
+                .read_with(cx, |host, _| host.pending_pairing().is_some()),
+            "and the device is still waiting"
+        );
+    }
+
+    #[gpui::test]
+    async fn the_status_bar_offers_the_waiting_request(cx: &mut TestAppContext) {
+        let rig = rig(cx, true).await;
+        let (workspace, cx) = window(cx, &rig).await;
+        cx.deactivate_window();
+        let browser = Browser::new(&rig, "browser-1");
+        ask_the_question(&rig, &browser, cx);
+        assert!(!pairing_modal_is_open(&workspace, cx));
+
+        click("remote-control-review-pairing", cx);
+
+        assert!(pairing_modal_is_open(&workspace, cx));
+    }
+
+    #[gpui::test]
+    async fn without_a_waiting_request_there_is_nothing_to_review(cx: &mut TestAppContext) {
+        let rig = rig(cx, true).await;
+        cx.update(|cx| RemoteHost::set_global(rig.host.clone(), cx));
+        let (workspace, cx) = window(cx, &rig).await;
+
+        cx.dispatch_action(crate::ReviewPairingRequest);
+        cx.run_until_parked();
+
+        assert!(!pairing_modal_is_open(&workspace, cx));
+        assert!(
+            cx.debug_bounds("remote-control-review-pairing").is_none(),
+            "no request, no button"
+        );
+    }
+
+    #[gpui::test]
     async fn two_windows_in_the_background_post_one_notification_between_them(
         cx: &mut TestAppContext,
     ) {
@@ -3785,7 +3988,7 @@ mod project_server {
             matches!(
                 &controls[0],
                 Control::HelloAck { capabilities, .. }
-                    if capabilities == &vec!["terminal".to_string(), "ide".to_string()]
+                    if capabilities == &vec!["terminal".to_string(), "ide".to_string(), "push".to_string()]
             ),
             "{controls:?}"
         );
@@ -4605,4 +4808,5 @@ mod project_server {
 }
 
 mod file_requests;
+mod push_requests;
 mod session_requests;

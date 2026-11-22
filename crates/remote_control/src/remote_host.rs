@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use agent_notify::{AgentAttention, AgentNotifier};
 use futures::{FutureExt as _, future::LocalBoxFuture};
 use gpui::{
     App, AppContext as _, Context, DisplayWakeLock, Entity, EventEmitter, Global, Subscription,
@@ -15,8 +16,8 @@ use gpui::{
 };
 use keep_awake::KeepDisplayAwakeSetting;
 use remote_relay_client::{
-    ConnectionState, PinnedDevice, RelayClient, RelayEvent, RelayTransport, StopReason, TrustError,
-    TrustStore, delete_keypair, load_or_create_keypair,
+    ConnectionState, PinnedDevice, PushKeyStore, PushOutcome, RelayClient, RelayEvent,
+    RelayTransport, StopReason, TrustError, TrustStore, delete_keypair, load_or_create_keypair,
 };
 use remote_relay_protocol::Control;
 use settings::{Settings as _, SettingsStore};
@@ -84,7 +85,7 @@ pub(crate) fn problem_message(state: &HostState) -> Option<String> {
         }
         HostState::Halted(StopReason::QuotaExceeded) => {
             "Remote control paused: today's relay allowance is used up (resets 00:00 UTC). \
-             Pro raises it."
+             Pro has no daily limit."
         }
         HostState::Halted(StopReason::Replaced) => {
             "Remote control stopped: another Zode is connected to the relay as this device."
@@ -234,8 +235,16 @@ impl RemoteHost {
                 this.sync(cx);
                 // The user's `keep_display_awake` switch is read here too.
                 this.update_display_lock(cx);
+                if let Some(running) = this.running.as_mut() {
+                    running.announce_push_status(cx);
+                }
             }),
             cx.subscribe(&account, |this, _account, _: &AccountStatusChanged, cx| {
+                // Among what this says is that the plan was read again.
+                let plan = this.account.read(cx).plan().cloned();
+                if let Some(running) = this.running.as_mut() {
+                    running.plan_may_have_changed(plan, cx);
+                }
                 this.sync(cx);
             }),
         ];
@@ -498,7 +507,12 @@ impl RemoteHost {
     pub fn forget_device(&mut self, device_id: &str, cx: &mut Context<Self>) {
         let forgotten = if let Some(running) = self.running.as_mut() {
             running.end_sessions_of(device_id, cx);
-            Some(forget_pin(&mut running.trust, device_id, cx))
+            let forgotten = forget_pin(&mut running.trust, device_id, cx);
+            // A device that is still trusted keeps its keys.
+            if forgotten.result.is_ok() {
+                running.forget_push_keys(device_id, cx);
+            }
+            Some(forgotten)
         } else if let Some(RestingTrust::Loaded { store, .. }) = self.resting_trust.as_mut() {
             Some(forget_pin(store, device_id, cx))
         } else {
@@ -683,9 +697,12 @@ impl RemoteHost {
                 Some(store) => store,
                 None => cx.update(|cx| TrustStore::load(user_id.clone(), cx)).await,
             };
+            let push_keys = cx
+                .update(|cx| PushKeyStore::load(user_id.clone(), cx))
+                .await;
             this.update(cx, |this, cx| {
                 this.startup = None;
-                this.begin(user_id, keypair, trust, cx);
+                this.begin(user_id, keypair, trust, push_keys, cx);
             })
             .ok();
         }));
@@ -696,6 +713,7 @@ impl RemoteHost {
         user_id: String,
         keypair: Arc<remote_relay_protocol::DeviceKeypair>,
         trust: TrustStore,
+        mut push_keys: PushKeyStore,
         cx: &mut Context<Self>,
     ) {
         // The setting or the account may have changed while the key loaded.
@@ -720,7 +738,10 @@ impl RemoteHost {
         self.terminals
             .update(cx, |terminals, cx| terminals.activate(cx));
 
-        let subscriptions = vec![
+        // A device forgotten while the host was down left its keys behind.
+        push_keys.retain(|device_id| trust.get(device_id).is_some(), cx);
+
+        let mut subscriptions = vec![
             cx.subscribe(&client, |this, _client, event: &RelayEvent, cx| {
                 this.on_relay_event(event.clone(), cx);
             }),
@@ -737,6 +758,17 @@ impl RemoteHost {
                 },
             ),
         ];
+        if let Some(notifier) = AgentNotifier::global(cx) {
+            notifier.update(cx, |notifier, _| notifier.set_attention_wanted(true));
+            subscriptions.push(cx.subscribe(
+                &notifier,
+                |this, _notifier, attention: &AgentAttention, cx| {
+                    this.on_agent_attention(attention, cx);
+                },
+            ));
+        } else {
+            log::warn!("no agent notifier, so nothing will be pushed to paired devices");
+        }
         let housekeeping = cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(HOUSEKEEPING_INTERVAL).await;
@@ -770,6 +802,8 @@ impl RemoteHost {
             agents: self.agents.clone(),
             terminals: self.terminals.clone(),
             files: self.files.clone(),
+            push_keys,
+            plan: self.account.read(cx).plan().cloned(),
             sessions_available: self.sessions_available,
             pairing_history,
             app_version: self.app_version.clone(),
@@ -792,6 +826,9 @@ impl RemoteHost {
             was_hosting | self.startup.take().is_some() | self.serving.take().is_some();
         if !was_active && self.state == state {
             return false;
+        }
+        if was_hosting && let Some(notifier) = AgentNotifier::global(cx) {
+            notifier.update(cx, |notifier, _| notifier.set_attention_wanted(false));
         }
         // Dropping the hosting dropped the relay client, which closed the
         // socket; the mirrors are put to sleep and untap every terminal.
@@ -842,6 +879,7 @@ impl RemoteHost {
                         } => running.on_frame(session_id, payload, cx),
                         RelayEvent::DeviceRevoked { device_id } => {
                             running.end_sessions_of(&device_id, cx);
+                            running.forget_push_keys(&device_id, cx);
                             forgotten = Some(forget_pin(&mut running.trust, &device_id, cx));
                         }
                         // A host is never sent presence, and a relay error names no
@@ -887,6 +925,22 @@ impl RemoteHost {
         if let Some(running) = self.running.as_mut() {
             running.broadcast(control, cx);
         }
+    }
+
+    /// How many pushes are on their way to the account service.
+    #[cfg(test)]
+    pub(crate) fn pushes_in_flight(&self) -> usize {
+        self.running
+            .as_ref()
+            .map_or(0, |running| running.push_sends.len())
+    }
+
+    /// The devices whose push keys this host holds.
+    #[cfg(test)]
+    pub(crate) fn push_key_devices(&self) -> Vec<String> {
+        self.running.as_ref().map_or_else(Vec::new, |running| {
+            running.push_keys.device_ids().map(str::to_string).collect()
+        })
     }
 
     #[cfg(test)]
@@ -950,6 +1004,7 @@ impl RemoteHost {
                 // was trusted by anyone but the account, and its key is of no
                 // further use.
                 wiped = Some(forget_all_pins(&mut running.trust, cx));
+                running.push_keys.retain(|_| false, cx);
             }
         }
         if wipe && let Some((user_id, _client)) = identity {
@@ -1016,6 +1071,43 @@ impl RemoteHost {
         // Only a change to the list of terminals is news to the indicator;
         // output streaming and resizes are not, unless they ended a session.
         self.refresh_if_wanted(!matches!(event, TerminalMirrorEvent::ListChanged), cx);
+    }
+
+    fn on_agent_attention(&mut self, attention: &AgentAttention, cx: &mut Context<Self>) {
+        let anyone_to_push_to = self
+            .running
+            .as_ref()
+            .is_some_and(|running| running.push_keys.device_ids().next().is_some());
+        if !anyone_to_push_to {
+            return;
+        }
+        let Some(agent_id) = self.agents.read(cx).agent_id_of(attention.tab, cx) else {
+            log::debug!("no push for an agent tab remote control does not list");
+            return;
+        };
+        if let Some(running) = self.running.as_mut() {
+            running.push_attention(&agent_id, attention, cx);
+        }
+    }
+
+    pub(crate) fn finish_push(
+        &mut self,
+        ticket: u64,
+        outcome: PushOutcome,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(running) = self.running.as_mut() {
+            running.finish_push(ticket, outcome, cx);
+        }
+        self.refresh_if_wanted(true, cx);
+    }
+
+    /// Whether pushes stopped because the account's plan does not include
+    /// them, which a larger plan answers.
+    pub fn push_needs_upgrade(&self) -> bool {
+        self.running
+            .as_ref()
+            .is_some_and(|running| running.push_needs_upgrade())
     }
 
     fn on_agent_event(&mut self, event: &AgentMirrorEvent, cx: &mut Context<Self>) {

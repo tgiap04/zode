@@ -33,6 +33,7 @@ parking_lot.workspace = true
 rand.workspace = true
 release_channel.workspace = true
 remote_relay_protocol.workspace = true
+ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 smol.workspace = true
