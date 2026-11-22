@@ -348,7 +348,7 @@ mod tests {
                     max: Some(2),
                 },
                 env_sync: false,
-                relay_daily_bytes: 2_147_483_648,
+                relay_daily_bytes: Some(5_368_709_120),
                 team_vault: false,
             },
             team: None,

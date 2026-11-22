@@ -589,11 +589,10 @@ impl Render for VaultModal {
         let team_section = self.team.clone().filter(|_| team_tab && self.showing_team);
         let showing_team = team_section.is_some();
 
-        let read_only = shows_read_only_banner(
-            Account::global(cx)
-                .as_ref()
-                .and_then(|account| account.read(cx).plan()),
-        );
+        let plan = Account::global(cx);
+        let plan = plan.as_ref().and_then(|account| account.read(cx).plan());
+        let read_only = shows_read_only_banner(plan);
+        let grandfathered = grandfather_note(plan);
         let session = self.session.read(cx);
         let unlocked = session.is_unlocked();
         let working = matches!(session.status(), EnvStatus::Working);
@@ -602,6 +601,17 @@ impl Render for VaultModal {
         let deleted_elsewhere: Vec<EntryId> = session.reconciliation().deleted_elsewhere.clone();
 
         let mut rows = v_flex().w_full().gap_1();
+
+        if unlocked && let Some(note) = grandfathered {
+            rows = rows.child(
+                h_flex()
+                    .gap_2()
+                    .p_2()
+                    .justify_between()
+                    .child(Label::new(note).size(LabelSize::Small).color(Color::Muted))
+                    .child(upgrade_button("env-vault-grandfather-upgrade")),
+            );
+        }
 
         if unlocked && read_only {
             // Said, not enforced: the server decides, and a plan read a minute
@@ -1081,6 +1091,17 @@ fn shows_read_only_banner(plan: Option<&PlanSummary>) -> bool {
     plan.is_some_and(|plan| !plan.limits.env_sync)
 }
 
+/// When `.env` sync leaves a grandfathered Free account, while it still has it.
+fn grandfather_note(plan: Option<&PlanSummary>) -> Option<String> {
+    let plan = plan.filter(|plan| plan.limits.env_sync)?;
+    let until = plan.grandfather_env_until.as_ref()?;
+    // The server sends an ISO timestamp; the day is all a person needs.
+    let day = until.get(..10).unwrap_or(until.as_ref());
+    Some(format!(
+        ".env sync stays included until {day}; after that it is part of Pro."
+    ))
+}
+
 fn upgrade_button(id: &'static str) -> Button {
     Button::new(id, "Upgrade\u{2026}")
         .style(ButtonStyle::Filled)
@@ -1203,6 +1224,32 @@ mod tests {
         );
         assert!(!shows_read_only_banner(Some(&a_plan(true))));
         assert!(shows_read_only_banner(Some(&a_plan(false))));
+    }
+
+    /// A Free account that used `.env` sync before plans existed keeps it for a
+    /// while; it is told until when, so the end is not a surprise.
+    #[test]
+    fn a_grandfathered_account_is_told_when_env_sync_leaves_free() {
+        let grandfathered = PlanSummary::parse(
+            r#"{"tier":"free","source":"grandfather","status":"active","limits":{"syncDevices":{"used":1,"max":2},"envSync":true,"relayDailyBytes":null,"teamVault":false},"grandfather":{"envSyncUntil":"2027-11-03T00:00:00.000Z"}}"#,
+            &zode_account::web_url(),
+        )
+        .expect("a valid plan");
+        let note = grandfather_note(Some(&grandfathered)).expect("a note");
+        assert!(note.contains("2027-11-03"), "{note}");
+        assert!(!shows_read_only_banner(Some(&grandfathered)));
+
+        assert_eq!(grandfather_note(None), None);
+        assert_eq!(
+            grandfather_note(Some(&a_plan(true))),
+            None,
+            "Pro has nothing to end"
+        );
+        assert_eq!(
+            grandfather_note(Some(&a_plan(false))),
+            None,
+            "already read-only"
+        );
     }
 
     #[gpui::test]
