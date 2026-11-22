@@ -310,12 +310,11 @@ impl SwitchColor {
             // hints; a switch being on is a fact about the app and should not move
             // with them.
             //
-            // The opacities are unchanged; 0.4 on the thumb and 0.2 behind it are
-            // what keep the switch legible against a panel, and retuning them is
-            // a separate decision from recolouring it.
+            // The solid brand fill, the logo's orange, so a switch that is on
+            // reads at a glance; its thumb turns white on it (see `Switch::render`).
             SwitchColor::Accent => {
-                let accent = crate::brand_accent(cx);
-                (accent.opacity(0.4), accent.opacity(0.2))
+                let solid = crate::brand_solid(cx);
+                (solid, solid)
             }
             SwitchColor::Custom(color) => (*color, color.opacity(0.6)),
         }
@@ -449,7 +448,12 @@ impl RenderOnce for Switch {
         let adjust_ratio = if is_light(cx) { 1.5 } else { 1.0 };
 
         let base_color = cx.theme().colors().text;
-        let thumb_color = base_color;
+        // White on the solid orange track; the text colour on the off track.
+        let thumb_color = if is_on && self.color == SwitchColor::Accent {
+            gpui::white()
+        } else {
+            base_color
+        };
         let (bg_color, border_color) = self.color.get_colors(is_on, cx);
 
         let bg_hover_color = if is_on {

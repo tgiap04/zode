@@ -675,14 +675,7 @@ fn main() {
             let http = app_state.client.http_client();
             let client = app_state.client.clone();
             move |cx| {
-                for &mut window in cx.windows().iter_mut() {
-                    let background_appearance = cx.theme().window_background_appearance();
-                    window
-                        .update(cx, |_, window, _| {
-                            window.set_background_appearance(background_appearance)
-                        })
-                        .ok();
-                }
+                zode::apply_theme_window_background(cx);
 
                 cx.set_text_rendering_mode(
                     match WorkspaceSettings::get_global(cx).text_rendering_mode {

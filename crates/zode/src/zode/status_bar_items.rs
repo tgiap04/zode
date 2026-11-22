@@ -525,6 +525,10 @@ pub(crate) fn register(
         let plan_badge = cx.new(|cx| zode_account_ui::PlanBadge::new(cx));
         status_bar.add_right_item(plan_badge, window, cx);
 
+        // The focus countdown. Draws nothing while reminders are off.
+        let reminders_item = cx.new(reminders_ui::RemindersStatusItem::new);
+        status_bar.add_right_item(reminders_item, window, cx);
+
         let rank = status_bar.add_right_item(app_version, window, cx);
         status_bar.register_toggleable_item(APP_VERSION.spec(
             rank,

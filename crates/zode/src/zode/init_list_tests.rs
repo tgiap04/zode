@@ -36,6 +36,16 @@ const ALLOWED_TO_DIFFER: &[(&str, &str)] = &[
         "keep_awake",
         "initialised inside `initialize_workspace`, which main.rs calls",
     ),
+    // Initialised one level below the flat startup list, like `agent_notify`.
+    // Off by default; once on it keeps a one-second timer.
+    (
+        "reminders",
+        "initialised inside `initialize_workspace`, which main.rs calls",
+    ),
+    (
+        "reminders_ui",
+        "initialised inside `initialize_workspace`, which main.rs calls",
+    ),
     // The harness builds its own `AppState` and drives windows itself, so the
     // app's startup-only wiring has no counterpart in it.
     (

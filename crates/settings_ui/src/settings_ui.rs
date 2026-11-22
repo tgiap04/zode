@@ -398,6 +398,11 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &OpenSettings, cx| {
         open_settings_editor(None, None, None, cx);
     });
+    // Reachable without a workspace window: the reminders panel dispatches it
+    // from the menu bar while no Zode window is active.
+    cx.on_action(|OpenSettingsAt { path }: &OpenSettingsAt, cx| {
+        open_settings_editor(Some(path), None, None, cx);
+    });
 
     cx.observe_new(|workspace: &mut workspace::Workspace, _, _| {
         workspace
@@ -466,6 +471,7 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::TextRenderingMode>(render_dropdown)
         .add_basic_renderer::<settings::FontFamilyName>(render_font_picker)
         .add_basic_renderer::<settings::BaseKeymapContent>(render_dropdown)
+        .add_basic_renderer::<settings::ReminderStyle>(render_dropdown)
         .add_basic_renderer::<settings::MultiCursorModifier>(render_dropdown)
         .add_basic_renderer::<settings::HideMouseMode>(render_dropdown)
         .add_basic_renderer::<settings::CurrentLineHighlight>(render_dropdown)
@@ -4750,6 +4756,38 @@ pub mod test {
         > Appearance & Behavior
         "
     );
+
+    /// `OpenSettingsAt` from outside any window -- the reminders panel used from
+    /// the menu bar while another application is in front -- has no workspace
+    /// to reach, and used to be dropped without a word.
+    #[gpui::test]
+    async fn open_settings_at_works_with_no_window(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            register_settings(cx);
+            release_channel::init_test(
+                semver::Version::new(0, 0, 0),
+                release_channel::ReleaseChannel::Dev,
+                cx,
+            );
+            AppState::set_global(AppState::test(cx), cx);
+            crate::init(cx);
+        });
+        assert!(cx.windows().is_empty());
+
+        cx.update(|cx| {
+            cx.dispatch_action(&OpenSettingsAt {
+                path: "reminders.enabled".into(),
+            })
+        });
+        cx.run_until_parked();
+
+        let opened = cx.update(|cx| {
+            cx.windows()
+                .into_iter()
+                .any(|window| window.downcast::<SettingsWindow>().is_some())
+        });
+        assert!(opened, "no settings window opened");
+    }
 
     #[gpui::test]
     async fn test_settings_window_shows_worktrees_from_multiple_workspaces(

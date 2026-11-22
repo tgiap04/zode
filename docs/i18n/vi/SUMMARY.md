@@ -170,6 +170,7 @@
 - [Giữ màn hình luôn sáng](./keep-display-awake.md)
 - [Thông báo khi agent hoàn tất](./agent-finished-notifications.md)
 - [Chỉ báo dung lượng dự án](./project-footprint-indicator.md)
+- [Nhắc nhở và đồng hồ tập trung](./reminders.md)
 
 # Phát triển Zode
 

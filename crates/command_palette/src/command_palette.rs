@@ -1,3 +1,4 @@
+mod command_icons;
 mod persistence;
 
 use std::{
@@ -23,7 +24,7 @@ use picker::Direction;
 use picker::{Picker, PickerDelegate};
 use postage::{sink::Sink, stream::Stream};
 use settings::Settings;
-use ui::{HighlightedLabel, KeyBinding, ListItem, ListItemSpacing, prelude::*};
+use ui::{HighlightedLabel, Icon, IconSize, KeyBinding, ListItem, ListItemSpacing, prelude::*};
 use util::ResultExt;
 use workspace::{ModalView, Workspace, WorkspaceSettings};
 use zode_actions::{OpenZodeUrl, command_palette::Toggle};
@@ -625,10 +626,19 @@ impl PickerDelegate for CommandPaletteDelegate {
                         .w_full()
                         .py_px()
                         .justify_between()
-                        .child(HighlightedLabel::new(
-                            command.name.clone(),
-                            matching_command.positions.clone(),
-                        ))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Icon::new(command_icons::command_icon(&command.name))
+                                        .size(IconSize::Small)
+                                        .color(Color::Muted),
+                                )
+                                .child(HighlightedLabel::new(
+                                    command.name.clone(),
+                                    matching_command.positions.clone(),
+                                )),
+                        )
                         .child(KeyBinding::for_action_in(
                             &*command.action,
                             &self.previous_focus_handle,
