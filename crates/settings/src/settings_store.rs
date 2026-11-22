@@ -284,6 +284,15 @@ pub struct SettingsJsonSchemaParams<'a> {
     pub deprecation_messages: &'a HashMap<&'a str, &'a str>,
 }
 
+/// The defaults with this platform's block from `default.json` merged in, the
+/// way a user's own `"macos"`/`"linux"`/`"windows"` block is.
+fn parse_default_settings(json: &str) -> anyhow::Result<SettingsContent> {
+    let parsed = UserSettingsContent::parse_json_with_comments(json)?;
+    let mut defaults = *parsed.content.clone();
+    defaults.merge_from_option(parsed.for_os());
+    Ok(defaults)
+}
+
 impl SettingsStore {
     pub fn new(cx: &mut App, default_settings: &str) -> Self {
         Self::new_with_semantic_tokens(cx, default_settings)
@@ -291,8 +300,7 @@ impl SettingsStore {
 
     pub fn new_with_semantic_tokens(cx: &mut App, default_settings: &str) -> Self {
         let (setting_file_updates_tx, mut setting_file_updates_rx) = mpsc::unbounded();
-        let default_settings: SettingsContent =
-            SettingsContent::parse_json_with_comments(default_settings).unwrap();
+        let default_settings: SettingsContent = parse_default_settings(default_settings).unwrap();
         if !cx.has_global::<DefaultSemanticTokenRules>() {
             cx.set_global::<DefaultSemanticTokenRules>(
                 crate::parse_json_with_comments::<SemanticTokenRules>(
@@ -1656,6 +1664,22 @@ mod tests {
                 preferred_line_length: content.preferred_line_length.unwrap(),
             }
         }
+    }
+
+    /// `default.json` carries `"macos"`, `"linux"` and `"windows"` blocks, so a
+    /// default can differ per platform -- Apple's fonts on macOS, for one.
+    /// Defaults used to be read without those blocks and they did nothing.
+    #[gpui::test]
+    fn default_settings_apply_their_own_platform_block(_: &mut App) {
+        let defaults = format!(
+            r#"{{ "vim_mode": false, "{}": {{ "vim_mode": true }} }}"#,
+            std::env::consts::OS
+        );
+        let parsed = parse_default_settings(&defaults).unwrap();
+        assert_eq!(parsed.vim_mode, Some(true));
+
+        // The real defaults still parse, and keep their platform-wide values.
+        assert!(parse_default_settings(&default_settings()).is_ok());
     }
 
     #[gpui::test]

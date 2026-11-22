@@ -94,6 +94,23 @@ impl Default for MacTextSystem {
     }
 }
 
+/// Apple's fonts by the names people know them by, and the hidden system
+/// family each one ships as. Unless the user downloaded the fonts from Apple,
+/// macOS has no family called "SF Pro" or "SF Mono"; every app reaches them
+/// through these hidden families, and Apple's license does not let Zode ship
+/// the files itself.
+const APPLE_SYSTEM_FAMILIES: [(&str, &str); 2] = [
+    ("SF Pro", ".AppleSystemUIFont"),
+    ("SF Mono", ".AppleSystemUIFontMonospaced"),
+];
+
+fn apple_system_family(name: &str) -> Option<&'static str> {
+    APPLE_SYSTEM_FAMILIES
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, hidden)| *hidden)
+}
+
 impl PlatformTextSystem for MacTextSystem {
     fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         self.0.write().add_fonts(fonts)
@@ -129,6 +146,11 @@ impl PlatformTextSystem for MacTextSystem {
         }
         if let Ok(fonts_in_memory) = self.0.read().memory_source.all_families() {
             names.extend(fonts_in_memory);
+        }
+        for (name, _) in APPLE_SYSTEM_FAMILIES {
+            if !names.iter().any(|listed| listed == name) {
+                names.push(name.to_string());
+            }
         }
         names
     }
@@ -249,7 +271,11 @@ impl MacTextSystemState {
         let family = self
             .memory_source
             .select_family_by_name(name)
-            .or_else(|_| self.system_source.select_family_by_name(name))?;
+            .or_else(|_| self.system_source.select_family_by_name(name))
+            .or_else(|error| match apple_system_family(name) {
+                Some(hidden) => self.system_source.select_family_by_name(hidden),
+                None => Err(error),
+            })?;
         for font in family.fonts() {
             let mut font = font.load()?;
 
@@ -707,6 +733,34 @@ mod lenient_font_attributes {
 mod tests {
     use crate::MacTextSystem;
     use gpui::{FontRun, GlyphId, PlatformTextSystem, font, px};
+
+    /// Apple's own fonts are not installed under the names people know them by:
+    /// "SF Mono" and "SF Pro" find nothing unless the user downloaded them, and
+    /// every app reaches them through hidden system families instead.
+    #[test]
+    fn apple_system_fonts_load_by_the_names_people_know() {
+        let fonts = MacTextSystem::new();
+        let names = fonts.all_font_names();
+        for name in ["SF Mono", "SF Pro"] {
+            assert!(fonts.font_id(&font(name)).is_ok(), "{name} did not load");
+            assert!(
+                names.iter().any(|listed| listed == name),
+                "{name} is missing from the font picker"
+            );
+        }
+
+        let mono = fonts.font_id(&font("SF Mono")).unwrap();
+        let advance = |character| {
+            let glyph = fonts.glyph_for_char(mono, character).unwrap();
+            fonts.advance(mono, glyph).unwrap().width
+        };
+        assert_eq!(advance('i'), advance('m'), "SF Mono is not monospaced");
+        assert_ne!(
+            fonts.font_id(&font("SF Mono").bold()).unwrap(),
+            mono,
+            "bold SF Mono fell back to the regular face"
+        );
+    }
 
     #[test]
     fn test_layout_line_bom_char() {
