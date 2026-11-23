@@ -45,13 +45,22 @@ jobs:
       uses: taiki-e/install-action@921e2c9f7148d7ba14cd819f417db338f63e733c
     - name: steps::clear_target_dir_if_large
       run: ./script/clear-target-dir-if-larger-than 350 200
+    - name: steps::expose_actions_cache
+      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+      with:
+        script: |
+          for (const name of [
+            'ACTIONS_CACHE_URL',
+            'ACTIONS_RESULTS_URL',
+            'ACTIONS_RUNTIME_TOKEN',
+            'ACTIONS_CACHE_SERVICE_V2',
+          ]) {
+            if (process.env[name]) {
+              core.exportVariable(name, process.env[name]);
+            }
+          }
     - name: steps::setup_sccache
       run: ./script/setup-sccache
-      env:
-        R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-        R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-        R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        SCCACHE_BUCKET: sccache-zode
     - name: steps::cargo_nextest
       run: cargo nextest run --workspace --no-fail-fast --no-tests=warn
     - name: steps::show_sccache_stats
@@ -97,13 +106,22 @@ jobs:
       timeout-minutes: 20
     - name: steps::download_wasi_sdk
       run: ./script/download-wasi-sdk
+    - name: steps::expose_actions_cache
+      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+      with:
+        script: |
+          for (const name of [
+            'ACTIONS_CACHE_URL',
+            'ACTIONS_RESULTS_URL',
+            'ACTIONS_RUNTIME_TOKEN',
+            'ACTIONS_CACHE_SERVICE_V2',
+          ]) {
+            if (process.env[name]) {
+              core.exportVariable(name, process.env[name]);
+            }
+          }
     - name: steps::setup_sccache
       run: ./script/setup-sccache
-      env:
-        R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-        R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-        R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        SCCACHE_BUCKET: sccache-zode
     - name: steps::clippy
       run: ./script/clippy
     - name: steps::show_sccache_stats

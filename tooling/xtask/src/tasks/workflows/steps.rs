@@ -11,8 +11,6 @@ pub(crate) fn use_clang(job: Job) -> Job {
         .add_env(Env::new("CXX", "clang++"))
 }
 
-const SCCACHE_R2_BUCKET: &str = "sccache-zode";
-
 pub(crate) const BASH_SHELL: &str = "bash -euxo pipefail {0}";
 // https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsshell
 pub const PWSH_SHELL: &str = "pwsh";
@@ -37,6 +35,15 @@ impl Nextest {
 
     pub(crate) fn with_changed_packages_filter(mut self, orchestrate_job: &str) -> Self {
         if let Some(nextest_command) = self.0.value.run.as_mut() {
+            // Build only the packages the filter can select. `--workspace` compiled
+            // every crate even when the filter ran the tests of a few.
+            *nextest_command = nextest_command.replacen(
+                "--workspace",
+                &format!(
+                    "${{{{ needs.{orchestrate_job}.outputs.changed_package_args || '--workspace' }}}}"
+                ),
+                1,
+            );
             nextest_command.push_str(&format!(
                 r#"${{{{ needs.{orchestrate_job}.outputs.changed_packages && format(' -E "{{0}}"', needs.{orchestrate_job}.outputs.changed_packages) || '' }}}}"#
             ));
@@ -332,15 +339,38 @@ pub fn cache_rust_dependencies_namespace() -> Step<Use> {
     .add_with(("restore-keys", "cargo-${{ runner.os }}-${{ runner.arch }}-"))
 }
 
+/// sccache keeps its objects in the repository's GitHub Actions cache, which costs
+/// nothing; the paid R2 bucket it used before is gone. A `run:` step never sees the
+/// cache service's URL and token, only an action does, so this one hands them on
+/// to every later step through the job environment.
+pub fn expose_actions_cache() -> Step<Use> {
+    named::uses!(
+        "actions",
+        "github-script",
+        "f28e40c7f34bde8b3046d885e986cb6290c5673b", // v7
+    )
+    .add_with((
+        "script",
+        indoc::indoc! {r#"
+            for (const name of [
+              'ACTIONS_CACHE_URL',
+              'ACTIONS_RESULTS_URL',
+              'ACTIONS_RUNTIME_TOKEN',
+              'ACTIONS_CACHE_SERVICE_V2',
+            ]) {
+              if (process.env[name]) {
+                core.exportVariable(name, process.env[name]);
+              }
+            }
+        "#},
+    ))
+}
+
 pub fn setup_sccache(platform: Platform) -> Step<Run> {
-    let step = match platform {
+    match platform {
         Platform::Windows => named::pwsh!("./script/setup-sccache.ps1"),
         Platform::Linux | Platform::Mac => named::bash!("./script/setup-sccache"),
-    };
-    step.add_env(("R2_ACCOUNT_ID", vars::R2_ACCOUNT_ID))
-        .add_env(("R2_ACCESS_KEY_ID", vars::R2_ACCESS_KEY_ID))
-        .add_env(("R2_SECRET_ACCESS_KEY", vars::R2_SECRET_ACCESS_KEY))
-        .add_env(("SCCACHE_BUCKET", SCCACHE_R2_BUCKET))
+    }
 }
 
 pub fn show_sccache_stats(platform: Platform) -> Step<Run> {

@@ -208,9 +208,11 @@ fn orchestrate_impl(rules: &[&PathCondition], target: OrchestrateTarget) -> Name
         if [ -z "$GITHUB_BASE_REF" ]; then
           echo "Not a PR, running full test suite"
           echo "changed_packages=" >> "$GITHUB_OUTPUT"
+          echo "changed_package_args=" >> "$GITHUB_OUTPUT"
         elif grep -qP '^(rust-toolchain\.toml|\.cargo/|\.github/|Cargo\.(toml|lock)$)' <<< "$CHANGED_FILES"; then
           echo "Toolchain, cargo config, or root Cargo files changed, will run all tests"
           echo "changed_packages=" >> "$GITHUB_OUTPUT"
+          echo "changed_package_args=" >> "$GITHUB_OUTPUT"
         else
           # Extract changed directories from file paths
           CHANGED_DIRS=$(echo "$CHANGED_FILES" | \
@@ -257,6 +259,7 @@ fn orchestrate_impl(rules: &[&PathCondition], target: OrchestrateTarget) -> Name
           if [ -z "$ALL_CHANGED_PKGS" ]; then
             echo "No package changes detected, will run all tests"
             echo "changed_packages=" >> "$GITHUB_OUTPUT"
+          echo "changed_package_args=" >> "$GITHUB_OUTPUT"
           else
             # Build nextest filterset with rdeps for each package
             FILTERSET=$(echo "$ALL_CHANGED_PKGS" | \
@@ -265,6 +268,33 @@ fn orchestrate_impl(rules: &[&PathCondition], target: OrchestrateTarget) -> Name
               sed 's/|$//')
             echo "Changed packages filterset: $FILTERSET"
             echo "changed_packages=$FILTERSET" >> "$GITHUB_OUTPUT"
+
+            # The packages to compile: the changed ones and everything in the
+            # workspace that depends on them, through normal, dev and build
+            # dependencies alike -- the same set `rdeps()` selects tests from.
+            # Passed as `-p` instead of `--workspace`, which compiled every crate
+            # even when the filter ran the tests of a few (52 of the 85 minutes
+            # on the Windows runner). Empty on any failure, which falls back to
+            # `--workspace`.
+            PACKAGE_ARGS=$(cargo metadata --format-version=1 --no-deps 2>/dev/null | \
+              CHANGED="$ALL_CHANGED_PKGS" python3 -c '
+        import json, os, sys
+        dependents = {}
+        for package in json.load(sys.stdin)["packages"]:
+            for dependency in package["dependencies"]:
+                if dependency.get("path"):
+                    dependents.setdefault(dependency["name"], set()).add(package["name"])
+        selected = set(os.environ["CHANGED"].split())
+        pending = list(selected)
+        while pending:
+            for dependent in dependents.get(pending.pop(), ()):
+                if dependent not in selected:
+                    selected.add(dependent)
+                    pending.append(dependent)
+        print(" ".join("-p " + name for name in sorted(selected)))
+            ' || true)
+            echo "Packages to build: ${PACKAGE_ARGS:-the whole workspace}"
+            echo "changed_package_args=$PACKAGE_ARGS" >> "$GITHUB_OUTPUT"
           fi
         fi
 
@@ -273,6 +303,13 @@ fn orchestrate_impl(rules: &[&PathCondition], target: OrchestrateTarget) -> Name
         outputs.insert(
             "changed_packages".to_owned(),
             format!("${{{{ steps.{}.outputs.changed_packages }}}}", step_name),
+        );
+        outputs.insert(
+            "changed_package_args".to_owned(),
+            format!(
+                "${{{{ steps.{}.outputs.changed_package_args }}}}",
+                step_name
+            ),
         );
     }
 
@@ -526,6 +563,7 @@ fn check_wasm() -> NamedJob {
             .add_step(steps::setup_cargo_config(Platform::Linux))
             .add_step(steps::cache_rust_dependencies_namespace())
             .add_step(install_nightly_wasm_toolchain())
+            .add_step(steps::expose_actions_cache())
             .add_step(steps::setup_sccache(Platform::Linux))
             .add_step(cargo_check_wasm())
             .add_step(steps::show_sccache_stats(Platform::Linux))
@@ -541,6 +579,7 @@ fn check_workspace_binaries() -> NamedJob {
             .add_step(steps::setup_cargo_config(Platform::Linux))
             .add_step(steps::cache_rust_dependencies_namespace())
             .map(steps::install_linux_dependencies)
+            .add_step(steps::expose_actions_cache())
             .add_step(steps::setup_sccache(Platform::Linux))
             // `cargo build -p collab` was here. That crate went with the collaboration
             // server, so the step could only ever fail; the workspace build below already
@@ -594,6 +633,7 @@ pub(crate) fn clippy_on_ref(
         .when_some(target, |this, target| {
             this.add_step(steps::install_rustup_target(target))
         })
+        .add_step(steps::expose_actions_cache())
         .add_step(steps::setup_sccache(platform))
         .add_step(steps::clippy(platform, target))
         .add_step(steps::show_sccache_stats(platform));
@@ -680,6 +720,7 @@ fn run_platform_tests_impl(
             .when(platform == Platform::Mac, |job| {
                 job.add_step(steps::download_wasi_sdk())
             })
+            .add_step(steps::expose_actions_cache())
             .add_step(steps::setup_sccache(platform))
             .when(filter_packages, |job| {
                 job.add_step(
@@ -758,6 +799,7 @@ fn doctests() -> NamedJob {
             .add_step(steps::cache_rust_dependencies_namespace())
             .map(steps::install_linux_dependencies)
             .add_step(steps::setup_cargo_config(Platform::Linux))
+            .add_step(steps::expose_actions_cache())
             .add_step(steps::setup_sccache(Platform::Linux))
             .add_step(run_doctests())
             .add_step(steps::show_sccache_stats(Platform::Linux))

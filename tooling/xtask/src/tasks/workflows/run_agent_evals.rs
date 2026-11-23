@@ -97,6 +97,7 @@ fn cron_unit_evals_job() -> Job {
         .map(steps::install_linux_dependencies)
         .add_step(steps::cargo_install_nextest())
         .add_step(steps::clear_target_dir_if_large(Platform::Linux))
+        .add_step(steps::expose_actions_cache())
         .add_step(steps::setup_sccache(Platform::Linux))
         .add_step(script_step)
         .add_step(steps::show_sccache_stats(Platform::Linux))
@@ -114,6 +115,7 @@ fn unit_evals(commit: Option<&WorkflowInput>) -> Job {
         .map(steps::install_linux_dependencies)
         .add_step(steps::cargo_install_nextest())
         .add_step(steps::clear_target_dir_if_large(Platform::Linux))
+        .add_step(steps::expose_actions_cache())
         .add_step(steps::setup_sccache(Platform::Linux))
         .add_step(match commit {
             Some(commit) => script_step.add_env(("UNIT_EVAL_COMMIT", commit)),
