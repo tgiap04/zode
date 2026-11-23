@@ -4,7 +4,7 @@ use futures::future::{Either, select};
 use gpui::{App, AsyncApp, Global, Task};
 use settings::Settings as _;
 
-use crate::credentials::read_api_key_in;
+use crate::credentials::read_api_key_for_request_in;
 use crate::{
     DeeplProvider, GoogleFreeProvider, GoogleProvider, OpenAiCompatibleProvider, ProviderKind,
     TranslateError, TranslateRequest, TranslateSettings, TranslationProvider,
@@ -45,24 +45,27 @@ pub fn translate(request: TranslateRequest, cx: &App) -> Task<Result<String, Tra
     let credentials = zode_credentials_provider::global(cx);
     let http_client = cx.http_client();
     cx.spawn(async move |cx: &mut AsyncApp| {
-        let provider = match provider_override {
-            Some(provider) => provider,
-            None => {
-                let api_key = read_api_key_in(credentials.as_ref(), settings.provider, cx)
-                    .await
-                    .map_err(|error| TranslateError::Keychain {
-                        provider: provider_display_name(settings.provider),
-                        message: error.to_string(),
-                    })?;
-                configured_provider(&settings, api_key)?
-            }
-        };
-        let translation = provider.translate(&request, http_client);
         let timer = cx.background_executor().timer(settings.timeout);
-        match select(translation, timer).await {
+        let provider_name = provider_override
+            .as_ref()
+            .map_or_else(|| provider_display_name(settings.provider), |p| p.name());
+        // The keychain read is inside the timeout: a locked keychain waiting
+        // for a password would otherwise leave the popover on "Translating…".
+        let work = std::pin::pin!(async {
+            let provider = match provider_override {
+                Some(provider) => provider,
+                None => {
+                    let api_key =
+                        read_api_key_for_request_in(credentials.as_ref(), &settings, cx).await?;
+                    configured_provider(&settings, api_key)?
+                }
+            };
+            provider.translate(&request, http_client).await
+        });
+        match select(work, timer).await {
             Either::Left((result, _)) => result,
             Either::Right(_) => Err(TranslateError::Timeout {
-                provider: provider.name(),
+                provider: provider_name,
                 seconds: settings.timeout.as_secs(),
             }),
         }

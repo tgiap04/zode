@@ -29,7 +29,7 @@ Trên Linux, keymap Emacs đã dùng Ctrl-Shift-2 (đặt mark) trong editor, c�
 Cùng một phím tắt chạy ở ba nơi. Mỗi cặp ngôn ngữ là một phím tắt phủ cả ba.
 
 - **Editor và ô nhập**: file đang mở trong editor (kể cả file code) và các ô nhập chữ như thanh tìm kiếm, hộp thoại và cửa sổ Settings. Chữ được gửi là vùng chọn mới nhất.
-- **Terminal**: chữ đang bôi đen, hoặc nếu không bôi đen gì thì là chữ chương trình trong terminal vừa copy, ví dụ chữ bôi đen trong chế độ toàn màn hình của Claude Code. Bản copy đó dùng được tới khi bạn gõ hoặc dán, tối đa hai phút. Ngoài ra phím đi thẳng tới chương trình chạy trong terminal, nên `vim` hay `tmux` vẫn nhận được. Chữ copy từ ứng dụng khác không bao giờ bị dịch.
+- **Terminal**: chữ đang bôi đen, hoặc nếu không bôi đen gì thì là chữ chương trình trong terminal vừa copy, ví dụ chữ bôi đen trong chế độ toàn màn hình của Claude Code. Bản copy đó dùng được tới khi bạn gõ hoặc dán, tối đa 30 giây và chỉ một lần. Vì chính chương trình chọn đoạn đó chứ không phải bạn, khung trước tiên hiện dòng đầu và độ dài của nó, và chỉ gửi đi khi bạn bấm **Translate** hoặc Enter. Ngoài ra phím đi thẳng tới chương trình chạy trong terminal, nên `vim` hay `tmux` vẫn nhận được. Chữ copy từ ứng dụng khác không bao giờ bị dịch.
 - **View Markdown**: Markdown preview và các panel hiển thị Markdown đã render, như agent panel.
 
 Bấm phím tắt khi không bôi đen gì thì editor và view Markdown không làm gì cả.
@@ -50,7 +50,7 @@ Nếu dịch vụ chưa cài đặt xong, ví dụ thiếu key hoặc key bị t
 
 **Replace** chỉ hiện khi chữ lấy từ một editor hoặc ô nhập gõ được, kể cả file code. Nút này không hiện với editor chỉ đọc, terminal hay view Markdown.
 
-Bản dịch chỉ được ghi nếu chữ gốc vẫn y nguyên như lúc bạn bấm phím. Nếu bạn đã sửa đoạn đó trong lúc chờ, nút bị khoá và khung báo _The text changed since it was translated._ Thay thế là một lần sửa duy nhất: hoàn tác một lần ({#kb editor::Undo}) là chữ gốc quay lại.
+Bản dịch chỉ được ghi nếu chữ gốc vẫn y nguyên như lúc bạn bấm phím. Nếu bạn đã sửa đoạn đó trong lúc chờ, nút bị khoá và khung báo _The text changed since it was translated._ Thay thế là một lần sửa duy nhất: hoàn tác một lần ({#kb editor::Undo}) là chữ gốc quay lại. Khoảng trắng và dấu xuống dòng ở đầu, cuối vùng chọn được giữ nguyên; trong ô một dòng, dấu xuống dòng của bản dịch thành khoảng trắng.
 
 ## Dịch vụ và API key
 
@@ -75,11 +75,11 @@ Trong Google Cloud console, tạo hoặc chọn một project, bật **Cloud Tra
 
 ### API kiểu OpenAI
 
-Đặt **Base URL** là địa chỉ API tính tới hết phần phiên bản, và **Model** là model sẽ dịch. Model không có giá trị mặc định, nên chưa đặt thì dịch sẽ lỗi.
+Đặt **Base URL** là địa chỉ API tính tới hết phần phiên bản, và **Model** là model sẽ dịch. Model không có giá trị mặc định, nên chưa đặt thì dịch sẽ lỗi. `http://` thường chỉ được dùng cho chính máy bạn (`localhost`, `127.x.x.x`, `[::1]`); địa chỉ không được chứa tên đăng nhập, mật khẩu, `?query` hay `#fragment`.
 
 - **Ollama**: dùng Base URL mặc định `http://localhost:11434/v1`, với một model bạn đã pull, ví dụ `llama3.1`. Không cần key.
 - **LM Studio**: bật local server của nó rồi dùng `http://localhost:1234/v1` với model đã nạp. Không cần key.
-- **OpenAI** hay dịch vụ online khác: địa chỉ `https://` của họ, như `https://api.openai.com/v1`, một model như `gpt-4o-mini`, kèm API key.
+- **OpenAI** hay dịch vụ online khác: địa chỉ `https://` của họ, như `https://api.openai.com/v1`, một model như `gpt-4o-mini`, kèm API key. Key được lưu gắn với máy chủ đó: nếu sau này bạn đổi Base URL sang máy chủ khác, Zode hỏi lại key chứ không gửi key cũ sang đó.
 
 `http://` trơn chỉ được chấp nhận với `localhost` và `127.0.0.1`; mọi địa chỉ khác phải dùng `https://`.
 

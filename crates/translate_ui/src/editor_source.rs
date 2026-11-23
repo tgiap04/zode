@@ -43,13 +43,18 @@ impl EditorReplaceTarget {
         Self { editor, range }
     }
 
-    fn current_text(&self, editor: &Editor, cx: &App) -> String {
-        editor
-            .buffer()
-            .read(cx)
-            .snapshot(cx)
-            .text_for_range(self.range.clone())
-            .collect()
+    /// Compares chunk by chunk, so the check that runs on every render of the
+    /// popover copies nothing, however long the selection is.
+    fn holds_text(&self, editor: &Editor, expected: &str, cx: &App) -> bool {
+        let snapshot = editor.buffer().read(cx).snapshot(cx);
+        let mut remaining = expected;
+        for chunk in snapshot.text_for_range(self.range.clone()) {
+            match remaining.strip_prefix(chunk) {
+                Some(rest) => remaining = rest,
+                None => return false,
+            }
+        }
+        remaining.is_empty()
     }
 
     /// Whether `original` is still what lies between the anchors of an
@@ -66,7 +71,7 @@ impl EditorReplaceTarget {
         if snapshot.excerpt_containing(self.range.clone()).is_none() {
             return Err(ReplaceBlocked::SpansExcerpts);
         }
-        if self.current_text(editor, cx) != original {
+        if !self.holds_text(editor, original, cx) {
             return Err(ReplaceBlocked::TextChanged);
         }
         Ok(())
@@ -85,12 +90,49 @@ impl EditorReplaceTarget {
         let editor = self.editor.upgrade().ok_or(ReplaceBlocked::EditorClosed)?;
         let range = self.range.clone();
         editor.update(cx, |editor, cx| {
+            let replacement =
+                fit_replacement(original, replacement, editor.mode().is_single_line());
             editor.transact(window, cx, |editor, _window, cx| {
                 editor.edit([(range, replacement)], cx);
             });
         });
         Ok(())
     }
+}
+
+/// What to write over `original` for a provider's `translation`.
+///
+/// Providers trim their answer, so the selection's own leading and trailing
+/// whitespace (indentation, the line break at the end of a selected line) is
+/// put back; without it, replacing `"    text\n"` would pull the next line up
+/// and drop the indent. A single-line input (a commit subject, a rename
+/// field) takes no line break, so runs of them become one space.
+fn fit_replacement(original: &str, translation: &str, single_line: bool) -> String {
+    let leading_end = original.len() - original.trim_start().len();
+    let trailing_start = original.trim_end().len().max(leading_end);
+    let fitted = format!(
+        "{}{}{}",
+        &original[..leading_end],
+        translation.trim(),
+        &original[trailing_start..]
+    );
+    if !single_line {
+        return fitted;
+    }
+    let mut collapsed = String::with_capacity(fitted.len());
+    let mut in_line_break = false;
+    for character in fitted.chars() {
+        if matches!(character, '\n' | '\r') {
+            if !in_line_break {
+                collapsed.push(' ');
+            }
+            in_line_break = true;
+        } else {
+            in_line_break = false;
+            collapsed.push(character);
+        }
+    }
+    collapsed
 }
 
 /// Returns `false`, leaving the key to other handlers, when the editor holds
@@ -195,6 +237,7 @@ fn selection_source(
             position,
             replace_target: Some(EditorReplaceTarget::new(cx.weak_entity(), range)),
             too_long,
+            program_copy: false,
         })
     })
 }
@@ -224,4 +267,33 @@ fn head_position(
     let character_bounds = editor.bounds_for_range(offset..offset, editor_bounds, window, cx)?;
     let position = character_bounds.bottom_left();
     editor_bounds.contains(&position).then_some(position)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fit_replacement;
+
+    #[test]
+    fn the_selections_edges_are_put_back_around_the_translation() {
+        for (original, translation, expected) in [
+            ("text", "Hello", "Hello"),
+            ("  text\n", "Hello", "  Hello\n"),
+            ("\ttext  ", "  Hello \n", "\tHello  "),
+            ("text\n\n", "Hello", "Hello\n\n"),
+            ("   ", "Hello", "   Hello"),
+        ] {
+            assert_eq!(
+                fit_replacement(original, translation, false),
+                expected,
+                "{original:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn multi_line_translations_keep_their_breaks_unless_the_editor_is_single_line() {
+        assert_eq!(fit_replacement("a", "x\ny\r\nz", false), "x\ny\r\nz");
+        assert_eq!(fit_replacement("a", "x\ny\r\n\r\nz", true), "x y z");
+        assert_eq!(fit_replacement(" a\n", "x", true), " x ");
+    }
 }

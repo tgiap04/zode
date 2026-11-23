@@ -384,7 +384,9 @@ pub const MAX_SCROLL_HISTORY_LINES: usize = 100_000;
 pub const PROGRAM_COPY_MAX_CHARACTERS: usize = 30_000;
 
 /// How long a program copy is offered to the user after the program made it.
-pub const PROGRAM_COPY_LIFETIME: Duration = Duration::from_secs(120);
+/// Short, because the copy is text the program chose: it should be offered
+/// to the translator only right after the user's own drag in that program.
+pub const PROGRAM_COPY_LIFETIME: Duration = Duration::from_secs(30);
 
 /// What the program in a terminal last put on the clipboard (OSC 52).
 ///
@@ -1860,6 +1862,15 @@ impl Terminal {
             .now()
             .saturating_duration_since(*copied_at);
         (age < PROGRAM_COPY_LIFETIME).then_some(copy)
+    }
+
+    /// Like [`Self::recent_program_copy`], and forgets the copy: it is offered
+    /// once, so a second key press does not bring back text the user has
+    /// already seen and dismissed.
+    pub fn take_recent_program_copy(&mut self) -> Option<ProgramCopy> {
+        let copy = self.recent_program_copy().cloned();
+        self.program_copy = None;
+        copy
     }
 
     #[cfg(any(test, feature = "test-support"))]

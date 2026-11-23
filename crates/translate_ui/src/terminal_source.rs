@@ -9,6 +9,10 @@ use crate::{SelectionSource, TranslateSelection, TranslationPopover, mouse_posit
 /// the program in the terminal has just copied. Returns `false` when there is
 /// neither, so the caller can hand the keystroke back to the program.
 ///
+/// A selection is the user's own and is sent at once. A program's copy is
+/// text the program picked (a remote host over ssh can set it too), so the
+/// popover shows it and waits for the user to confirm.
+///
 /// The program's copy matters because TUIs that read the mouse (Claude Code's
 /// full-screen mode, vim with `mouse=a`) select on their own screen: the drag
 /// never reaches the terminal, which is left with no selection. The general
@@ -22,23 +26,27 @@ pub(crate) fn translate_selection(
 ) -> bool {
     let terminal = terminal_view.read(cx).terminal().clone();
     let content = &terminal.read(cx).last_content;
+    let bounds = content.terminal_bounds.bounds;
     let selected = content
         .selection_text
         .clone()
         .filter(|text| !text.trim().is_empty());
-    let (text, too_long) = match selected {
-        Some(text) => (text, None),
-        None => match terminal.read(cx).recent_program_copy() {
-            Some(ProgramCopy::Text(text)) if !text.trim().is_empty() => (text.clone(), None),
-            Some(ProgramCopy::TooLong(length)) => (String::new(), Some(*length)),
+    let (text, too_long, program_copy) = match selected {
+        Some(text) => (text, None, false),
+        // Offered once: whether or not the user translates it, a second key
+        // press does not bring the same text back.
+        None => match terminal.update(cx, |terminal, _| terminal.take_recent_program_copy()) {
+            Some(ProgramCopy::Text(text)) if !text.trim().is_empty() => (text, None, true),
+            Some(ProgramCopy::TooLong(length)) => (String::new(), Some(length), false),
             Some(ProgramCopy::Text(_)) | None => return false,
         },
     };
     let source = SelectionSource {
         text,
-        position: mouse_position_within(content.terminal_bounds.bounds, window),
+        position: mouse_position_within(bounds, window),
         replace_target: None,
         too_long,
+        program_copy,
     };
     let popover = TranslationPopover::deploy_on(
         source,

@@ -64,10 +64,14 @@ fn single_line_input(window: &mut Window, cx: &mut App) -> Entity<Editor> {
 }
 
 fn select_first_word(input: &Entity<Editor>, cx: &mut VisualTestContext) {
+    select_prefix(input, "Xin".len(), cx);
+}
+
+fn select_prefix(input: &Entity<Editor>, length: usize, cx: &mut VisualTestContext) {
     input.update_in(cx, |input, window, cx| {
         window.focus(&input.focus_handle(cx), cx);
         input.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
-            selections.select_ranges([MultiBufferOffset(0)..MultiBufferOffset("Xin".len())])
+            selections.select_ranges([MultiBufferOffset(0)..MultiBufferOffset(length)])
         });
     });
     cx.run_until_parked();
@@ -81,6 +85,17 @@ fn translate_and_replace(
     popovers: &Mutex<Vec<Entity<TranslationPopover>>>,
     cx: &mut VisualTestContext,
 ) -> String {
+    translate_and_replace_as(input, "Xin", "Hello", provider, popovers, cx)
+}
+
+fn translate_and_replace_as(
+    input: &Entity<Editor>,
+    selected: &str,
+    answer: &str,
+    provider: &GatedProvider,
+    popovers: &Mutex<Vec<Entity<TranslationPopover>>>,
+    cx: &mut VisualTestContext,
+) -> String {
     cx.simulate_keystrokes(KEYSTROKE);
     cx.run_until_parked();
     let popover = popovers
@@ -89,8 +104,8 @@ fn translate_and_replace(
         .and_then(|popovers| popovers.last().cloned())
         .expect("a translation popover is shown");
     assert_eq!(provider.call_count(), 1);
-    assert_eq!(provider.request(0).text, "Xin");
-    provider.answer(0, Ok("Hello".into()));
+    assert_eq!(provider.request(0).text, selected);
+    provider.answer(0, Ok(answer.into()));
     cx.run_until_parked();
     assert_eq!(
         popover.read_with(cx, |popover, cx| popover.replace_availability(cx)),
@@ -121,6 +136,69 @@ async fn a_modal_input_in_a_workspace_window_translates_and_replaces(cx: &mut Te
 
     assert_eq!(text, "Hello chào bạn");
     assert!(shared.popover().is_none(), "Replace closes the popover");
+}
+
+/// A commit subject or a rename field holds one line: a translation with line
+/// breaks must not put a `\n` into it.
+#[gpui::test]
+async fn a_single_line_input_never_receives_a_line_break(cx: &mut TestAppContext) {
+    for (answer, expected) in [
+        ("Hello\nWorld", "Hello World chào bạn"),
+        ("Hello\r\n\r\nWorld", "Hello World chào bạn"),
+        ("Hello", "Hello chào bạn"),
+    ] {
+        let mut shared = Shared::new_with_contexts(&["Editor"], cx).await;
+        let popovers = shared.cx.update(|_, cx| track_popovers(cx));
+        let workspace = shared.workspace.clone();
+        let input = workspace.update_in(&mut shared.cx, |workspace, window, cx| {
+            let input = single_line_input(window, cx);
+            workspace.toggle_modal(window, cx, {
+                let input = input.clone();
+                move |_, _| InputModal { input }
+            });
+            input
+        });
+        select_first_word(&input, &mut shared.cx);
+
+        let text = translate_and_replace_as(
+            &input,
+            "Xin",
+            answer,
+            &shared.provider,
+            &popovers,
+            &mut shared.cx,
+        );
+
+        assert_eq!(text, expected, "{answer:?}");
+    }
+}
+
+/// The provider trims its answer, so the selection's own edges are put back.
+#[gpui::test]
+async fn replacing_a_selection_keeps_its_leading_and_trailing_spaces(cx: &mut TestAppContext) {
+    let mut shared = Shared::new_with_contexts(&["Editor"], cx).await;
+    let popovers = shared.cx.update(|_, cx| track_popovers(cx));
+    let workspace = shared.workspace.clone();
+    let input = workspace.update_in(&mut shared.cx, |workspace, window, cx| {
+        let input = single_line_input(window, cx);
+        workspace.toggle_modal(window, cx, {
+            let input = input.clone();
+            move |_, _| InputModal { input }
+        });
+        input
+    });
+    select_prefix(&input, "Xin ".len(), &mut shared.cx);
+
+    let text = translate_and_replace_as(
+        &input,
+        "Xin ",
+        "Hello",
+        &shared.provider,
+        &popovers,
+        &mut shared.cx,
+    );
+
+    assert_eq!(text, "Hello chào bạn");
 }
 
 /// The app as the Settings window sees it: initialized, but the window that

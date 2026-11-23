@@ -288,6 +288,33 @@ async fn replace_writes_the_translation_and_one_undo_restores_it(cx: &mut TestAp
 }
 
 #[gpui::test]
+async fn replace_keeps_the_indentation_and_line_end_of_the_selection(cx: &mut TestAppContext) {
+    let mut harness = Harness::new("    Xin chào\n    bạn\n", cx).await;
+    harness.select(0.."    Xin chào\n".len());
+    harness.translate("vi", "en");
+    assert_eq!(harness.provider.request(0).text, "    Xin chào\n");
+    harness.answer(0, Ok("Hello".into()));
+
+    harness.click_replace();
+
+    assert_eq!(harness.text(), "    Hello\n    bạn\n");
+}
+
+#[gpui::test]
+async fn replace_in_a_multi_line_editor_keeps_the_translations_line_breaks(
+    cx: &mut TestAppContext,
+) {
+    let mut harness = Harness::new("Xin chào bạn", cx).await;
+    harness.select(0..9);
+    harness.translate("vi", "en");
+    harness.answer(0, Ok("Hello\nthere\r\nfriend".into()));
+
+    harness.click_replace();
+
+    assert_eq!(harness.text(), "Hello\nthere\nfriend bạn");
+}
+
+#[gpui::test]
 async fn text_edited_while_waiting_locks_replace(cx: &mut TestAppContext) {
     let mut harness = Harness::new("Xin chào bạn", cx).await;
     harness.select(0..9);
@@ -431,12 +458,23 @@ async fn a_missing_key_or_a_forbidden_key_offers_the_settings(cx: &mut TestAppCo
     harness.answer(1, Err(forbidden.clone()));
     assert_eq!(harness.state(), PopoverState::NotConfigured(forbidden));
 
+    // A key that stays with the server it was saved for is also fixed in
+    // the settings: by entering it again.
+    harness.translate("vi", "en");
+    let other_server = TranslateError::KeyForOtherServer {
+        provider: "OpenAI-compatible API",
+        saved_for: "https://api.openai.com".into(),
+        configured: "https://proxy.example.net".into(),
+    };
+    harness.answer(2, Err(other_server.clone()));
+    assert_eq!(harness.state(), PopoverState::NotConfigured(other_server));
+
     harness.translate("vi", "en");
     let redirected = TranslateError::Redirected {
         provider: "Google",
         status: 307,
     };
-    harness.answer(2, Err(redirected.clone()));
+    harness.answer(3, Err(redirected.clone()));
     assert_eq!(harness.state(), PopoverState::Failed(redirected));
 }
 

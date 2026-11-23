@@ -29,6 +29,7 @@ pub(crate) fn translate_selection(
         position,
         replace_target: None,
         too_long: None,
+        program_copy: false,
     };
     let popover = TranslationPopover::deploy_on(
         source,

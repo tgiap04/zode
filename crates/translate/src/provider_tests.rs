@@ -33,18 +33,24 @@ impl SentRequest {
 type Sent = Arc<Mutex<Vec<SentRequest>>>;
 
 fn fake_service(status: u16, response_body: &'static str) -> (Arc<dyn HttpClient>, Sent) {
+    fake_sequence(vec![(status, response_body)])
+}
+
+/// Answers the nth request with the nth entry, and every later one with the last.
+fn fake_sequence(responses: Vec<(u16, &'static str)>) -> (Arc<dyn HttpClient>, Sent) {
     let sent: Sent = Arc::default();
     let client = FakeHttpClient::create({
         let sent = sent.clone();
         move |request| {
             let sent = sent.clone();
+            let responses = responses.clone();
             async move {
                 let (parts, mut body) = request.into_parts();
                 let mut bytes = Vec::new();
                 body.read_to_end(&mut bytes).await?;
-                sent.lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .push(SentRequest {
+                let index = {
+                    let mut sent = sent.lock().unwrap_or_else(PoisonError::into_inner);
+                    sent.push(SentRequest {
                         method: parts.method.to_string(),
                         uri: parts.uri.to_string(),
                         headers: parts
@@ -61,6 +67,9 @@ fn fake_service(status: u16, response_body: &'static str) -> (Arc<dyn HttpClient
                         raw_body: String::from_utf8_lossy(&bytes).into_owned(),
                         redirect_policy: parts.extensions.get::<RedirectPolicy>().cloned(),
                     });
+                    sent.len() - 1
+                };
+                let (status, response_body) = responses[index.min(responses.len() - 1)];
                 Ok(Response::builder()
                     .status(status)
                     .body(AsyncBody::from(response_body))?)
@@ -564,6 +573,165 @@ fn plain_http_is_only_accepted_for_this_machine() {
             ),
             "{refused}"
         );
+    }
+}
+
+#[test]
+fn plain_http_is_accepted_for_any_loopback_address_only() {
+    for accepted in [
+        "http://[::1]:11434/v1",
+        "http://127.0.0.2:1234/v1",
+        "http://127.255.255.254/v1",
+        "https://[2001:db8::1]/v1",
+    ] {
+        assert!(validate_base_url(accepted).is_ok(), "{accepted}");
+    }
+    for refused in [
+        "http://[::2]/v1",
+        "http://[2001:db8::1]/v1",
+        "http://128.0.0.1/v1",
+        "http://localhost@example.com/v1",
+        "http://127.0.0.1.example.com/v1",
+    ] {
+        assert!(
+            matches!(
+                validate_base_url(refused),
+                Err(TranslateError::InvalidConfiguration(_))
+            ),
+            "{refused}"
+        );
+    }
+}
+
+/// Credentials, a query or a fragment in the base URL would be sent along or
+/// swallowed by the endpoint built from it.
+#[test]
+fn a_base_url_with_userinfo_a_query_or_a_fragment_is_refused() {
+    for refused in [
+        "https://user:secret@api.openai.com/v1",
+        "https://user@api.openai.com/v1",
+        "https://api.openai.com/v1?api-version=2024",
+        "https://api.openai.com/v1?",
+        "https://api.openai.com/v1#chat",
+    ] {
+        assert!(
+            matches!(
+                validate_base_url(refused),
+                Err(TranslateError::InvalidConfiguration(_))
+            ),
+            "{refused}"
+        );
+    }
+}
+
+#[test]
+fn the_endpoint_is_built_from_path_segments() {
+    for (base_url, endpoint) in [
+        (
+            "https://api.openai.com/v1",
+            "https://api.openai.com/v1/chat/completions",
+        ),
+        (
+            "https://api.openai.com/v1/",
+            "https://api.openai.com/v1/chat/completions",
+        ),
+        (
+            "https://api.openai.com",
+            "https://api.openai.com/chat/completions",
+        ),
+        (
+            "http://[::1]:11434/v1",
+            "http://[::1]:11434/v1/chat/completions",
+        ),
+    ] {
+        let (client, sent) = fake_service(200, OPENAI_OK);
+        let provider =
+            OpenAiCompatibleProvider::new(base_url, "m", None).expect("a valid configuration");
+        run(&provider, &request("Xin chào", "vi", "en"), client).ok();
+        assert_eq!(only_request(&sent).uri, endpoint, "{base_url}");
+    }
+}
+
+/// `OPENAI_OK`-shaped answer padded with trailing spaces to `length` bytes.
+fn openai_answer_of_length(length: usize) -> &'static str {
+    let mut body = String::from(r#"{"choices":[{"message":{"content":"Hello"}}]}"#);
+    body.push_str(&" ".repeat(length - body.len()));
+    Box::leak(body.into_boxed_str())
+}
+
+#[test]
+fn an_answer_over_the_size_cap_is_reported_not_cut() {
+    const CAP: usize = 1024 * 1024;
+    let (client, _) = fake_service(200, openai_answer_of_length(CAP));
+    let provider = OpenAiCompatibleProvider::new("https://api.openai.com/v1", "gpt", None)
+        .expect("a valid configuration");
+    assert_eq!(
+        run(&provider, &request("Xin chào", "vi", "en"), client),
+        Ok("Hello".to_string()),
+        "an answer of exactly the cap is read whole"
+    );
+
+    let (client, _) = fake_service(200, openai_answer_of_length(CAP + 1));
+    let error = run(&provider, &request("Xin chào", "vi", "en"), client)
+        .expect_err("a longer answer is refused");
+    assert!(
+        matches!(error, TranslateError::AnswerTooLarge { .. }),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("too large"), "{error}");
+}
+
+#[test]
+fn an_error_page_over_the_cap_still_reports_its_status() {
+    let (client, _) = fake_service(502, openai_answer_of_length(1024 * 1024 + 10));
+    let provider = OpenAiCompatibleProvider::new("https://api.openai.com/v1", "gpt", None)
+        .expect("a valid configuration");
+    let error = run(&provider, &request("Xin chào", "vi", "en"), client)
+        .expect_err("a failed status is an error");
+    assert!(
+        matches!(error, TranslateError::Service { status: 502, .. }),
+        "{error:?}"
+    );
+}
+
+const TEMPERATURE_REFUSED: &str = r#"{"error":{"message":"Unsupported value: 'temperature' does not support 0 with this model."}}"#;
+
+#[test]
+fn a_model_that_rejects_temperature_is_asked_again_without_it() {
+    let (client, sent) = fake_sequence(vec![(400, TEMPERATURE_REFUSED), (200, OPENAI_OK)]);
+    let provider =
+        OpenAiCompatibleProvider::new("https://api.openai.com/v1", "o1", Some("sk".into()))
+            .expect("a valid configuration");
+    assert_eq!(
+        run(&provider, &request("Xin chào", "vi", "en"), client),
+        Ok("Hello".to_string())
+    );
+    let sent = sent.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].body["temperature"], json!(0));
+    assert_eq!(
+        sent[1].body.get("temperature"),
+        None,
+        "{}",
+        sent[1].raw_body
+    );
+    assert_eq!(sent[1].body["model"], json!("o1"));
+    assert_eq!(sent[1].header("authorization"), Some("Bearer sk"));
+}
+
+#[test]
+fn only_a_temperature_complaint_is_retried_and_only_once() {
+    let provider = OpenAiCompatibleProvider::new("https://api.openai.com/v1", "gpt", None)
+        .expect("a valid configuration");
+    for (status, body, requests) in [
+        (400, r#"{"error":{"message":"model not found"}}"#, 1),
+        (401, TEMPERATURE_REFUSED, 1),
+        (400, TEMPERATURE_REFUSED, 2),
+    ] {
+        let (client, sent) = fake_service(status, body);
+        let result = run(&provider, &request("Xin chào", "vi", "en"), client);
+        assert!(result.is_err(), "HTTP {status}: {result:?}");
+        assert_eq!(request_count(&sent), requests, "HTTP {status}: {body}");
     }
 }
 

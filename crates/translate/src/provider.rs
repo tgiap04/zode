@@ -83,6 +83,21 @@ pub enum TranslateError {
         provider: &'static str,
         message: String,
     },
+    #[error(
+        "{provider} sent an answer larger than {limit_mebibytes} MiB, which is too large to be a translation. Zode did not use it."
+    )]
+    AnswerTooLarge {
+        provider: &'static str,
+        limit_mebibytes: u64,
+    },
+    #[error(
+        "The {provider} API key was saved for {saved_for}, but the base URL now points to {configured}. Zode does not send a key to a different server: enter the key again in Settings → Translate."
+    )]
+    KeyForOtherServer {
+        provider: &'static str,
+        saved_for: String,
+        configured: String,
+    },
     #[error("Could not read the {provider} API key from the system keychain: {message}")]
     Keychain {
         provider: &'static str,
@@ -122,12 +137,24 @@ pub(crate) async fn send(
         });
     }
     let mut bytes = Vec::new();
+    // One byte past the cap tells a body that is exactly the cap from a longer one.
     response
         .body_mut()
-        .take(MAX_RESPONSE_BYTES)
+        .take(MAX_RESPONSE_BYTES + 1)
         .read_to_end(&mut bytes)
         .await
         .map_err(|error| network_error(&error))?;
+    if bytes.len() as u64 > MAX_RESPONSE_BYTES {
+        // A cut translation would be shown and written over the user's text
+        // as if whole. A cut error page is still good for its first lines.
+        if response.status().is_success() {
+            return Err(TranslateError::AnswerTooLarge {
+                provider,
+                limit_mebibytes: MAX_RESPONSE_BYTES / (1024 * 1024),
+            });
+        }
+        bytes.truncate(MAX_RESPONSE_BYTES as usize);
+    }
     Ok((
         response.status(),
         String::from_utf8_lossy(&bytes).into_owned(),

@@ -10,13 +10,22 @@ pub(crate) fn remove_hidden_characters(text: &str) -> (String, usize) {
     let mut cleaned = String::with_capacity(text.len());
     let mut removed = 0;
     let mut characters = text.chars().peekable();
+    let mut previous = None;
     while let Some(character) = characters.next() {
+        let before = previous.replace(character);
         match character {
             '\n' | '\t' => cleaned.push(character),
             '\r' if characters.peek() == Some(&'\n') => {}
             '\u{1b}' => {
                 skip_escape_sequence(&mut characters);
                 removed += 1;
+            }
+            // Text or emoji presentation of the symbol before it; kept only
+            // there, since anywhere else it is invisible and carries nothing.
+            '\u{FE0E}' | '\u{FE0F}'
+                if before.is_some_and(|before| !before.is_ascii() && !is_hidden(before)) =>
+            {
+                cleaned.push(character)
             }
             character if is_hidden(character) => removed += 1,
             character => cleaned.push(character),
@@ -29,12 +38,42 @@ fn is_hidden(character: char) -> bool {
     character.is_control()
         || matches!(
             character,
-            '\u{202A}'..='\u{202E}'
-                | '\u{2066}'..='\u{2069}'
-                | '\u{200B}'..='\u{200D}'
-                | '\u{2060}'
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{061C}'
+                | '\u{115F}'
+                | '\u{1160}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                // Invisible operators, the isolates, and the deprecated
+                // format characters that follow them.
+                | '\u{2060}'..='\u{206F}'
+                | '\u{3164}'
+                | '\u{FE00}'..='\u{FE0F}'
                 | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{E0000}'..='\u{E007F}'
+                | '\u{E0100}'..='\u{E01EF}'
         )
+}
+
+/// The first non-blank line of `text` for showing the user what is about to
+/// be sent: cleaned of hidden characters, cut to `max_characters`, with an
+/// ellipsis when more follows.
+pub(crate) fn preview_line(text: &str, max_characters: usize) -> String {
+    let (cleaned, _) = remove_hidden_characters(text);
+    let mut lines = cleaned
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let first = lines.next().unwrap_or_default();
+    let mut preview: String = first.chars().take(max_characters).collect();
+    if first.chars().nth(max_characters).is_some() || lines.next().is_some() {
+        preview.push('…');
+    }
+    preview
 }
 
 /// Skips what follows an ESC: a CSI sequence (`ESC [ … final`), an OSC
@@ -65,12 +104,27 @@ fn skip_escape_sequence(characters: &mut std::iter::Peekable<std::str::Chars<'_>
 
 #[cfg(test)]
 mod tests {
-    use super::remove_hidden_characters;
+    use super::{preview_line, remove_hidden_characters};
 
     #[test]
     fn plain_text_newlines_and_tabs_are_kept() {
         let text = "Hello\tworld\nXin chào 👋🏽 مرحبا";
         assert_eq!(remove_hidden_characters(text), (text.to_string(), 0));
+    }
+
+    #[test]
+    fn invisible_operators_and_blank_fillers_are_removed() {
+        for hidden in [
+            '\u{2061}', '\u{2062}', '\u{2063}', '\u{2064}', '\u{206A}', '\u{206F}', '\u{180E}',
+            '\u{115F}', '\u{1160}', '\u{3164}', '\u{FFA0}', '\u{FFF9}', '\u{FFFA}', '\u{FFFB}',
+        ] {
+            assert_eq!(
+                remove_hidden_characters(&format!("a{hidden}b")),
+                ("ab".to_string(), 1),
+                "U+{:04X}",
+                hidden as u32
+            );
+        }
     }
 
     #[test]
@@ -84,6 +138,65 @@ mod tests {
                 ("ab".to_string(), 1),
                 "U+{:04X}",
                 hidden as u32
+            );
+        }
+    }
+
+    #[test]
+    fn invisible_marks_and_separators_are_removed() {
+        for hidden in [
+            '\u{200E}',
+            '\u{200F}',
+            '\u{061C}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{00AD}',
+            '\u{034F}',
+            '\u{E0000}',
+            '\u{E0001}',
+            '\u{E0020}',
+            '\u{E007F}',
+            '\u{E0100}',
+            '\u{E01EF}',
+            '\u{FE00}',
+            '\u{FE0D}',
+        ] {
+            assert_eq!(
+                remove_hidden_characters(&format!("a{hidden}b")),
+                ("ab".to_string(), 1),
+                "U+{:04X}",
+                hidden as u32
+            );
+        }
+    }
+
+    /// A hidden payload can ride on variation selectors, but the emoji
+    /// presentation selector after a symbol is ordinary text.
+    #[test]
+    fn emoji_presentation_selectors_stay_after_a_symbol_and_nowhere_else() {
+        for text in [
+            "I \u{2764}\u{FE0F} you",
+            "\u{2714}\u{FE0E}",
+            "\u{1F441}\u{FE0F}",
+        ] {
+            assert_eq!(
+                remove_hidden_characters(text),
+                (text.to_string(), 0),
+                "{text}"
+            );
+        }
+        for (text, cleaned, removed) in [
+            ("a\u{FE0F}b", "ab", 1),
+            ("\u{FE0F}b", "b", 1),
+            (" \u{FE0F}", " ", 1),
+            ("\u{2764}\u{FE0F}\u{FE0F}", "\u{2764}\u{FE0F}", 1),
+            ("\u{2764}\u{FE00}\u{FE0F}", "\u{2764}", 2),
+            ("\u{2764}\u{E0100}", "\u{2764}", 1),
+        ] {
+            assert_eq!(
+                remove_hidden_characters(text),
+                (cleaned.to_string(), removed),
+                "{text:?}"
             );
         }
     }
@@ -119,5 +232,21 @@ mod tests {
             remove_hidden_characters("cut\u{1b}[31"),
             ("cut".to_string(), 1)
         );
+    }
+
+    #[test]
+    fn the_preview_is_the_first_line_cleaned_and_cut() {
+        assert_eq!(preview_line("Xin chao", 80), "Xin chao");
+        assert_eq!(preview_line("  \n\n  Xin chao  ", 80), "Xin chao");
+        assert_eq!(preview_line("one\ntwo", 80), "one…");
+        assert_eq!(preview_line("abcdef", 3), "abc…");
+        assert_eq!(preview_line("abc", 3), "abc");
+        assert_eq!(preview_line("ệệệệ", 2), "ệệ…");
+        assert_eq!(
+            preview_line("\u{202E}evil\u{1b}[31m red", 80),
+            "evil red",
+            "bidi controls and escapes are not shown"
+        );
+        assert_eq!(preview_line(" \n ", 80), "");
     }
 }

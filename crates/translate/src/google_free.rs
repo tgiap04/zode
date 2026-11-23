@@ -56,7 +56,7 @@ impl TranslationProvider for GoogleFreeProvider {
         Box::pin(async move {
             let (status, body) = send(NAME, http_client, http_request?).await?;
             if !status.is_success() {
-                return Err(error_for_status(status, &body));
+                return Err(free_endpoint_error(status, &body));
             }
             parse_translation(&body)
         })
@@ -66,7 +66,7 @@ impl TranslationProvider for GoogleFreeProvider {
 /// There is no key to blame, so a refusal is either throttling or a plain
 /// service error. Google answers throttling with an HTML "unusual traffic"
 /// page, which is no use to show.
-fn error_for_status(status: StatusCode, body: &str) -> TranslateError {
+fn free_endpoint_error(status: StatusCode, body: &str) -> TranslateError {
     let status = status.as_u16();
     if matches!(status, 429 | 503) {
         return TranslateError::FreeEndpointThrottled { status };

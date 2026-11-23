@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -18,6 +19,8 @@ use crate::{
 #[derive(Default)]
 struct MemoryKeychain {
     entries: Mutex<HashMap<String, (String, Vec<u8>)>>,
+    /// A keychain that is locked and never answers a read.
+    hangs_on_read: AtomicBool,
 }
 
 type KeychainFuture<'a, T> = Pin<Box<dyn Future<Output = anyhow::Result<T>> + 'a>>;
@@ -29,6 +32,9 @@ impl CredentialsProvider for MemoryKeychain {
         _cx: &'a AsyncApp,
     ) -> KeychainFuture<'a, Option<(String, Vec<u8>)>> {
         Box::pin(async move {
+            if self.hangs_on_read.load(Ordering::SeqCst) {
+                futures::future::pending::<()>().await;
+            }
             Ok(self
                 .entries
                 .lock()
@@ -470,4 +476,104 @@ async fn keys_are_written_read_and_deleted_per_provider(cx: &mut TestAppContext)
     delete.await.expect("the key is deleted");
     let read = cx.update(|cx| read_api_key(keychain.clone(), ProviderKind::Google, cx));
     assert_eq!(read.await.ok().flatten(), None);
+}
+
+fn use_openai_compatible_at(cx: &mut TestAppContext, base_url: &str) {
+    update_settings(cx, |settings| {
+        settings.provider = Some(ProviderKind::OpenaiCompatible);
+        let openai_compatible = settings.openai_compatible.get_or_insert_default();
+        openai_compatible.model = Some("gpt".into());
+        openai_compatible.base_url = Some(base_url.into());
+    });
+}
+
+const OPENAI_ANSWER: &str = r#"{"choices":[{"message":{"content":"Hello"}}]}"#;
+
+#[gpui::test]
+async fn a_saved_openai_compatible_key_goes_only_to_the_server_it_was_saved_for(
+    cx: &mut TestAppContext,
+) {
+    let harness = set_up(cx, OPENAI_ANSWER, false);
+    use_openai_compatible_at(cx, "https://api.openai.com/v1");
+    cx.update(|cx| {
+        write_api_key(
+            harness.keychain.clone(),
+            ProviderKind::OpenaiCompatible,
+            "sk-secret".into(),
+            cx,
+        )
+    })
+    .await
+    .expect("the key is saved");
+
+    assert_eq!(
+        translate_now(cx, request("Xin chào")).await,
+        Ok("Hello".to_string())
+    );
+    assert_eq!(
+        harness.header_of_first("authorization").as_deref(),
+        Some("Bearer sk-secret")
+    );
+
+    // Another path on the same server is the same server.
+    use_openai_compatible_at(cx, "https://api.openai.com/other/v2");
+    assert_eq!(
+        translate_now(cx, request("Xin chào")).await,
+        Ok("Hello".to_string())
+    );
+    assert_eq!(harness.request_count(), 2);
+
+    use_openai_compatible_at(cx, "https://proxy.example.net/v1");
+    let error = translate_now(cx, request("Xin chào"))
+        .await
+        .expect_err("the key stays with its server");
+    assert!(
+        matches!(error, TranslateError::KeyForOtherServer { .. }),
+        "{error:?}"
+    );
+    let message = error.to_string();
+    assert!(message.contains("https://api.openai.com"), "{message}");
+    assert!(message.contains("https://proxy.example.net"), "{message}");
+    assert!(!message.contains("sk-secret"), "{message}");
+    assert_eq!(harness.request_count(), 2, "nothing was sent");
+}
+
+#[gpui::test]
+async fn an_openai_compatible_key_without_a_recorded_server_is_not_sent_anywhere(
+    cx: &mut TestAppContext,
+) {
+    let harness = set_up(cx, OPENAI_ANSWER, false);
+    use_openai_compatible_at(cx, "https://api.openai.com/v1");
+    // Saved before keys were tied to a server: the entry names none.
+    store_key(&harness, ProviderKind::OpenaiCompatible, "sk-old");
+
+    let error = translate_now(cx, request("Xin chào"))
+        .await
+        .expect_err("an unbound key is not used");
+    assert!(
+        matches!(error, TranslateError::KeyForOtherServer { .. }),
+        "{error:?}"
+    );
+    assert_eq!(harness.request_count(), 0);
+}
+
+#[gpui::test]
+async fn a_locked_keychain_counts_against_the_timeout(cx: &mut TestAppContext) {
+    let harness = set_up(cx, DEEPL_OK, false);
+    store_key(&harness, ProviderKind::Deepl, "key");
+    harness.keychain.hangs_on_read.store(true, Ordering::SeqCst);
+    update_settings(cx, |settings| settings.timeout_seconds = Some(3));
+
+    let task = cx.update(|cx| translate(request("Xin chào"), cx));
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(4));
+    cx.run_until_parked();
+    assert_eq!(
+        task.await,
+        Err(TranslateError::Timeout {
+            provider: "DeepL",
+            seconds: 3
+        })
+    );
+    assert_eq!(harness.request_count(), 0);
 }

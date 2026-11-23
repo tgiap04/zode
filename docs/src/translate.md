@@ -29,7 +29,7 @@ On Linux, the Emacs keymap already uses Ctrl-Shift-2 (set mark) in editors, and 
 The same shortcut works in three places. Each language pair is one shortcut that covers all of them.
 
 - **Editors and input fields**: files open in an editor (code files included) and text inputs such as the search bar, dialogs and the Settings window. The text of the newest selection is sent.
-- **The terminal**: the selected text or, with nothing selected, the text the program in the terminal has just copied, such as a selection made in Claude Code's full-screen mode. That copy is used until you type or paste, for up to two minutes. Otherwise the key goes to the program running in the terminal, so `vim` or `tmux` still receive it. Text copied from other apps is never translated.
+- **The terminal**: the selected text or, with nothing selected, the text the program in the terminal has just copied, such as a selection made in Claude Code's full-screen mode. That copy is used until you type or paste, for up to 30 seconds, and only once. Because the program chose that text, not you, the popover first shows its first line and length and sends nothing until you choose **Translate** or press Enter. Otherwise the key goes to the program running in the terminal, so `vim` or `tmux` still receive it. Text copied from other apps is never translated.
 - **Markdown views**: the Markdown preview and the panels that show rendered Markdown, such as the agent panel.
 
 Pressing the shortcut with nothing selected does nothing in an editor or a Markdown view.
@@ -50,7 +50,7 @@ If the provider is not set up yet, for example the key is missing or rejected, t
 
 **Replace** appears only when the text came from an editor or input field you can type in, including code files. It does not appear for read-only editors, the terminal or Markdown views.
 
-The translation is written only if the original text is still exactly as it was when you pressed the shortcut. If you edited that text in the meantime, the button is disabled and the popover says _The text changed since it was translated._ Replace is a single edit: one undo ({#kb editor::Undo}) brings the original text back.
+The translation is written only if the original text is still exactly as it was when you pressed the shortcut. If you edited that text in the meantime, the button is disabled and the popover says _The text changed since it was translated._ Replace is a single edit: one undo ({#kb editor::Undo}) brings the original text back. The selection's leading and trailing spaces and line breaks are kept, and in a single-line field line breaks in the translation become spaces.
 
 ## Providers and API keys
 
@@ -75,11 +75,11 @@ In the Google Cloud console, create or pick a project, enable the **Cloud Transl
 
 ### OpenAI-compatible API
 
-Set **Base URL** to the address of the API up to and including the version, and **Model** to the model that should translate. The model has no default, so translation fails until you set it.
+Set **Base URL** to the address of the API up to and including the version, and **Model** to the model that should translate. The model has no default, so translation fails until you set it. Plain `http://` is accepted only for your own computer (`localhost`, `127.x.x.x`, `[::1]`); the address cannot carry a user name, a password, a `?query` or a `#fragment`.
 
 - **Ollama**: the default Base URL, `http://localhost:11434/v1`, with a model you have pulled, for example `llama3.1`. No key.
 - **LM Studio**: start its local server and use `http://localhost:1234/v1` with the model you loaded. No key.
-- **OpenAI** or another hosted service: its `https://` address, such as `https://api.openai.com/v1`, a model such as `gpt-4o-mini`, and its API key.
+- **OpenAI** or another hosted service: its `https://` address, such as `https://api.openai.com/v1`, a model such as `gpt-4o-mini`, and its API key. The key is saved for that server: if you later point Base URL at another server, Zode asks for the key again instead of sending it there.
 
 Plain `http://` is only accepted for `localhost` and `127.0.0.1`; every other address must use `https://`.
 

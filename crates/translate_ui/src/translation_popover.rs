@@ -12,7 +12,10 @@ use util::ResultExt as _;
 use workspace::{PopoverLayer, Workspace};
 use zode_actions::OpenSettingsAt;
 
-use crate::{EditorReplaceTarget, ReplaceBlocked, hidden_characters::remove_hidden_characters};
+use crate::{
+    EditorReplaceTarget, ReplaceBlocked,
+    hidden_characters::{preview_line, remove_hidden_characters},
+};
 
 /// Where the Translate settings live; the settings editor opens at this path.
 const TRANSLATE_SETTINGS_PATH: &str = "translate";
@@ -26,7 +29,14 @@ pub struct SelectionSource {
     /// The selection's length in characters when a source measured it over
     /// the limit without copying it; `text` is then empty.
     pub too_long: Option<usize>,
+    /// The text is what a program in a terminal copied by itself, not
+    /// something the user selected. It is shown for the user to confirm and
+    /// sent only then.
+    pub program_copy: bool,
 }
+
+/// How much of a program's copy the confirmation shows.
+const PROGRAM_COPY_PREVIEW_CHARACTERS: usize = 120;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PopoverState {
@@ -39,6 +49,12 @@ pub enum PopoverState {
     },
     /// No provider can run until the user changes a setting or the key.
     NotConfigured(TranslateError),
+    /// Text a program in the terminal copied by itself, shown for the user to
+    /// confirm before it is sent anywhere.
+    ConfirmProgramCopy {
+        preview: SharedString,
+        characters: usize,
+    },
 }
 
 impl PopoverState {
@@ -50,6 +66,7 @@ impl PopoverState {
                 error @ (TranslateError::MissingKey { .. }
                 | TranslateError::InvalidKey { .. }
                 | TranslateError::Forbidden { .. }
+                | TranslateError::KeyForOtherServer { .. }
                 | TranslateError::InvalidConfiguration(_)),
             ) => Self::NotConfigured(error),
             Err(error) => Self::Failed(error),
@@ -150,30 +167,38 @@ impl TranslationPopover {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Escape is intercepted rather than bound: the popover never takes
-        // focus, so the editor keeps it and a second keypress still reaches
-        // the editor's `TranslateSelection` handler.
+        // Escape and Enter are intercepted rather than bound: the popover
+        // never takes focus, so the editor keeps it and a second keypress
+        // still reaches the editor's `TranslateSelection` handler.
         let window_handle = window.window_handle();
         let popover = cx.weak_entity();
-        let escape = cx.intercept_keystrokes(move |event: &KeystrokeEvent, window, cx| {
-            let is_plain_escape =
-                event.keystroke.key == "escape" && event.keystroke.modifiers == Modifiers::none();
-            if !is_plain_escape || window.window_handle() != window_handle {
+        let intercept = cx.intercept_keystrokes(move |event: &KeystrokeEvent, window, cx| {
+            let key = event.keystroke.key.as_str();
+            let is_plain_key =
+                matches!(key, "escape" | "enter") && event.keystroke.modifiers == Modifiers::none();
+            if !is_plain_key || window.window_handle() != window_handle {
                 return;
             }
-            let dismissed = popover
+            let handled = popover
                 .update(cx, |popover, cx| {
                     let focus_inside = popover
                         .escape_scope
                         .as_ref()
                         .is_none_or(|scope| scope.contains_focused(window, cx));
-                    if focus_inside {
-                        cx.emit(DismissEvent);
+                    if !focus_inside {
+                        return false;
                     }
-                    focus_inside
+                    if key == "escape" {
+                        cx.emit(DismissEvent);
+                        true
+                    } else {
+                        // Enter belongs to whatever has the focus unless the
+                        // popover is waiting for exactly this answer.
+                        popover.confirm_program_copy(cx)
+                    }
                 })
                 .unwrap_or(false);
-            if dismissed {
+            if handled {
                 cx.stop_propagation();
             }
         });
@@ -186,9 +211,16 @@ impl TranslationPopover {
             escape_scope: None,
             hosted_in_menu: false,
             _translation: Task::ready(()),
-            _subscriptions: vec![escape],
+            _subscriptions: vec![intercept],
         };
-        this.request_translation(cx);
+        if this.source.program_copy && this.source.too_long.is_none() {
+            this.state = PopoverState::ConfirmProgramCopy {
+                preview: preview_line(&this.source.text, PROGRAM_COPY_PREVIEW_CHARACTERS).into(),
+                characters: this.source.text.chars().count(),
+            };
+        } else {
+            this.request_translation(cx);
+        }
         this
     }
 
@@ -304,7 +336,20 @@ impl TranslationPopover {
         }
     }
 
+    /// Sends a program's copy for translation once the user has agreed.
+    /// Returns whether it was waiting for that.
+    pub fn confirm_program_copy(&mut self, cx: &mut Context<Self>) -> bool {
+        if !matches!(self.state, PopoverState::ConfirmProgramCopy { .. }) {
+            return false;
+        }
+        self.request_translation(cx);
+        true
+    }
+
     pub fn swap_direction(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.state, PopoverState::ConfirmProgramCopy { .. }) {
+            return;
+        }
         std::mem::swap(&mut self.from, &mut self.to);
         self.request_translation(cx);
     }
@@ -415,6 +460,52 @@ impl TranslationPopover {
             )
             .color(Color::Warning)
             .into_any_element(),
+            PopoverState::ConfirmProgramCopy {
+                preview,
+                characters,
+            } => {
+                let provider = provider_display_name(TranslateSettings::get_global(cx).provider);
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .debug_selector(|| "translate-program-copy-notice".into())
+                            .child(
+                                Label::new(
+                                    "The program in this terminal copied this text. You did not select it.",
+                                )
+                                .size(LabelSize::Small)
+                                .color(Color::Warning),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .max_h(rems(4.))
+                            .overflow_hidden()
+                            .child(Label::new(preview.clone())),
+                    )
+                    .child(
+                        Label::new(format!(
+                            "{characters} characters. They are sent to {provider} only if you translate."
+                        ))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "translate-confirm-program-copy".into())
+                            .child(
+                                Button::new("translate-confirm-program-copy", "Translate")
+                                    .style(ButtonStyle::Filled)
+                                    .label_size(LabelSize::Small)
+                                    .tooltip(Tooltip::text("Send this text (Enter)"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.confirm_program_copy(cx);
+                                    })),
+                            ),
+                    )
+                    .into_any_element()
+            }
             PopoverState::NotConfigured(error) => v_flex()
                 .gap_1()
                 .child(Label::new(error.to_string()).color(Color::Warning))

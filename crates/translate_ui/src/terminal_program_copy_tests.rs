@@ -16,6 +16,7 @@ use workspace::{Item, Workspace, item::ItemHandle};
 
 use crate::PopoverState;
 use crate::read_only_sources_tests::{KEYSTROKE_BYTES, TerminalHarness};
+use gpui::Modifiers;
 
 /// The binding the bundled keymaps use for terminals.
 const TERMINAL_CONTEXT: &str = "Terminal";
@@ -75,6 +76,31 @@ impl TerminalHarness {
         self.sync();
     }
 
+    /// What the popover shows for a program copy before anything is sent.
+    fn confirmation(&mut self) -> Option<(String, usize)> {
+        let popover = self.shared.expect_popover();
+        match popover.read_with(&mut self.shared.cx, |popover, _| popover.state().clone()) {
+            PopoverState::ConfirmProgramCopy {
+                preview,
+                characters,
+            } => Some((preview.to_string(), characters)),
+            _ => None,
+        }
+    }
+
+    /// Clicks the rendered button that sends the program's copy.
+    fn click_translate(&mut self) {
+        let button = self
+            .shared
+            .cx
+            .debug_bounds("translate-confirm-program-copy")
+            .expect("the confirm button is rendered");
+        self.shared
+            .cx
+            .simulate_click(button.center(), Modifiers::none());
+        self.shared.cx.run_until_parked();
+    }
+
     fn assert_key_reached_the_program(&mut self, case: &str) {
         assert!(self.shared.popover().is_none(), "{case}: no popover");
         assert_eq!(self.shared.provider.call_count(), 0, "{case}");
@@ -112,6 +138,10 @@ async fn a_program_copy_in_an_agent_tab_opens_the_popover(cx: &mut TestAppContex
     harness.take_input();
 
     harness.shared.press();
+
+    assert_eq!(harness.confirmation(), Some((COPIED.to_string(), 8)));
+    assert_eq!(harness.shared.provider.call_count(), 0, "nothing sent yet");
+    harness.click_translate();
 
     harness.shared.assert_read_only_popover_for(COPIED, bounds);
     assert_eq!(
@@ -189,6 +219,7 @@ async fn a_program_copy_expires(cx: &mut TestAppContext) {
         let case = format!("after {elapsed:?}");
         if offered {
             assert!(harness.shared.popover().is_some(), "{case}");
+            harness.click_translate();
             assert_eq!(harness.shared.provider.request(0).text, COPIED, "{case}");
         } else {
             harness.assert_key_reached_the_program(&case);
@@ -228,4 +259,83 @@ async fn the_general_clipboard_is_never_translated(cx: &mut TestAppContext) {
     harness.shared.press();
 
     harness.assert_key_reached_the_program("clipboard written by another app");
+}
+
+/// The program chooses what it copies, possibly a remote host over ssh, so
+/// the user sees what would leave before it does.
+#[gpui::test]
+async fn a_program_copy_is_shown_and_not_sent_until_confirmed(cx: &mut TestAppContext) {
+    let mut harness = TerminalHarness::new(TERMINAL_CONTEXT, cx).await;
+    harness.program_copies(OSC_52_COPY);
+    harness.take_input();
+
+    harness.shared.press();
+    harness
+        .shared
+        .cx
+        .executor()
+        .advance_clock(Duration::from_secs(5));
+    harness.shared.cx.run_until_parked();
+
+    assert_eq!(harness.confirmation(), Some((COPIED.to_string(), 8)));
+    assert_eq!(harness.shared.provider.call_count(), 0);
+    assert!(
+        harness
+            .shared
+            .cx
+            .debug_bounds("translate-program-copy-notice")
+            .is_some(),
+        "the popover says the text is the program's copy, not a selection"
+    );
+
+    harness.shared.cx.simulate_keystrokes("escape");
+    harness.shared.cx.run_until_parked();
+    assert!(harness.shared.popover().is_none());
+    assert_eq!(harness.shared.provider.call_count(), 0, "dismissed unsent");
+}
+
+#[gpui::test]
+async fn enter_confirms_a_program_copy_without_reaching_the_program(cx: &mut TestAppContext) {
+    let mut harness = TerminalHarness::new(TERMINAL_CONTEXT, cx).await;
+    harness.program_copies(OSC_52_COPY);
+    harness.take_input();
+    harness.shared.press();
+    assert_eq!(harness.shared.provider.call_count(), 0);
+
+    harness.shared.cx.simulate_keystrokes("enter");
+    harness.shared.cx.run_until_parked();
+
+    assert_eq!(harness.shared.provider.call_count(), 1);
+    assert_eq!(harness.shared.provider.request(0).text, COPIED);
+    assert!(
+        harness.take_input().is_empty(),
+        "Enter was not typed into the program"
+    );
+}
+
+#[gpui::test]
+async fn a_program_copy_is_offered_once(cx: &mut TestAppContext) {
+    let mut harness = TerminalHarness::new(TERMINAL_CONTEXT, cx).await;
+    harness.program_copies(OSC_52_COPY);
+    harness.take_input();
+    harness.shared.press();
+    assert!(harness.shared.popover().is_some());
+    harness.shared.cx.simulate_keystrokes("escape");
+    harness.shared.cx.run_until_parked();
+    assert!(harness.shared.popover().is_none());
+
+    harness.shared.press();
+
+    harness.assert_key_reached_the_program("the copy was already offered");
+}
+
+/// A selection the user made is theirs: it is sent on the key press as before.
+#[gpui::test]
+async fn a_terminal_selection_is_sent_without_a_confirmation(cx: &mut TestAppContext) {
+    let mut harness = TerminalHarness::new(TERMINAL_CONTEXT, cx).await;
+    let selected = harness.select_all();
+    harness.shared.press();
+
+    assert_eq!(harness.shared.provider.request(0).text, selected);
+    assert_eq!(harness.confirmation(), None);
 }

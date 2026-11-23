@@ -1,8 +1,10 @@
+use std::net::Ipv6Addr;
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use http_client::{AsyncBody, HttpClient, Method, Request, Url};
+use http_client::{AsyncBody, HttpClient, Method, Request, StatusCode, Url};
 use serde_json::json;
+use url::Host;
 
 use crate::language::language_name;
 use crate::provider::{error_for_status, json_body, send, unexpected_response};
@@ -18,9 +20,12 @@ pub struct OpenAiCompatibleProvider {
     api_key: Option<String>,
 }
 
-/// Accepts `https` anywhere and plain `http` only for this machine, where a
-/// local model server usually has no certificate. Anything else would send
-/// the selection, and the key, in the clear.
+/// Accepts `https` anywhere and plain `http` only for this machine (`localhost`,
+/// `127.0.0.0/8`, `[::1]`), where a local model server usually has no
+/// certificate. Anything else would send the selection, and the key, in the
+/// clear. A URL with credentials, a query or a fragment is refused: the
+/// endpoint is built by appending path segments, which those would corrupt
+/// or smuggle along.
 pub fn validate_base_url(base_url: &str) -> Result<Url, TranslateError> {
     let invalid = |reason: &str| {
         TranslateError::InvalidConfiguration(format!(
@@ -28,14 +33,39 @@ pub fn validate_base_url(base_url: &str) -> Result<Url, TranslateError> {
         ))
     };
     let url = Url::parse(base_url.trim()).map_err(|_| invalid("is not a valid URL"))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(invalid(
+            "must not hold a user name or password; the API key is set in Settings → Translate",
+        ));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(invalid("must not hold a query or a fragment"));
+    }
     match url.scheme() {
         "https" => Ok(url),
-        "http" if matches!(url.host_str(), Some("localhost" | "127.0.0.1")) => Ok(url),
+        "http" if is_loopback(&url) => Ok(url),
         "http" => Err(invalid(
-            "uses plain http, which is only allowed for localhost and 127.0.0.1",
+            "uses plain http, which is only allowed for localhost, 127.0.0.0/8 and [::1]",
         )),
         _ => Err(invalid("must start with https://")),
     }
+}
+
+fn is_loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Domain(domain)) => domain == "localhost",
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address == Ipv6Addr::LOCALHOST,
+        None => false,
+    }
+}
+
+/// The server a key belongs to: scheme, host and port, without the path. The
+/// keychain entry records it, so a key saved for one server is never sent to
+/// another after the base URL changes.
+pub(crate) fn key_origin(base_url: &str) -> Option<String> {
+    let url = validate_base_url(base_url).ok()?;
+    Some(url.origin().ascii_serialization())
 }
 
 impl OpenAiCompatibleProvider {
@@ -59,29 +89,42 @@ impl OpenAiCompatibleProvider {
         })
     }
 
-    fn endpoint(&self) -> String {
-        format!(
-            "{}/chat/completions",
-            self.base_url.as_str().trim_end_matches('/')
-        )
+    fn endpoint(&self) -> Result<Url, TranslateError> {
+        let mut endpoint = self.base_url.clone();
+        endpoint
+            .path_segments_mut()
+            .map_err(|()| {
+                TranslateError::InvalidConfiguration(
+                    "The OpenAI-compatible base URL cannot take a path.".into(),
+                )
+            })?
+            .pop_if_empty()
+            .extend(["chat", "completions"]);
+        Ok(endpoint)
     }
 
+    /// `temperature` is pinned to 0 for a steady translation, but some models
+    /// (OpenAI's reasoning models) accept no other value than their default
+    /// and answer 400, so the second attempt leaves it out.
     fn build_request(
         &self,
         request: &TranslateRequest,
+        with_temperature: bool,
     ) -> Result<Request<AsyncBody>, TranslateError> {
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
-            "temperature": 0,
             "stream": false,
             "messages": [
                 { "role": "system", "content": system_prompt(&request.from, &request.to) },
                 { "role": "user", "content": framed_text(&request.text) },
             ],
         });
+        if with_temperature {
+            body["temperature"] = json!(0);
+        }
         let mut builder = Request::builder()
             .method(Method::POST)
-            .uri(self.endpoint())
+            .uri(self.endpoint()?.as_str())
             .header("Content-Type", "application/json");
         if let Some(api_key) = &self.api_key {
             builder = builder.header("Authorization", format!("Bearer {api_key}"));
@@ -122,6 +165,10 @@ fn system_prompt(from: &str, to: &str) -> String {
     )
 }
 
+fn rejects_temperature(status: StatusCode, body: &str) -> bool {
+    status == StatusCode::BAD_REQUEST && body.to_ascii_lowercase().contains("temperature")
+}
+
 impl TranslationProvider for OpenAiCompatibleProvider {
     fn name(&self) -> &'static str {
         NAME
@@ -132,9 +179,13 @@ impl TranslationProvider for OpenAiCompatibleProvider {
         request: &TranslateRequest,
         http_client: Arc<dyn HttpClient>,
     ) -> BoxFuture<'static, Result<String, TranslateError>> {
-        let http_request = self.build_request(request);
+        let first_request = self.build_request(request, true);
+        let retry_request = self.build_request(request, false);
         Box::pin(async move {
-            let (status, body) = send(NAME, http_client, http_request?).await?;
+            let (mut status, mut body) = send(NAME, http_client.clone(), first_request?).await?;
+            if rejects_temperature(status, &body) {
+                (status, body) = send(NAME, http_client, retry_request?).await?;
+            }
             if !status.is_success() {
                 return Err(error_for_status(NAME, status, &body));
             }
