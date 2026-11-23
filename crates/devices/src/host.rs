@@ -163,8 +163,17 @@ impl fmt::Display for ToolFailure {
 
 impl std::error::Error for ToolFailure {}
 
+/// What matters is that the spawn never searches `PATH`, and a path that
+/// starts at a root never is. Windows calls `/usr/bin/xcrun` relative (to the
+/// current drive), so `Path::is_absolute` alone would refuse the Mac and Linux
+/// hosts the tests describe whenever they run on Windows. `has_root` follows
+/// the running system, so a `\\` path stays a bare name on a Mac.
+pub(crate) fn is_rooted(path: &Path) -> bool {
+    path.is_absolute() || path.has_root()
+}
+
 pub fn ensure_absolute_program(invocation: &ToolInvocation) -> Result<(), ToolFailure> {
-    if invocation.program.is_absolute() {
+    if is_rooted(&invocation.program) {
         Ok(())
     } else {
         Err(ToolFailure::RelativeProgram(invocation.program.clone()))

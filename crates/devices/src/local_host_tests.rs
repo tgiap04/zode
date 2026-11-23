@@ -1,8 +1,36 @@
 #[cfg(unix)]
 use std::time::Duration;
 
-use crate::host::{ToolFailure, ToolInvocation, ToolRunner};
+use crate::host::{ToolFailure, ToolInvocation, ToolRunner, ensure_absolute_program};
 use crate::local_host::LocalHost;
+
+/// The tests describe Mac and Linux hosts with paths like `/usr/bin/xcrun`
+/// on every system, Windows included, where such a path is not "absolute".
+#[test]
+fn a_rooted_program_is_accepted_on_every_system_and_a_bare_name_never() {
+    let mut accepted = vec!["/usr/bin/xcrun"];
+    // A name without `/` is looked up on `PATH` everywhere but Windows.
+    let mut refused = vec!["xcrun", "bin/xcrun", "platform-tools\\adb.exe"];
+    if cfg!(windows) {
+        accepted.extend(["\\tools\\adb.exe", "C:\\sdk\\adb.exe"]);
+    } else {
+        refused.extend(["\\tools\\adb.exe", "C:\\sdk\\adb.exe"]);
+    }
+    for program in accepted {
+        assert_eq!(
+            ensure_absolute_program(&ToolInvocation::new(program, ["--version"])),
+            Ok(()),
+            "{program}"
+        );
+    }
+    for program in refused {
+        assert_eq!(
+            ensure_absolute_program(&ToolInvocation::new(program, ["--version"])),
+            Err(ToolFailure::RelativeProgram(program.into())),
+            "{program}"
+        );
+    }
+}
 
 #[test]
 fn a_relative_program_is_refused_before_anything_runs() {

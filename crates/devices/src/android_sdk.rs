@@ -44,7 +44,7 @@ fn absolute_path_from(host: &dyn HostSystem, variable: &str) -> Option<PathBuf> 
 /// `Path::is_absolute` follows the OS the code runs on, so a Windows path seen
 /// by a Mac test would be called relative. A drive letter counts as absolute.
 fn is_absolute_for(path: &Path) -> bool {
-    if path.is_absolute() {
+    if crate::host::is_rooted(path) {
         return true;
     }
     let text = path.to_string_lossy();
