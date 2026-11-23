@@ -82,6 +82,8 @@ const UNIT_EVAL_MODELS: &[&str] = &[
     "openai/gpt-5",
 ];
 
+// No sccache here: it needs `expose_actions_cache`, which puts ACTIONS_RUNTIME_TOKEN in the
+// environment of every later step, and these jobs run agent code next to the API keys.
 fn cron_unit_evals_job() -> Job {
     let script_step = add_api_keys(steps::script("./script/run-unit-evals"))
         .add_env(("ZODE_AGENT_MODEL", "${{ matrix.model }}"));
@@ -97,10 +99,7 @@ fn cron_unit_evals_job() -> Job {
         .map(steps::install_linux_dependencies)
         .add_step(steps::cargo_install_nextest())
         .add_step(steps::clear_target_dir_if_large(Platform::Linux))
-        .add_step(steps::expose_actions_cache())
-        .add_step(steps::setup_sccache(Platform::Linux))
         .add_step(script_step)
-        .add_step(steps::show_sccache_stats(Platform::Linux))
         .add_step(steps::cleanup_cargo_config(Platform::Linux))
 }
 
@@ -115,12 +114,9 @@ fn unit_evals(commit: Option<&WorkflowInput>) -> Job {
         .map(steps::install_linux_dependencies)
         .add_step(steps::cargo_install_nextest())
         .add_step(steps::clear_target_dir_if_large(Platform::Linux))
-        .add_step(steps::expose_actions_cache())
-        .add_step(steps::setup_sccache(Platform::Linux))
         .add_step(match commit {
             Some(commit) => script_step.add_env(("UNIT_EVAL_COMMIT", commit)),
             None => script_step,
         })
-        .add_step(steps::show_sccache_stats(Platform::Linux))
         .add_step(steps::cleanup_cargo_config(Platform::Linux))
 }

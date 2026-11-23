@@ -106,6 +106,7 @@ pub(crate) fn run_tests() -> Workflow {
                 .pull_request(PullRequest::default().add_branch("**"))
                 .merge_group(MergeGroup::default()),
         )
+        .permissions(Permissions::default().contents(Level::Read))
         .concurrency(vars::one_workflow_per_non_main_branch())
         .add_env(("CARGO_TERM_COLOR", "always"))
         .add_env(("RUST_BACKTRACE", 1))
@@ -208,11 +209,9 @@ fn orchestrate_impl(rules: &[&PathCondition], target: OrchestrateTarget) -> Name
         if [ -z "$GITHUB_BASE_REF" ]; then
           echo "Not a PR, running full test suite"
           echo "changed_packages=" >> "$GITHUB_OUTPUT"
-          echo "changed_package_args=" >> "$GITHUB_OUTPUT"
         elif grep -qP '^(rust-toolchain\.toml|\.cargo/|\.github/|Cargo\.(toml|lock)$)' <<< "$CHANGED_FILES"; then
           echo "Toolchain, cargo config, or root Cargo files changed, will run all tests"
           echo "changed_packages=" >> "$GITHUB_OUTPUT"
-          echo "changed_package_args=" >> "$GITHUB_OUTPUT"
         else
           # Extract changed directories from file paths
           CHANGED_DIRS=$(echo "$CHANGED_FILES" | \
@@ -259,7 +258,6 @@ fn orchestrate_impl(rules: &[&PathCondition], target: OrchestrateTarget) -> Name
           if [ -z "$ALL_CHANGED_PKGS" ]; then
             echo "No package changes detected, will run all tests"
             echo "changed_packages=" >> "$GITHUB_OUTPUT"
-          echo "changed_package_args=" >> "$GITHUB_OUTPUT"
           else
             # Build nextest filterset with rdeps for each package
             FILTERSET=$(echo "$ALL_CHANGED_PKGS" | \
@@ -268,33 +266,6 @@ fn orchestrate_impl(rules: &[&PathCondition], target: OrchestrateTarget) -> Name
               sed 's/|$//')
             echo "Changed packages filterset: $FILTERSET"
             echo "changed_packages=$FILTERSET" >> "$GITHUB_OUTPUT"
-
-            # The packages to compile: the changed ones and everything in the
-            # workspace that depends on them, through normal, dev and build
-            # dependencies alike -- the same set `rdeps()` selects tests from.
-            # Passed as `-p` instead of `--workspace`, which compiled every crate
-            # even when the filter ran the tests of a few (52 of the 85 minutes
-            # on the Windows runner). Empty on any failure, which falls back to
-            # `--workspace`.
-            PACKAGE_ARGS=$(cargo metadata --format-version=1 --no-deps 2>/dev/null | \
-              CHANGED="$ALL_CHANGED_PKGS" python3 -c '
-        import json, os, sys
-        dependents = {}
-        for package in json.load(sys.stdin)["packages"]:
-            for dependency in package["dependencies"]:
-                if dependency.get("path"):
-                    dependents.setdefault(dependency["name"], set()).add(package["name"])
-        selected = set(os.environ["CHANGED"].split())
-        pending = list(selected)
-        while pending:
-            for dependent in dependents.get(pending.pop(), ()):
-                if dependent not in selected:
-                    selected.add(dependent)
-                    pending.append(dependent)
-        print(" ".join("-p " + name for name in sorted(selected)))
-            ' || true)
-            echo "Packages to build: ${PACKAGE_ARGS:-the whole workspace}"
-            echo "changed_package_args=$PACKAGE_ARGS" >> "$GITHUB_OUTPUT"
           fi
         fi
 
@@ -303,13 +274,6 @@ fn orchestrate_impl(rules: &[&PathCondition], target: OrchestrateTarget) -> Name
         outputs.insert(
             "changed_packages".to_owned(),
             format!("${{{{ steps.{}.outputs.changed_packages }}}}", step_name),
-        );
-        outputs.insert(
-            "changed_package_args".to_owned(),
-            format!(
-                "${{{{ steps.{}.outputs.changed_package_args }}}}",
-                step_name
-            ),
         );
     }
 
@@ -724,7 +688,8 @@ fn run_platform_tests_impl(
             .add_step(steps::setup_sccache(platform))
             .when(filter_packages, |job| {
                 job.add_step(
-                    steps::cargo_nextest(platform).with_changed_packages_filter("orchestrate"),
+                    steps::cargo_nextest(platform)
+                        .with_changed_packages_filter(platform, "orchestrate"),
                 )
             })
             .when(!filter_packages, |job| {
@@ -750,13 +715,22 @@ pub(crate) fn check_postgres_and_protobuf_migrations() -> NamedJob {
     }
 
     fn bufbuild_setup_action() -> Step<Use> {
-        named::uses!("bufbuild", "buf-setup-action", "v1")
-            .add_with(("version", "v1.29.0"))
-            .add_with(("github_token", vars::GITHUB_TOKEN))
+        named::uses!(
+            "bufbuild",
+            "buf-setup-action",
+            "a47c93e0b1648d5651a065437926377d060baa99", // v1.50.0
+        )
+        .add_with(("version", "v1.29.0"))
+        .add_with(("github_token", vars::GITHUB_TOKEN))
     }
 
     fn bufbuild_breaking_action() -> Step<Use> {
-        named::uses!("bufbuild", "buf-breaking-action", "v1").add_with(("input", "crates/proto/proto/"))
+        named::uses!(
+            "bufbuild",
+            "buf-breaking-action",
+            "c57b3d842a5c3f3b454756ef65305a50a587c5ba", // v1.1.4
+        )
+        .add_with(("input", "crates/proto/proto/"))
             .add_with(("against", "https://github.com/${GITHUB_REPOSITORY}.git#branch=${BUF_BASE_BRANCH},subdir=crates/proto/proto/"))
     }
 

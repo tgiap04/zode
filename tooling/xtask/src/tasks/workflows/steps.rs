@@ -33,21 +33,31 @@ impl Nextest {
         self
     }
 
-    pub(crate) fn with_changed_packages_filter(mut self, orchestrate_job: &str) -> Self {
+    /// Narrows the run to the tests of the changed packages and their dependents, but
+    /// keeps `--workspace`: with `-p`, cargo unifies features over the selected
+    /// packages only, so a crate whose tests need a `test-support` feature that a
+    /// non-selected member enables fails to build on a PR and passes on develop.
+    /// The filterset arrives through the environment, never interpolated into the
+    /// script text.
+    pub(crate) fn with_changed_packages_filter(
+        mut self,
+        platform: Platform,
+        orchestrate_job: &str,
+    ) -> Self {
         if let Some(nextest_command) = self.0.value.run.as_mut() {
-            // Build only the packages the filter can select. `--workspace` compiled
-            // every crate even when the filter ran the tests of a few.
-            *nextest_command = nextest_command.replacen(
-                "--workspace",
-                &format!(
-                    "${{{{ needs.{orchestrate_job}.outputs.changed_package_args || '--workspace' }}}}"
-                ),
-                1,
-            );
-            nextest_command.push_str(&format!(
-                r#"${{{{ needs.{orchestrate_job}.outputs.changed_packages && format(' -E "{{0}}"', needs.{orchestrate_job}.outputs.changed_packages) || '' }}}}"#
-            ));
+            match platform {
+                Platform::Windows => {
+                    *nextest_command = format!(
+                        "$filterset = @(); if ($env:CHANGED_PACKAGES) {{ $filterset = @('-E', $env:CHANGED_PACKAGES) }}; {nextest_command} @filterset"
+                    );
+                }
+                _ => nextest_command.push_str(r#" ${CHANGED_PACKAGES:+-E "$CHANGED_PACKAGES"}"#),
+            }
         }
+        self.0 = self.0.add_env((
+            "CHANGED_PACKAGES",
+            format!("${{{{ needs.{orchestrate_job}.outputs.changed_packages }}}}"),
+        ));
         self
     }
 }
