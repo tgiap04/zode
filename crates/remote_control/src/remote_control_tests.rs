@@ -62,6 +62,9 @@ struct Rig {
     push_hold: Arc<Mutex<Option<futures::future::Shared<futures::channel::oneshot::Receiver<()>>>>>,
     /// The tier the account service says the plan is.
     plan_tier: Arc<Mutex<&'static str>>,
+    /// The `pushNotifications` limit the account service sends; `None` leaves
+    /// the field out, as a server from before it existed does.
+    plan_pushes: Arc<Mutex<Option<bool>>>,
 }
 
 impl Rig {
@@ -73,8 +76,8 @@ impl Rig {
     }
 }
 
-fn plan_body(tier: &str) -> String {
-    serde_json::json!({
+fn plan_body(tier: &str, pushes: Option<bool>) -> String {
+    let mut body = serde_json::json!({
         "tier": tier,
         "source": if tier == "free" { "free" } else { "subscription" },
         "status": "active",
@@ -84,8 +87,11 @@ fn plan_body(tier: &str) -> String {
             "relayDailyBytes": null,
             "teamVault": false
         }
-    })
-    .to_string()
+    });
+    if let Some(pushes) = pushes {
+        body["limits"]["pushNotifications"] = pushes.into();
+    }
+    body.to_string()
 }
 
 fn set_remote_control(cx: &mut TestAppContext, enabled: bool, idle_timeout_minutes: Option<u64>) {
@@ -192,6 +198,7 @@ async fn build_rig(
         Mutex<Option<futures::future::Shared<futures::channel::oneshot::Receiver<()>>>>,
     > = Arc::new(Mutex::new(None));
     let plan_tier = Arc::new(Mutex::new("free"));
+    let plan_pushes = Arc::new(Mutex::new(None));
     let http_client: Arc<dyn HttpClient> = FakeHttpClient::create({
         let host_public_key = host_public_key.clone();
         let registrations = registrations.clone();
@@ -199,6 +206,7 @@ async fn build_rig(
         let push_answer = push_answer.clone();
         let push_hold = push_hold.clone();
         let plan_tier = plan_tier.clone();
+        let plan_pushes = plan_pushes.clone();
         move |request| {
             let host_public_key = host_public_key.clone();
             let registrations = registrations.clone();
@@ -206,13 +214,15 @@ async fn build_rig(
             let push_answer = push_answer.clone();
             let push_hold = push_hold.clone();
             let plan_tier = plan_tier.clone();
+            let plan_pushes = plan_pushes.clone();
             async move {
                 let (parts, mut body) = request.into_parts();
                 if parts.uri.path().ends_with("/account/plan") {
                     let tier = *plan_tier.lock();
+                    let pushes = *plan_pushes.lock();
                     return Ok(Response::builder()
                         .status(200)
-                        .body(AsyncBody::from(plan_body(tier)))
+                        .body(AsyncBody::from(plan_body(tier, pushes)))
                         .expect("a response"));
                 }
                 if parts.method == "POST" && parts.uri.path().ends_with("/remote/push") {
@@ -324,6 +334,7 @@ async fn build_rig(
         push_answer,
         push_hold,
         plan_tier,
+        plan_pushes,
     }
 }
 

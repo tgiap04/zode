@@ -390,6 +390,129 @@ async fn a_refusal_for_a_push_sent_before_the_plan_changed_is_ignored(cx: &mut T
     );
 }
 
+/// What the account service says about pushes for a Free account, which is the
+/// one thing that changes when pushes are opened to it: the tier, the sources
+/// and every other limit stay as they were.
+fn read_free_plan_with_pushes(rig: &Rig, pushes: Option<bool>, cx: &mut VisualTestContext) {
+    *rig.plan_pushes.lock() = pushes;
+    read_plan(rig, "free", cx);
+}
+
+#[gpui::test]
+async fn a_free_plan_that_opens_pushes_lifts_a_refusal_without_a_restart(cx: &mut TestAppContext) {
+    let (rig, browser, mut connected) = subscribed(cx).await;
+    let (view, _agent_id, cx) = agent_tab(&browser, &mut connected, cx).await;
+    read_free_plan_with_pushes(&rig, Some(false), cx);
+
+    *rig.push_answer.lock() = (402, r#"{"error":"push_not_in_plan"}"#);
+    ask_for_approval(&view, cx);
+    assert_eq!(rig.pushes.lock().len(), 1);
+    assert!(rig.host.read_with(cx, |host, _| host.push_needs_upgrade()));
+    connected.controls(&browser);
+
+    *rig.push_answer.lock() = (202, "");
+    read_free_plan_with_pushes(&rig, Some(true), cx);
+    assert!(
+        !rig.host.read_with(cx, |host, _| host.push_needs_upgrade()),
+        "the plan now says pushes are in it"
+    );
+    assert_eq!(
+        push_statuses(connected.controls(&browser)),
+        vec![(true, None)],
+        "the paired device is told, with no new pairing"
+    );
+    ask_for_approval(&view, cx);
+    assert_eq!(rig.pushes.lock().len(), 2, "exactly one new push request");
+}
+
+#[gpui::test]
+async fn a_plan_that_still_has_no_pushes_keeps_a_refusal_whatever_else_changed(
+    cx: &mut TestAppContext,
+) {
+    let (rig, browser, mut connected) = subscribed(cx).await;
+    let (view, _agent_id, cx) = agent_tab(&browser, &mut connected, cx).await;
+    read_free_plan_with_pushes(&rig, Some(false), cx);
+    *rig.push_answer.lock() = (402, r#"{"error":"push_not_in_plan"}"#);
+    ask_for_approval(&view, cx);
+    connected.controls(&browser);
+
+    read_plan(&rig, "team", cx);
+    assert!(
+        rig.host.read_with(cx, |host, _| host.push_needs_upgrade()),
+        "a different plan that says no is still no"
+    );
+    assert!(push_statuses(connected.controls(&browser)).is_empty());
+    ask_for_approval(&view, cx);
+    assert_eq!(rig.pushes.lock().len(), 1, "nothing is sent");
+}
+
+#[gpui::test]
+async fn a_plan_that_becomes_unknown_keeps_a_refusal(cx: &mut TestAppContext) {
+    let (rig, browser, mut connected) = subscribed(cx).await;
+    let (view, _agent_id, cx) = agent_tab(&browser, &mut connected, cx).await;
+    read_free_plan_with_pushes(&rig, Some(false), cx);
+    *rig.push_answer.lock() = (402, r#"{"error":"push_not_in_plan"}"#);
+    ask_for_approval(&view, cx);
+    assert!(rig.host.read_with(cx, |host, _| host.push_needs_upgrade()));
+    connected.controls(&browser);
+
+    // Signing out clears the plan: not knowing it is not the plan saying yes. (The host stops
+    // right after, so what is left to see is what its paired devices were told on the way.)
+    rig.account
+        .update(cx, |account, cx| account.sign_out(cx).detach());
+    cx.run_until_parked();
+
+    assert!(
+        push_statuses(connected.controls(&browser))
+            .iter()
+            .all(|(will_push, _)| !*will_push),
+        "no device is told that pushes will be sent"
+    );
+}
+
+#[gpui::test]
+async fn a_server_that_says_nothing_about_pushes_leaves_the_refusal_to_a_plan_change(
+    cx: &mut TestAppContext,
+) {
+    let (rig, browser, mut connected) = subscribed(cx).await;
+    let (view, _agent_id, cx) = agent_tab(&browser, &mut connected, cx).await;
+    read_free_plan_with_pushes(&rig, None, cx);
+    *rig.push_answer.lock() = (402, r#"{"error":"push_not_in_plan"}"#);
+    ask_for_approval(&view, cx);
+    assert!(rig.host.read_with(cx, |host, _| host.push_needs_upgrade()));
+
+    read_free_plan_with_pushes(&rig, None, cx);
+    assert!(
+        rig.host.read_with(cx, |host, _| host.push_needs_upgrade()),
+        "the same plan, and the 402 is still the truth"
+    );
+
+    read_plan(&rig, "pro", cx);
+    assert!(
+        !rig.host.read_with(cx, |host, _| host.push_needs_upgrade()),
+        "a different plan from a server that never says no lifts it"
+    );
+}
+
+#[gpui::test]
+async fn a_refusal_for_a_push_sent_before_pushes_were_opened_is_ignored(cx: &mut TestAppContext) {
+    let (rig, browser, mut connected) = subscribed(cx).await;
+    let (view, _agent_id, cx) = agent_tab(&browser, &mut connected, cx).await;
+    read_free_plan_with_pushes(&rig, Some(false), cx);
+    *rig.push_answer.lock() = (402, r#"{"error":"push_not_in_plan"}"#);
+    let release = rig.hold_pushes();
+    ask_for_approval(&view, cx);
+    assert_eq!(rig.pushes.lock().len(), 1);
+
+    read_free_plan_with_pushes(&rig, Some(true), cx);
+    release.send(()).ok();
+    cx.run_until_parked();
+    assert!(
+        !rig.host.read_with(cx, |host, _| host.push_needs_upgrade()),
+        "the refusal was for the plan before"
+    );
+}
+
 /// The sender's public key from RFC 8291: another real point.
 const OTHER_P256DH: &str = concat!(
     "BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIg",

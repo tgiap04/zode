@@ -139,8 +139,7 @@ to do instead of failing with a code:
   and removable.
 - **Remote control** on Free pauses after 5 GiB through the relay in a day. It
   resets at 00:00 UTC; Pro and Team have no daily limit.
-- **Push notifications** from remote control are Pro and Team only. On Free,
-  the remote page says so and the remote-control menu offers an upgrade.
+- **Push notifications** from remote control are on every plan, Free included.
 - **Shared team files** are read-only once the team's plan ends. A member past
   the seats the team pays for is told to ask the owner to add one.
 

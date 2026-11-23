@@ -350,6 +350,7 @@ mod tests {
                 env_sync: false,
                 relay_daily_bytes: Some(5_368_709_120),
                 team_vault: false,
+                push_notifications: true,
             },
             team: None,
             grandfather_env_until: None,

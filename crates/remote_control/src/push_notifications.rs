@@ -310,7 +310,10 @@ impl Hosting {
     }
 
     /// The account changed somehow. Only a different plan can change whether
-    /// pushes are in it: anything else leaves a refusal standing.
+    /// pushes are in it: anything else leaves a refusal standing, and so does
+    /// a different plan that still says pushes are not in it. A plan that
+    /// became unknown (signed out) says nothing, so it lifts nothing: only a
+    /// plan that is read and has pushes in it does.
     pub(crate) fn plan_may_have_changed(
         &mut self,
         plan: Option<PlanSummary>,
@@ -319,9 +322,12 @@ impl Hosting {
         if plan == self.seen_plan {
             return;
         }
+        let pushes_in_plan = plan
+            .as_ref()
+            .is_some_and(|plan| plan.limits.push_notifications);
         self.seen_plan = plan;
         self.plan_generation = self.plan_generation.wrapping_add(1);
-        if !self.push_not_in_plan {
+        if !self.push_not_in_plan || !pushes_in_plan {
             return;
         }
         self.push_not_in_plan = false;
