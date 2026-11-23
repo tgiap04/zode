@@ -66,10 +66,19 @@ impl ToolRunner for LocalHost {
             {
                 // A tool that fails on its arguments exits without reading
                 // its input; what it printed then is the real error, so a
-                // closed pipe must not hide it.
+                // closed pipe must not hide it. Depending on timing a closed
+                // pipe shows up as BrokenPipe, or as WriteZero from a write
+                // that the gone reader no longer accepts.
                 for result in [stdin.write_all(text.as_bytes()).await, stdin.close().await] {
                     match result {
-                        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::BrokenPipe | io::ErrorKind::WriteZero
+                            ) =>
+                        {
+                            break;
+                        }
                         result => result?,
                     }
                 }
