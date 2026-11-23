@@ -139,8 +139,7 @@ làm gì thay vì báo lỗi bằng một mã:
   và xoá được.
 - **Remote control** trên Free tạm dừng sau 5 GiB qua relay trong một ngày. Nó
   đặt lại lúc 00:00 UTC; Pro và Team không giới hạn mỗi ngày.
-- **Thông báo đẩy** của remote control chỉ có ở Pro và Team. Ở Free,
-  trang remote báo điều đó và menu remote control có nút nâng cấp.
+- **Thông báo đẩy** của remote control có ở mọi gói, kể cả Free.
 - **File dùng chung của nhóm** chỉ còn đọc khi gói của nhóm hết hạn. Thành viên
   vượt quá số seat nhóm trả tiền được nhắc nhờ chủ nhóm thêm seat.
 

@@ -124,7 +124,7 @@ supports it; with an older Zode it is not there and nothing else changes.
 
 ### Push notifications
 
-With **Pro** or **Team**, a browser paired with A can get a push notification
+A browser paired with A can get a push notification
 when an agent on A needs you, even with the page closed or the phone locked:
 
 | Event              | When                                                                                                    |
@@ -147,7 +147,7 @@ when an agent on A needs you, even with the page closed or the phone locked:
 - A encrypts each notification with keys that only that browser holds. The
   zodekit.com server, and Apple's or Google's push service, forward it without
   being able to read the tab's name. They do see when a notification is sent.
-- On Free, the page says notifications are not part of your plan and offers **See plans**.
+- Push notifications are on every plan, Free included.
 
 ## Control A from another Zode
 
@@ -237,7 +237,7 @@ stops and asks you to sign in again, and the key and pairings stay.
 | Bandwidth through the relay                | Free: 5 GiB a day per account; Pro and Team: unlimited     |
 | File and session list requests, per device | 4 at once; past that, requests are answered `rate_limited` |
 | Session resumes, per device                | One at a time, 3 seconds apart; sooner is `rate_limited`   |
-| Push notifications                         | Pro and Team; at most 10 a minute and 60 an hour per host  |
+| Push notifications                         | Every plan; at most 10 a minute and 60 an hour per host    |
 | Idle disconnect                            | `idle_timeout_minutes`, 30 by default                      |
 | Terminals in a project from another Zode   | 16 at once, counting ones that are still closing           |
 | Project servers being stopped at once      | 4; another project is refused with `rate_limited`          |
