@@ -1,0 +1,3 @@
+# adb -s emulator-5554 emu kill   (exit 0, stdout CRLF line endings, stderr empty)
+OK: killing emulator, bye bye
+OK

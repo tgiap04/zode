@@ -1,0 +1,16 @@
+INFO         | Android emulator version 36.5.11.0 (build_id 15261927) (CL:N/A)
+INFO         | Graphics backend: gfxstream
+INFO         | Found systemPath /Users/testuser/Library/Android/sdk/system-images/android-37.0/google_apis_playstore_ps16k/arm64-v8a/
+WARNING      | Please update the emulator to one that supports the feature(s): VulkanVirtualQueue
+INFO         | Guest GLES Driver: Auto (ext controls)
+INFO         | emuglConfig_init: vulkan_mode_selected:lavapipe gles_mode_selected:host
+INFO         | Checking system compatibility:
+INFO         |   Checking: hasSufficientDiskSpace
+INFO         |      Ok: Disk space requirements to run avd: `Medium_Phone` are met
+INFO         |   Checking: hasSufficientHwGpu
+INFO         |      Ok: Hardware GPU compatibility checks are not required
+INFO         |   Checking: hasSufficientSystem
+INFO         |      Ok: System requirements to run avd: `Medium_Phone` are met
+FATAL        | Running multiple emulators with the same AVD is an experimental feature.Please use -read-only flag to enable this feature.
+
+EXIT 1 after 2.4s

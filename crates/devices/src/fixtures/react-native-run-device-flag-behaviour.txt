@@ -1,0 +1,25 @@
+# npx react-native run-android --device emulator-9999 --no-packager   -> exit code 0 (!), error only on stdout
+error Could not find device: "emulator-9999". Please choose one of the following:, emulator-5554
+
+# npx react-native run-android --deviceId emulator-9999 --no-packager -> alias of --device, exit code 0
+warn The `deviceId` parameter is renamed to `device`. Please use the new `device` argument next time to avoid this warning.
+error Could not find device: "emulator-9999". Please choose one of the following:, emulator-5554
+
+# npx react-native run-android --device emulator-5554 --no-packager --active-arch-only   (exit 0, tail)
+info Detected architecture arm64-v8a
+info Building the app...
+BUILD SUCCESSFUL in 56s
+info Connecting to the development server...
+info Installing the app on the device "emulator-5554"...
+Performing Streamed Install
+Success
+info Starting the app on "emulator-5554"...
+Starting: Intent { act=android.intent.action.MAIN cat=[android.intent.category.LAUNCHER] cmp=com.rnsample/.MainActivity }
+
+# npx react-native run-ios --udid <sim udid>   (default: Metro "in new window"), TERM_PROGRAM unset/unknown (exit 0, app still built, installed, launched)
+error Cannot start server in new windows because no terminal app was specified, use --terminal to specify, or start a dev server manually by running npm start or yarn start in other terminal window.
+info Building (using "xcodebuild -workspace RnSample.xcworkspace -configuration Debug -scheme RnSample -destination id=00000000-0000-4000-8000-000000000005")
+success Successfully built the app
+info Installing "/Users/testuser/Library/Developer/Xcode/DerivedData/RnSample-frlavpvymhzbwmakidbhktdbgbyo/Build/Products/Debug-iphonesimulator/RnSample.app
+info Launching "org.reactjs.native.example.RnSample"
+success Successfully launched the app

@@ -1,0 +1,14 @@
+name: string_tools
+description: A pure Dart package.
+version: 1.0.0
+
+environment:
+  sdk: ^3.9.0
+
+dependencies:
+  collection: ^1.19.0
+
+dev_dependencies:
+  flutter:
+    sdk: flutter
+  test: ^1.25.0

@@ -1,0 +1,3 @@
+# stderr of the very first adb call when no server is running (stdout is the file above, exit code 0)
+* daemon not running; starting now at tcp:5599
+* daemon started successfully

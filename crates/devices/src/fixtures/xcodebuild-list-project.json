@@ -1,0 +1,17 @@
+{
+  "project" : {
+    "configurations" : [
+      "Debug",
+      "Release",
+      "Profile"
+    ],
+    "name" : "Runner",
+    "schemes" : [
+      "Runner"
+    ],
+    "targets" : [
+      "Runner",
+      "RunnerTests"
+    ]
+  }
+}

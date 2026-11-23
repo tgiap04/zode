@@ -1,0 +1,11 @@
+{
+  "name": "date-helpers",
+  "version": "2.1.0",
+  "main": "dist/index.js",
+  "dependencies": {
+    "dayjs": "^1.11.0"
+  },
+  "devDependencies": {
+    "react-native": "0.88.1"
+  }
+}
