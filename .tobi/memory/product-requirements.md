@@ -52,3 +52,20 @@ Trạng thái: `chưa làm` · `đang làm` · `xong` · `huỷ`
 **Đã chốt (2026-11-22)**
 - `PLAN_ENFORCEMENT=off` → cho mọi người, giống R1.
 - Bấm thông báo mở `/remote` đúng phiên; chưa có nút Duyệt trên thông báo.
+
+---
+
+## R3 — Panel Devices: máy ảo, điện thoại thật, chạy app
+
+- **Ghi nhận:** 2026-11-22
+- **Trạng thái:** code xong 2026-11-23, chưa commit; chờ người dùng thử trên bản dev và CI Windows — brainstorm `.tobi/outputs/reports/261122-2330-brainstorm-devices-panel-simulators-emulators.md`, plan `.tobi/outputs/plans/261122-2340-devices-panel-simulators-and-run-app/`
+- **Yêu cầu:**
+  - Icon điện thoại trong dải icon của right dock, cạnh project panel và agent history.
+  - macOS: chọn simulator iOS Xcode đã cài. Mọi hệ điều hành: chọn AVD Android nếu có Android SDK; chọn máy thật cắm USB hoặc kết nối không dây.
+  - Chạy nhiều máy cùng lúc.
+  - "Run app": chạy app của project đang mở lên máy đã chọn.
+
+**Đã chốt (2026-11-22)**
+- Máy mở trong cửa sổ riêng của hệ thống (Simulator.app, Android Emulator), không nhúng vào Zode.
+- Run app chạy CLI của chính framework (Flutter, Expo, React Native, Gradle, Xcode) trong terminal của Zode; Zode không tự build.
+- iOS native trên iPhone thật (signing) để sau. Remote project (SSH/WSL) chưa hỗ trợ ở v1.

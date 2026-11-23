@@ -5252,6 +5252,22 @@ You can define these in user or project settings; project settings are merged on
 }
 ```
 
+## Devices Panel
+
+- Description: Customize the Devices panel, which lists iOS simulators, Android emulators and physical devices. See [Devices](../devices.md).
+- Setting: `devices_panel`
+- Note: the panel always docks on the right side of the window; there is no `dock` setting for it.
+- Default:
+
+```json [settings]
+{
+  "devices_panel": {
+    "button": true,
+    "default_width": 320
+  }
+}
+```
+
 ## Colorize Brackets
 
 - Description: Whether to use tree-sitter bracket queries to detect and colorize the brackets in the editor (also known as "rainbow brackets").

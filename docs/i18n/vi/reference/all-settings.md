@@ -5252,6 +5252,22 @@ Bạn có thể định nghĩa chúng trong cài đặt người dùng hoặc c�
 }
 ```
 
+## Bảng Devices
+
+- Mô tả: Tùy biến bảng Devices, nơi liệt kê simulator iOS, emulator Android và thiết bị thật. Xem [Thiết bị](../devices.md).
+- Cài đặt: `devices_panel`
+- Lưu ý: bảng luôn nằm ở cạnh phải cửa sổ; không có cài đặt `dock` cho nó.
+- Mặc định:
+
+```json [settings]
+{
+  "devices_panel": {
+    "button": true,
+    "default_width": 320
+  }
+}
+```
+
 ## Tô màu ngoặc
 
 - Mô tả: Có dùng truy vấn ngoặc của tree-sitter để phát hiện và tô màu các dấu ngoặc trong trình soạn thảo hay không (còn gọi là "rainbow brackets").
