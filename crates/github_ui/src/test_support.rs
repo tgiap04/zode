@@ -136,9 +136,7 @@ impl GhHost for FakeGhHost {
     }
 
     fn find_on_path(&self, _program: &str) -> Option<PathBuf> {
-        self.token
-            .as_ref()
-            .map(|_| PathBuf::from("/opt/homebrew/bin/gh"))
+        self.token.as_ref().map(|_| fake_gh_path())
     }
 
     fn run(&self, _program: PathBuf, _arguments: Vec<String>) -> BoxFuture<'static, GhRunResult> {
@@ -243,4 +241,14 @@ pub fn use_test_environment(cx: &mut App) {
         http_client: ScriptedHttp::default().client(),
         make_backend: Arc::new(|_token, _cx| Arc::new(FakeGithubBackend::new())),
     });
+}
+
+/// Where the fake finds `gh`: an absolute path on every OS, as a real
+/// lookup on `PATH` gives. `/opt/...` is not absolute on Windows.
+fn fake_gh_path() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(r"C:\Program Files\GitHub CLI\gh.exe")
+    } else {
+        PathBuf::from("/opt/homebrew/bin/gh")
+    }
 }

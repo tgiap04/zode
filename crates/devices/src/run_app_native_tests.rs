@@ -298,10 +298,25 @@ fn simulator() -> Device {
     device(DeviceKind::IosSimulator, "iPhone 17", SIMULATOR_UDID)
 }
 
-const CONTAINER: &str = "/work/ios app/MyApp.xcworkspace";
+/// The container path as the plan builds it: joined with the host's separator,
+/// so on Windows it is `/work/ios app\MyApp.xcworkspace`.
+fn container_path(file_name: &str) -> String {
+    Path::new("/work/ios app")
+        .join(file_name)
+        .to_string_lossy()
+        .into_owned()
+}
 
-fn list_args() -> Vec<&'static str> {
-    vec!["-list", "-json", "-workspace", CONTAINER]
+fn list_args() -> Vec<String> {
+    [
+        "-list",
+        "-json",
+        "-workspace",
+        &container_path("MyApp.xcworkspace"),
+    ]
+    .iter()
+    .map(|arg| arg.to_string())
+    .collect()
 }
 
 fn settings_args(scheme: &str) -> Vec<String> {
@@ -309,7 +324,7 @@ fn settings_args(scheme: &str) -> Vec<String> {
         "-showBuildSettings",
         "-json",
         "-workspace",
-        CONTAINER,
+        &container_path("MyApp.xcworkspace"),
         "-scheme",
         scheme,
         "-configuration",
@@ -411,17 +426,17 @@ fn one_scheme_builds_installs_and_launches_on_the_simulator() {
 #[test]
 fn a_project_file_lists_its_schemes_with_the_project_flag() {
     let host = FakeHost::new(HostOs::MacOs);
-    let container = "/work/ios app/Runner.xcodeproj";
+    let container = container_path("Runner.xcodeproj");
     host.script_output(
         XCODEBUILD,
-        ["-list", "-json", "-project", container],
+        ["-list", "-json", "-project", container.as_str()],
         0,
         &tool_output("xcodebuild-list-project.json"),
         "",
     );
     let mut settings: Vec<String> = settings_args("Runner");
     settings[2] = "-project".to_string();
-    settings[3] = container.to_string();
+    settings[3] = container;
     host.script_output(
         XCODEBUILD,
         settings,

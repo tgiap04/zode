@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use crate::fake_host::FakeHost;
-use crate::host::{HostOs, HostSystem, ToolFailure};
+use crate::host::{HostOs, HostSystem, ToolFailure, is_rooted};
 use crate::ios_simulators::{XCODE_SELECT, XCRUN};
 use crate::test_fixtures::tool_output;
 use crate::{DeviceKey, DeviceState, SectionState, discover};
@@ -98,7 +98,7 @@ fn script_android(host: &FakeHost) {
 /// server.
 fn assert_invocations_are_safe(host: &FakeHost) {
     for invocation in host.invocations() {
-        assert!(invocation.program.is_absolute(), "{invocation:?}");
+        assert!(is_rooted(&invocation.program), "{invocation:?}");
         assert!(
             !invocation
                 .args

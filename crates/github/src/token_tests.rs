@@ -111,7 +111,7 @@ impl FakeGhHost {
     fn printing(stdout: &str) -> Self {
         Self {
             environment: HashMap::new(),
-            gh_path: Some(PathBuf::from("/opt/homebrew/bin/gh")),
+            gh_path: Some(fake_gh_path()),
             behaviour: GhBehaviour::Prints {
                 success: true,
                 stdout: stdout.to_string(),
@@ -226,7 +226,7 @@ async fn without_a_keychain_token_gh_runs_by_absolute_path(cx: &mut TestAppConte
     assert_eq!(
         host.runs(),
         vec![(
-            PathBuf::from("/opt/homebrew/bin/gh"),
+            fake_gh_path(),
             GH_ARGUMENTS
                 .iter()
                 .map(|argument| argument.to_string())
@@ -368,4 +368,14 @@ async fn a_device_flow_token_is_stored_trimmed(cx: &mut TestAppContext) {
         stored.map(|(_, password)| password),
         Some(b"ghu_new".to_vec())
     );
+}
+
+/// Where the fake finds `gh`: an absolute path on every OS, as a real
+/// lookup on `PATH` gives. `/opt/...` is not absolute on Windows.
+fn fake_gh_path() -> PathBuf {
+    if cfg!(windows) {
+        PathBuf::from(r"C:\Program Files\GitHub CLI\gh.exe")
+    } else {
+        PathBuf::from("/opt/homebrew/bin/gh")
+    }
 }

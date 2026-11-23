@@ -14,7 +14,7 @@ use crate::run_app_test_support::{
 use crate::test_support::{Rig, SIMULATOR_A, init_test};
 
 const XCODEBUILD: &str = "/usr/bin/xcodebuild";
-const WORKSPACE: &str = "/app/MyApp.xcworkspace";
+const WORKSPACE_NAME: &str = "MyApp.xcworkspace";
 
 fn key() -> DeviceKey {
     DeviceKey::Simulator(SIMULATOR_A.to_string())
@@ -32,8 +32,12 @@ fn booted() -> Rig {
 }
 
 fn add_xcode_app(rig: &Rig) {
-    rig.host
-        .add_file(Path::new(WORKSPACE).join("contents.xcworkspacedata"), "");
+    rig.host.add_file(
+        Path::new("/app")
+            .join(WORKSPACE_NAME)
+            .join("contents.xcworkspacedata"),
+        "",
+    );
 }
 
 fn xcode_project() -> AppProject {
@@ -53,17 +57,29 @@ fn xcode_project() -> AppProject {
     }
 }
 
-fn script_schemes(rig: &Rig, schemes: &[&str]) {
+/// The container as the plan spells it for xcodebuild: the app folder the
+/// panel detected, joined with the host's separator. Taken from the panel
+/// because the worktree decides how that folder is written.
+fn workspace_of(panel: &Entity<DevicesPanel>, cx: &mut VisualTestContext) -> String {
+    let apps = detected(panel, cx);
+    let app = apps.first().expect("the Xcode app is detected");
+    app.directory
+        .join(WORKSPACE_NAME)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn script_schemes(rig: &Rig, workspace: &str, schemes: &[&str]) {
     rig.host.script_output(
         XCODEBUILD,
-        ["-list", "-json", "-workspace", WORKSPACE],
+        ["-list", "-json", "-workspace", workspace],
         0,
         &serde_json::json!({ "workspace": { "name": "MyApp", "schemes": schemes } }).to_string(),
         "",
     );
 }
 
-fn script_settings(rig: &Rig, scheme: &str) {
+fn script_settings(rig: &Rig, workspace: &str, scheme: &str) {
     let destination = format!("id={SIMULATOR_A}");
     rig.host.script_output(
         XCODEBUILD,
@@ -71,7 +87,7 @@ fn script_settings(rig: &Rig, scheme: &str) {
             "-showBuildSettings",
             "-json",
             "-workspace",
-            WORKSPACE,
+            workspace,
             "-scheme",
             scheme,
             "-configuration",
@@ -117,8 +133,10 @@ async fn an_untrusted_xcode_project_runs_no_xcodebuild(cx: &mut TestAppContext) 
     init_test(cx);
     let rig = booted();
     add_xcode_app(&rig);
-    script_schemes(&rig, &["MyApp"]);
-    script_settings(&rig, "MyApp");
+    let workspace = Path::new("/app").join(WORKSPACE_NAME);
+    let workspace = workspace.to_string_lossy();
+    script_schemes(&rig, &workspace, &["MyApp"]);
+    script_settings(&rig, &workspace, "MyApp");
     let (panel, terminals, cx) = run_panel(cx, &rig, &["/app"], Trust::Only(&[])).await;
     open(&panel, cx);
 
@@ -134,10 +152,11 @@ async fn several_schemes_are_asked_about_on_every_click(cx: &mut TestAppContext)
     init_test(cx);
     let rig = booted();
     add_xcode_app(&rig);
-    script_schemes(&rig, &["MyApp", "Pods-MyApp", "MyApp Staging"]);
-    script_settings(&rig, "MyApp Staging");
     let (panel, terminals, cx) = run_panel(cx, &rig, &["/app"], Trust::Only(&["/app"])).await;
     open(&panel, cx);
+    let workspace = workspace_of(&panel, cx);
+    script_schemes(&rig, &workspace, &["MyApp", "Pods-MyApp", "MyApp Staging"]);
+    script_settings(&rig, &workspace, "MyApp Staging");
     assert_eq!(xcodebuild_count(&rig), 0, "detection never runs xcodebuild");
 
     click_run(&panel, &key(), cx);
