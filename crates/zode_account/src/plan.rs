@@ -59,6 +59,10 @@ pub struct PlanLimits {
     /// enforces no plan.
     pub relay_daily_bytes: Option<u64>,
     pub team_vault: bool,
+    /// Whether the plan includes pushes to paired devices. A server from
+    /// before the field existed does not say, and is read as "yes": its 402
+    /// stays the truth, and "no" is only ever believed when it is stated.
+    pub push_notifications: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -109,6 +113,7 @@ impl PlanSummary {
                 env_sync: wire.limits.env_sync,
                 relay_daily_bytes: wire.limits.relay_daily_bytes,
                 team_vault: wire.limits.team_vault,
+                push_notifications: wire.limits.push_notifications,
             },
             team: wire.team.map(|team| TeamSummary {
                 id: team.id.into(),
@@ -154,6 +159,12 @@ struct LimitsResponse {
     env_sync: bool,
     relay_daily_bytes: Option<u64>,
     team_vault: bool,
+    #[serde(default = "pushes_unless_told_otherwise")]
+    push_notifications: bool,
+}
+
+fn pushes_unless_told_otherwise() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -350,6 +361,7 @@ mod tests {
                 env_sync: true,
                 relay_daily_bytes: Some(21_474_836_480),
                 team_vault: true,
+                push_notifications: true,
             }
         );
         assert_eq!(
@@ -414,6 +426,26 @@ mod tests {
         let sentence = limit.sentence();
         assert!(sentence.contains("owner"), "{sentence}");
         assert!(!sentence.contains("ended"), "{sentence}");
+    }
+
+    /// Pushes are in the plan unless the server says they are not: a server
+    /// from before the field must not switch them off here.
+    #[test]
+    fn push_notifications_are_read_when_stated_and_assumed_when_not() {
+        let mut body = full_plan();
+        let read = |body: &serde_json::Value| {
+            PlanSummary::parse(&body.to_string(), WEB)
+                .expect("a valid plan")
+                .limits
+                .push_notifications
+        };
+        assert!(read(&body), "a server that does not say");
+
+        body["limits"]["pushNotifications"] = false.into();
+        assert!(!read(&body));
+
+        body["limits"]["pushNotifications"] = true.into();
+        assert!(read(&body));
     }
 
     #[test]
