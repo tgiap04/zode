@@ -75,6 +75,9 @@ struct FakeState {
     project_requests: usize,
     /// Failures the next project writes answer with, one each, in order.
     project_write_failures: VecDeque<GithubError>,
+    /// Failures the next project field writes answer with after they took
+    /// effect, as a timed-out request that did reach GitHub.
+    applied_project_field_failures: VecDeque<(GithubError, oneshot::Receiver<()>)>,
     pull_requests: Vec<(RepositoryId, PullRequest)>,
     pull_request_details: Vec<(RepositoryId, PullRequestDetails)>,
     visibilities: Vec<(RepositoryId, RepositoryVisibility)>,
@@ -84,6 +87,8 @@ struct FakeState {
     held_issue_lists: VecDeque<oneshot::Receiver<()>>,
     /// Holds for the next project adds and removals, in order.
     held_project_writes: VecDeque<oneshot::Receiver<()>>,
+    /// Holds for the next project item pages, in order.
+    held_project_item_lists: VecDeque<oneshot::Receiver<()>>,
     /// Item pages still to answer with a cursor that does not move on.
     stuck_project_item_pages: usize,
     /// Item pages still to answer empty, under a cursor that moves on.
@@ -92,6 +97,7 @@ struct FakeState {
     /// order.
     scripted_project_item_cursors: VecDeque<String>,
     held_issue_reads: VecDeque<oneshot::Receiver<()>>,
+    held_comment_lists: VecDeque<oneshot::Receiver<()>>,
     held_pull_request_details: VecDeque<oneshot::Receiver<()>>,
     held_merges: VecDeque<oneshot::Receiver<()>>,
     assignable_users: Vec<(RepositoryId, GithubUser)>,
@@ -373,6 +379,14 @@ impl FakeGithubBackend {
         release
     }
 
+    /// The next comments page is read when asked for but answers only once
+    /// the returned sender fires, so a test can send a comment meanwhile.
+    pub fn hold_next_comment_list(&self) -> oneshot::Sender<()> {
+        let (release, held) = oneshot::channel();
+        self.state.lock().held_comment_lists.push_back(held);
+        release
+    }
+
     /// The next pull request details read answers only once the returned
     /// sender fires.
     pub fn hold_next_pull_request_details(&self) -> oneshot::Sender<()> {
@@ -402,6 +416,30 @@ impl FakeGithubBackend {
     pub fn hold_next_project_write(&self) -> oneshot::Sender<()> {
         let (release, held) = oneshot::channel();
         self.state.lock().held_project_writes.push_back(held);
+        release
+    }
+
+    /// The next project field write takes effect at once, then answers with
+    /// `error` once the returned sender fires: the outcome of a request that
+    /// timed out after reaching GitHub.
+    pub fn fail_next_project_field_write_after_applying(
+        &self,
+        error: GithubError,
+    ) -> oneshot::Sender<()> {
+        let (release, held) = oneshot::channel();
+        self.state
+            .lock()
+            .applied_project_field_failures
+            .push_back((error, held));
+        release
+    }
+
+    /// The next project item page is read when asked for but answers only
+    /// once the returned sender fires, so a test can add or remove an item
+    /// meanwhile.
+    pub fn hold_next_project_item_list(&self) -> oneshot::Sender<()> {
+        let (release, held) = oneshot::channel();
+        self.state.lock().held_project_item_lists.push_back(held);
         release
     }
 
@@ -897,16 +935,19 @@ impl GithubBackend for FakeGithubBackend {
         number: u64,
         cursor: Option<String>,
     ) -> GithubFuture<Page<Comment>> {
-        let comments = self
-            .state
-            .lock()
-            .comments
-            .iter()
-            .filter(|(owner, issue, _)| owner == repository && *issue == number)
-            .map(|(_, _, comment)| comment.clone())
-            .collect();
+        let (comments, hold) = {
+            let mut state = self.state.lock();
+            let hold = state.held_comment_lists.pop_front();
+            let comments = state
+                .comments
+                .iter()
+                .filter(|(owner, issue, _)| owner == repository && *issue == number)
+                .map(|(_, _, comment)| comment.clone())
+                .collect();
+            (comments, hold)
+        };
         let page = self.page(comments, cursor);
-        self.answer(|_| page)
+        held_until(hold, self.answer(|_| page))
     }
 
     fn add_comment(
@@ -1289,9 +1330,10 @@ impl GithubBackend for FakeGithubBackend {
         project_id: String,
         cursor: Option<String>,
     ) -> GithubFuture<Page<ProjectV2Item>> {
-        let (items, stuck, empty, scripted) = {
+        let (items, stuck, empty, scripted, hold) = {
             let mut state = self.state.lock();
             state.project_requests += 1;
+            let hold = state.held_project_item_lists.pop_front();
             let scripted = state.scripted_project_item_cursors.pop_front();
             let empty = (state.empty_project_item_pages > 0).then(|| {
                 state.empty_project_item_pages -= 1;
@@ -1308,29 +1350,35 @@ impl GithubBackend for FakeGithubBackend {
                 .filter(|(project, _)| *project == project_id)
                 .map(|(_, item)| item.clone())
                 .collect();
-            (items, stuck, empty, scripted)
+            (items, stuck, empty, scripted, hold)
         };
         if let Some(next_cursor) = scripted {
-            return self.answer(move |_| {
-                Ok(Page {
-                    items: Vec::new(),
-                    next_cursor: Some(next_cursor),
-                })
-            });
+            return held_until(
+                hold,
+                self.answer(move |_| {
+                    Ok(Page {
+                        items: Vec::new(),
+                        next_cursor: Some(next_cursor),
+                    })
+                }),
+            );
         }
         if let Some(next_cursor) = empty {
-            return self.answer(move |_| {
-                Ok(Page {
-                    items: Vec::new(),
-                    next_cursor: Some(next_cursor),
-                })
-            });
+            return held_until(
+                hold,
+                self.answer(move |_| {
+                    Ok(Page {
+                        items: Vec::new(),
+                        next_cursor: Some(next_cursor),
+                    })
+                }),
+            );
         }
         let mut page = self.page(items, cursor.clone());
         if stuck && let Ok(page) = &mut page {
             page.next_cursor = Some(cursor.unwrap_or_else(|| "0".to_string()));
         }
-        self.answer(|_| page)
+        held_until(hold, self.answer(|_| page))
     }
 
     fn project_details(&self, project_id: String) -> GithubFuture<ProjectDetails> {
@@ -1358,7 +1406,12 @@ impl GithubBackend for FakeGithubBackend {
             field_id.clone(),
             value.clone(),
         );
-        self.write(write, |state| {
+        let applied_failure = self.state.lock().applied_project_field_failures.pop_front();
+        let (applied_failure, hold) = match applied_failure {
+            Some((failure, hold)) => (Some(failure), Some(hold)),
+            None => (None, None),
+        };
+        let answer = self.write(write, |state| {
             if let Some(failure) = state.project_write_failures.pop_front() {
                 return Err(failure);
             }
@@ -1377,8 +1430,9 @@ impl GithubBackend for FakeGithubBackend {
                 item.field_values
                     .push(ProjectFieldValue { field_id, value });
             }
-            Ok(())
-        })
+            applied_failure.map_or(Ok(()), Err)
+        });
+        held_until(hold, answer)
     }
 
     fn move_project_item(

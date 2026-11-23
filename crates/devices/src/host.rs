@@ -184,6 +184,14 @@ pub fn ensure_absolute_program(invocation: &ToolInvocation) -> Result<(), ToolFa
 /// it) once it exits. Cancelled, never settled, when its exit cannot be known.
 pub type DetachedExit = futures::channel::oneshot::Receiver<Option<i32>>;
 
+/// A tool started by [`ToolRunner::spawn_detached`].
+#[derive(Debug)]
+pub struct DetachedTool {
+    /// Also the id of the tool's process group on Unix, where it leads its own.
+    pub process_id: u32,
+    pub exit: DetachedExit,
+}
+
 #[async_trait]
 pub trait ToolRunner: Send + Sync {
     /// Runs the tool to completion. A non-zero exit is an `Ok` output; only a
@@ -195,7 +203,13 @@ pub trait ToolRunner: Send + Sync {
         &self,
         invocation: ToolInvocation,
         log_file: &Path,
-    ) -> anyhow::Result<DetachedExit>;
+    ) -> anyhow::Result<DetachedTool>;
+
+    /// Asks every process of the group that `process_id` leads (a detached
+    /// tool's, on Unix) to end. A group that is already gone is success.
+    /// Blocks only for the signal itself, but callers run it off the main
+    /// thread anyway.
+    fn terminate_process_group(&self, process_id: u32) -> anyhow::Result<()>;
 }
 
 pub trait HostSystem: Send + Sync {
@@ -216,8 +230,11 @@ pub trait HostSystem: Send + Sync {
     /// At most the last `max_bytes` of the file.
     fn read_file_tail(&self, path: &Path, max_bytes: u64) -> std::io::Result<String>;
     fn read_dir_names(&self, path: &Path) -> std::io::Result<Vec<String>>;
+    fn file_len(&self, path: &Path) -> std::io::Result<u64>;
     fn remove_file(&self, path: &Path) -> std::io::Result<()>;
-    /// A path no other caller is handed, for a tool to write its output to.
-    fn temp_file_path(&self, stem: &str) -> PathBuf;
+    /// A new empty folder only this user can open, so a tool's output in it
+    /// cannot be planted or read by anyone else.
+    fn create_temp_dir(&self, stem: &str) -> std::io::Result<PathBuf>;
+    fn remove_dir_all(&self, path: &Path) -> std::io::Result<()>;
     fn available_memory_bytes(&self) -> Option<u64>;
 }

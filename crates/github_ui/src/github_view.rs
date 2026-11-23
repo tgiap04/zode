@@ -15,14 +15,20 @@ use project::Project;
 
 use crate::device_flow::{poll_for_token, request_device_code};
 use crate::github_view_session::{
-    HeldSessions, SessionAccount, SessionStamp, held_session, hold_session, is_refused,
-    release_session, report_if_revoked,
+    HeldSessions, SessionAccount, SessionStamp, disconnect_everywhere, held_session, hold_session,
+    is_disconnected, is_refused, release_session, report_if_revoked,
 };
 use crate::issues::{IssueList, IssueListEvent};
 use crate::projects::ProjectsSection;
 use crate::pull_requests::PullRequestList;
-use crate::repo_picker::{choose_active, project_repositories};
-use crate::sign_in::{GithubEnvironment, find_token, forget_signed_in_token, keep_signed_in_token};
+use crate::repo_picker::{can_change_repositories, choose_active, project_repositories};
+use crate::sign_in::{
+    GithubEnvironment, KeepOutcome, KeepTicket, abandon_keep, find_token, forget_signed_in_token,
+    keep_signed_in_token,
+};
+
+const TOKEN_NOT_KEPT: &str =
+    "The token could not be saved, so you will be asked to sign in again next time.";
 
 /// Whether this Zode owns the project's working tree. A collaborator's guest
 /// view must not change the host's files (checkout, branch switches).
@@ -156,6 +162,8 @@ pub struct GithubView {
     pub(crate) _pull_request_list_subscription: Option<Subscription>,
     /// Token lookup, sign-in, sign-out. Replacing it cancels the one before.
     auth_task: Option<Task<()>>,
+    /// The keychain write of a token this tab's sign-in just got approved.
+    pending_keep: Option<KeepTicket>,
     /// The signed-in account check, kept apart from `auth_task` because the
     /// sign-in task is what starts it.
     session_task: Option<Task<()>>,
@@ -179,15 +187,22 @@ impl GithubView {
     pub fn new(project: Entity<Project>, cx: &mut Context<Self>) -> Self {
         let access = ProjectAccess::of(project.read(cx));
         let git_store = project.read(cx).git_store().clone();
-        let subscription = cx.subscribe(&git_store, |this, _, _event, cx| {
-            this.refresh_repositories(cx);
+        let subscription = cx.subscribe(&git_store, |this, _, event, cx| {
+            if can_change_repositories(event) {
+                this.refresh_repositories(cx);
+            }
         });
         // A list or detail tab that GitHub refused says so through the
         // held sessions; the account shown must follow.
         let session_subscription = cx.observe_global::<HeldSessions>(|this, cx| {
             let holder = cx.entity_id();
-            if held_session(holder, cx).is_some_and(|held| is_refused(&held, cx)) {
+            let Some(held) = held_session(holder, cx) else {
+                return;
+            };
+            if is_refused(&held, cx) {
                 this.token_refused(cx);
+            } else if is_disconnected(&held, cx) {
+                this.account_disconnected(cx);
             }
         });
         let holder = cx.entity_id();
@@ -214,6 +229,7 @@ impl GithubView {
             pull_request_list: None,
             _pull_request_list_subscription: None,
             auth_task: None,
+            pending_keep: None,
             session_task: None,
             repository_task: None,
             _subscriptions: vec![subscription, session_subscription, release_subscription],
@@ -459,15 +475,31 @@ impl GithubView {
                     return;
                 }
             };
-            let Ok(keep) = this.update(cx, |_, cx| {
-                keep_signed_in_token(&environment, secret.clone(), cx)
+            let Ok(keep) = this.update(cx, |this, cx| {
+                let keep = keep_signed_in_token(&environment, secret.clone(), cx);
+                this.pending_keep = keep.ticket;
+                keep.outcome
             }) else {
                 return;
             };
-            let note = keep.await;
+            let outcome = keep.await.unwrap_or_else(|_| KeepOutcome::Kept {
+                note: Some(TOKEN_NOT_KEPT.to_string()),
+            });
             this.update(cx, |this, cx| {
-                this.notice = note.map(SharedString::from);
-                this.start_session(GithubToken::new(&secret, TokenSource::Keychain), cx);
+                this.pending_keep = None;
+                match outcome {
+                    KeepOutcome::Kept { note } => {
+                        this.notice = note.map(SharedString::from);
+                        this.start_session(GithubToken::new(&secret, TokenSource::Keychain), cx);
+                    }
+                    KeepOutcome::Abandoned => {
+                        this.signed_out_with(
+                            "Signed out: the GitHub account was disconnected while signing in."
+                                .to_string(),
+                            cx,
+                        );
+                    }
+                }
             })
             .ok();
         }));
@@ -475,6 +507,11 @@ impl GithubView {
 
     pub fn cancel_sign_in(&mut self, cx: &mut Context<Self>) {
         self.auth_task = None;
+        // A token the user approved here may already be on its way to the
+        // keychain; another window's is none of this one's business.
+        if let Some(ticket) = self.pending_keep.take() {
+            abandon_keep(ticket, cx);
+        }
         self.set_auth(AuthState::SignedOut { notice: None }, cx);
     }
 
@@ -521,12 +558,8 @@ impl GithubView {
         if let Some(page) = revoke_page(cx) {
             cx.open_url(&page);
         }
-        self.session_task = None;
-        self.repository_task = None;
-        self.visibility.clear();
-        self.repository_error = None;
-        self.rate_limits = RateLimits::default();
-        self.notice = None;
+        disconnect_everywhere(cx.entity_id(), cx);
+        self.forget_account();
         self.signed_out_with(
             "Disconnected. Revoke Zode's access on GitHub to end the token for good.".to_string(),
             cx,
@@ -542,6 +575,30 @@ impl GithubView {
                 .ok();
             }
         }));
+    }
+
+    /// What this tab learned of the account it held, dropped.
+    fn forget_account(&mut self) {
+        self.session_task = None;
+        self.repository_task = None;
+        self.visibility.clear();
+        self.repository_error = None;
+        self.rate_limits = RateLimits::default();
+        self.notice = None;
+    }
+
+    /// Another window disconnected the account this tab holds.
+    fn account_disconnected(&mut self, cx: &mut Context<Self>) {
+        match &self.auth {
+            AuthState::SignedIn(_) => {
+                self.forget_account();
+                self.signed_out_with(
+                    "Disconnected in another window. Sign in again to use GitHub here.".to_string(),
+                    cx,
+                );
+            }
+            _ => release_session(cx.entity_id(), cx),
+        }
     }
 
     pub fn reload(&mut self, cx: &mut Context<Self>) {

@@ -7,9 +7,12 @@ use futures::channel::oneshot;
 use parking_lot::Mutex;
 
 use crate::host::{
-    DetachedExit, HostOs, HostSystem, ToolFailure, ToolInvocation, ToolOutput, ToolRunner,
+    DetachedTool, HostOs, HostSystem, ToolFailure, ToolInvocation, ToolOutput, ToolRunner,
     ensure_absolute_program,
 };
+
+/// The id the first detached tool gets; each later one is one higher.
+pub const FIRST_PROCESS_ID: u32 = 4000;
 
 type ScriptKey = (PathBuf, Vec<String>);
 
@@ -33,6 +36,8 @@ struct FakeState {
     detached_exits: Vec<Option<oneshot::Sender<Option<i32>>>>,
     reads: Vec<PathBuf>,
     available_memory: Option<u64>,
+    terminated_groups: Vec<u32>,
+    terminate_failure: Option<String>,
 }
 
 impl FakeHost {
@@ -51,6 +56,8 @@ impl FakeHost {
                 detached_exits: Vec::new(),
                 reads: Vec::new(),
                 available_memory: Some(16 * 1024 * 1024 * 1024),
+                terminated_groups: Vec::new(),
+                terminate_failure: None,
             }),
         }
     }
@@ -150,6 +157,16 @@ impl FakeHost {
         }
     }
 
+    /// The process groups asked to end, in order.
+    pub fn terminated_groups(&self) -> Vec<u32> {
+        self.state.lock().terminated_groups.clone()
+    }
+
+    /// Makes every later `terminate_process_group` fail with `message`.
+    pub fn fail_terminate(&self, message: &str) {
+        self.state.lock().terminate_failure = Some(message.to_string());
+    }
+
     pub fn reads(&self) -> Vec<PathBuf> {
         self.state.lock().reads.clone()
     }
@@ -180,15 +197,25 @@ impl ToolRunner for FakeHost {
         &self,
         invocation: ToolInvocation,
         log_file: &Path,
-    ) -> anyhow::Result<DetachedExit> {
+    ) -> anyhow::Result<DetachedTool> {
         let mut state = self.state.lock();
         state.invocations.push(invocation.clone());
         ensure_absolute_program(&invocation)?;
         state.files.insert(log_file.to_path_buf(), String::new());
         state.detached.push((invocation, log_file.to_path_buf()));
         let (sender, exit) = oneshot::channel();
+        let process_id = FIRST_PROCESS_ID + state.detached_exits.len() as u32;
         state.detached_exits.push(Some(sender));
-        Ok(exit)
+        Ok(DetachedTool { process_id, exit })
+    }
+
+    fn terminate_process_group(&self, process_id: u32) -> anyhow::Result<()> {
+        let mut state = self.state.lock();
+        state.terminated_groups.push(process_id);
+        match &state.terminate_failure {
+            Some(message) => Err(anyhow::anyhow!("{message}")),
+            None => Ok(()),
+        }
     }
 }
 
@@ -271,6 +298,15 @@ impl HostSystem for FakeHost {
         Ok(names)
     }
 
+    fn file_len(&self, path: &Path) -> io::Result<u64> {
+        self.state
+            .lock()
+            .files
+            .get(path)
+            .map(|contents| contents.len() as u64)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+    }
+
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         self.state
             .lock()
@@ -280,8 +316,18 @@ impl HostSystem for FakeHost {
             .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
     }
 
-    fn temp_file_path(&self, stem: &str) -> PathBuf {
-        PathBuf::from("/fake-temp").join(stem)
+    fn create_temp_dir(&self, stem: &str) -> io::Result<PathBuf> {
+        Ok(PathBuf::from("/fake-temp").join(stem))
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        let mut state = self.state.lock();
+        let before = state.files.len();
+        state.files.retain(|file, _| !file.starts_with(path));
+        if state.files.len() == before {
+            return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
+        Ok(())
     }
 
     fn available_memory_bytes(&self) -> Option<u64> {

@@ -1,8 +1,8 @@
-use gpui::{Context, IntoElement};
+use gpui::{Context, IntoElement, list};
 use ui::prelude::*;
 
 use crate::projects::drag_state::{CardDrop, DraggedProjectCard};
-use crate::projects::project_layout::{BoardColumn, board_columns};
+use crate::projects::project_layout::BoardColumn;
 use crate::projects::projects_section::ProjectsSection;
 use crate::untrusted_text::reveal_hidden_characters;
 
@@ -10,10 +10,9 @@ const COLUMN_WIDTH: f32 = 18.;
 
 impl ProjectsSection {
     pub(crate) fn render_board(&self, cx: &mut Context<Self>) -> AnyElement {
-        let Some(details) = self.details() else {
+        let Some(columns) = self.columns() else {
             return div().into_any_element();
         };
-        let columns = board_columns(self.view(), details, self.items());
         h_flex()
             .id("github-project-board")
             .key_context("GithubProjectBoard")
@@ -38,22 +37,38 @@ impl ProjectsSection {
             .overflow_x_scroll()
             .children(
                 columns
-                    .into_iter()
+                    .iter()
                     .enumerate()
                     .map(|(position, column)| self.render_column(position, column, cx)),
             )
             .into_any_element()
     }
 
+    /// The card at `ix` of the column at `position`, spaced from the next.
+    fn render_column_card(&self, position: usize, ix: usize, cx: &mut Context<Self>) -> AnyElement {
+        let card = self
+            .columns()
+            .and_then(|columns| columns.get(position)?.items.get(ix).copied())
+            .and_then(|index| Some((index, self.items().get(index)?)));
+        match card {
+            Some((index, item)) => div()
+                .pb_1()
+                .child(self.render_card(index, item, cx))
+                .into_any_element(),
+            None => div().into_any_element(),
+        }
+    }
+
     fn render_column(
         &self,
         position: usize,
-        column: BoardColumn,
+        column: &BoardColumn,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = cx.theme().colors();
         let drop_background = colors.drop_target_background;
         let key = column.key.clone();
+        let cards = self.column_list(&column.key, column.items.len());
         v_flex()
             .w(rems(COLUMN_WIDTH))
             .flex_none()
@@ -76,23 +91,28 @@ impl ProjectsSection {
                     ),
             )
             .child(
-                v_flex()
+                div()
                     .id(("github-project-column", position))
                     .debug_selector(move || format!("github-project-column-{position}"))
                     .flex_1()
                     .min_h_0()
-                    .gap_1()
-                    .overflow_y_scroll()
                     .drag_over::<DraggedProjectCard>(move |style, _, _, _| {
                         style.bg(drop_background)
                     })
                     .on_drop(cx.listener(move |this, card: &DraggedProjectCard, _, cx| {
                         this.drop_card(card, CardDrop::Column(key.clone()), cx)
                     }))
-                    .children(column.items.into_iter().filter_map(|index| {
-                        let item = self.items().get(index)?;
-                        Some(self.render_card(index, item, cx))
-                    })),
+                    // Only the cards in view are drawn; a column may hold
+                    // hundreds.
+                    .child(
+                        list(
+                            cards,
+                            cx.processor(move |this, ix, _window, cx| {
+                                this.render_column_card(position, ix, cx)
+                            }),
+                        )
+                        .size_full(),
+                    ),
             )
             .into_any_element()
     }

@@ -1,5 +1,10 @@
+use std::ops::Range;
+
 use github::{IssueStateFilter, Label as IssueLabel};
-use gpui::{AppContext as _, Context, Entity, Hsla, IntoElement, Render, Subscription, Window, px};
+use gpui::{
+    AppContext as _, Context, Entity, Hsla, IntoElement, Render, Subscription, Window, px,
+    uniform_list,
+};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use time_format::TimestampFormat;
@@ -9,8 +14,10 @@ use ui::{
 };
 use ui_input::{ErasedEditorEvent, InputField};
 
+use crate::issues::epic_tree::ListEntry;
 use crate::issues::issue_filters::{MineFilter, label_color};
 use crate::issues::issue_list::IssueList;
+use crate::issues::issue_row_render::{ROW_HEIGHT, render_status_entry};
 use crate::untrusted_text::reveal_hidden_characters;
 
 pub(crate) const BAR_HEIGHT: f32 = 32.;
@@ -199,6 +206,7 @@ impl IssueList {
     fn render_label_filter(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let current = self.filters().label.clone();
         let labels = self.labels().to_vec();
+        let note = self.options_note();
         let dot = current.as_ref().and_then(|name| {
             labels
                 .iter()
@@ -231,7 +239,10 @@ impl IssueList {
                             .ok();
                     });
                 }
-                menu
+                match note {
+                    Some(note) => menu.separator().label(note),
+                    None => menu,
+                }
             }
         });
         let text = current.as_deref().map_or("Label".to_string(), |label| {
@@ -255,6 +266,7 @@ impl IssueList {
             .as_ref()
             .map(|milestone| milestone.number);
         let milestones = self.milestones().to_vec();
+        let note = self.options_note();
         let this = cx.entity().downgrade();
         let menu = ContextMenu::build(window, cx, {
             move |menu, _, _| {
@@ -286,7 +298,10 @@ impl IssueList {
                         },
                     );
                 }
-                menu
+                match note {
+                    Some(note) => menu.separator().label(note),
+                    None => menu,
+                }
             }
         });
         let text = self
@@ -431,21 +446,40 @@ impl IssueList {
     }
 }
 
+impl IssueList {
+    /// The lines `range` of the list, which is all the list draws: only
+    /// what is in view is built.
+    fn render_entries(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let now = OffsetDateTime::now_utc();
+        let entries = self.ensure_rows();
+        range
+            .map(|index| match entries.get(index) {
+                Some(ListEntry::Row(row)) => self.render_row(index, row, now, cx),
+                Some(ListEntry::Status { depth, text }) => render_status_entry(*depth, text),
+                None => self
+                    .render_load_more(cx)
+                    .unwrap_or_else(|| div().h(px(ROW_HEIGHT)).into_any_element()),
+            })
+            .collect()
+    }
+}
+
 impl Render for IssueList {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let now = OffsetDateTime::now_utc();
-        let mut rows = Vec::new();
-        for (index, row) in self.tree_rows().iter().enumerate() {
-            rows.push(self.render_row(index, row, now, cx));
-            rows.extend(self.render_children_status(row));
-        }
-        let placeholder = self.render_placeholder(cx);
+        let entries = self.ensure_rows();
+        // "Load more" is the last line of the list.
+        let line_count = entries.len() + usize::from(self.has_more());
+        let hidden_selected =
+            self.hidden_selected_among(entries.iter().filter_map(|entry| match entry {
+                ListEntry::Row(row) if row.depth == 0 => Some(row.issue.number),
+                _ => None,
+            }));
+        let placeholder = self.render_placeholder(entries.is_empty(), cx);
         let toolbar = self.render_toolbar(window, cx);
-        let selection_bar = self.render_selection_bar(window, cx);
+        let selection_bar = self.render_selection_bar(hidden_selected, window, cx);
         let messages = self.render_write_messages();
         let context_menu = self.render_context_menu();
         let search_caption = self.render_search_caption(cx);
-        let load_more = self.render_load_more(cx);
         v_flex()
             .size_full()
             .child(toolbar)
@@ -454,14 +488,18 @@ impl Render for IssueList {
             })
             .children(selection_bar)
             .children(search_caption)
+            .children(placeholder.map(|placeholder| div().flex_none().child(placeholder)))
             .child(
-                v_flex()
-                    .id("github-issue-rows")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .children(placeholder)
-                    .children(rows)
-                    .children(load_more),
+                div().flex_1().min_h_0().child(
+                    uniform_list(
+                        "github-issue-rows",
+                        line_count,
+                        cx.processor(|this, range: Range<usize>, _window, cx| {
+                            this.render_entries(range, cx)
+                        }),
+                    )
+                    .size_full(),
+                ),
             )
             .children(context_menu)
     }

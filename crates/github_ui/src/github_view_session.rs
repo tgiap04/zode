@@ -3,12 +3,13 @@
 //! Each GitHub tab (one per workspace) holds at most one signed-in account:
 //! a login and the token behind it. What it makes is stamped with that
 //! account and the workspace's project, and may write only while a GitHub
-//! tab of that workspace still holds the same account. Disconnect, a refused
-//! token or a switch to another account ends it there. A check that fails,
-//! or another window signing in or out, says nothing about this token and
-//! ends nothing.
+//! tab of that workspace still holds the same account. A switch to another
+//! account ends it there. A refused token or a disconnect ends the account
+//! everywhere it is held: every tab holding it moves to "token refused" or
+//! signed out, and what they made writes nothing. A check that fails, or
+//! another window signing in, says nothing about this token and ends nothing.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use github::{GithubBackend, GithubError, TokenIdentity};
@@ -41,23 +42,32 @@ impl SessionStamp {
     }
 }
 
+/// Why an account's sessions ended in every tab that holds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ended {
+    /// GitHub refused the token.
+    Refused,
+    /// The user disconnected the account, in any window.
+    Disconnected,
+}
+
 #[derive(Default)]
 pub(crate) struct HeldSessions {
     /// Each GitHub tab holding a session, by the tab's entity.
     held: HashMap<EntityId, SessionStamp>,
-    /// Accounts whose token GitHub refused. Only the tabs holding one move
-    /// to "token refused"; an entry goes once no tab holds it.
-    refused: HashSet<SessionAccount>,
+    /// Accounts ended everywhere. Only the tabs holding one move to "token
+    /// refused" or signed out; an entry goes once no tab holds it.
+    ended: HashMap<SessionAccount, Ended>,
 }
 
 impl Global for HeldSessions {}
 
 /// Whether what was made under `stamp` may still read and write: its
-/// workspace's GitHub tab holds the same account, and GitHub has not
-/// refused the token.
+/// workspace's GitHub tab holds the same account, and neither GitHub nor the
+/// user has ended it.
 pub fn is_live_session(stamp: &SessionStamp, cx: &App) -> bool {
     cx.try_global::<HeldSessions>().is_some_and(|sessions| {
-        !sessions.refused.contains(&stamp.account)
+        !sessions.ended.contains_key(&stamp.account)
             && sessions.held.values().any(|held| held == stamp)
     })
 }
@@ -77,12 +87,12 @@ pub(crate) fn held_session(holder: EntityId, cx: &App) -> Option<SessionStamp> {
 pub(crate) fn hold_session(holder: EntityId, stamp: SessionStamp, cx: &mut App) {
     if let Some(sessions) = cx.try_global::<HeldSessions>()
         && sessions.held.get(&holder) == Some(&stamp)
-        && !sessions.refused.contains(&stamp.account)
+        && !sessions.ended.contains_key(&stamp.account)
     {
         return;
     }
     let sessions = cx.default_global::<HeldSessions>();
-    sessions.refused.remove(&stamp.account);
+    sessions.ended.remove(&stamp.account);
     sessions.held.insert(holder, stamp);
 }
 
@@ -94,15 +104,37 @@ pub(crate) fn release_session(holder: EntityId, cx: &mut App) {
     if !holds {
         return;
     }
-    let HeldSessions { held, refused } = cx.global_mut::<HeldSessions>();
+    let HeldSessions { held, ended } = cx.global_mut::<HeldSessions>();
     held.remove(&holder);
-    refused.retain(|account| held.values().any(|stamp| &stamp.account == account));
+    ended.retain(|account, _| held.values().any(|stamp| &stamp.account == account));
+}
+
+fn ended_by(stamp: &SessionStamp, cx: &App) -> Option<Ended> {
+    cx.try_global::<HeldSessions>()
+        .and_then(|sessions| sessions.ended.get(&stamp.account).copied())
 }
 
 /// Whether GitHub refused the token of `stamp`'s account.
 pub(crate) fn is_refused(stamp: &SessionStamp, cx: &App) -> bool {
-    cx.try_global::<HeldSessions>()
-        .is_some_and(|sessions| sessions.refused.contains(&stamp.account))
+    ended_by(stamp, cx) == Some(Ended::Refused)
+}
+
+/// Whether the user disconnected `stamp`'s account, in this window or another.
+pub(crate) fn is_disconnected(stamp: &SessionStamp, cx: &App) -> bool {
+    ended_by(stamp, cx) == Some(Ended::Disconnected)
+}
+
+/// The user disconnected the account `holder` holds. The token is gone for
+/// good, so every other tab holding the same account ends with this one:
+/// they would otherwise keep writing with a token the user just let go.
+pub(crate) fn disconnect_everywhere(holder: EntityId, cx: &mut App) {
+    let Some(stamp) = held_session(holder, cx) else {
+        return;
+    };
+    cx.global_mut::<HeldSessions>()
+        .ended
+        .entry(stamp.account)
+        .or_insert(Ended::Disconnected);
 }
 
 /// Tells the GitHub tabs that GitHub refused the token behind `stamp`, from
@@ -114,7 +146,7 @@ pub fn report_if_revoked(error: &GithubError, stamp: &SessionStamp, cx: &mut App
         return;
     }
     let news = cx.try_global::<HeldSessions>().is_some_and(|sessions| {
-        !sessions.refused.contains(&stamp.account)
+        !sessions.ended.contains_key(&stamp.account)
             && sessions
                 .held
                 .values()
@@ -122,8 +154,8 @@ pub fn report_if_revoked(error: &GithubError, stamp: &SessionStamp, cx: &mut App
     });
     if news {
         cx.global_mut::<HeldSessions>()
-            .refused
-            .insert(stamp.account.clone());
+            .ended
+            .insert(stamp.account.clone(), Ended::Refused);
     }
 }
 

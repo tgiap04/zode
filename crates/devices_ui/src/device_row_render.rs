@@ -48,6 +48,7 @@ impl DevicesPanel {
             .collect::<Vec<_>>()
             .join(" · ");
         let error = self.device_errors.get(&device.key).cloned();
+        let has_stray = self.stray_emulators.contains_key(&device.key);
         let name_row = h_flex()
             .gap_1()
             .child(Label::new(device.name.clone()).truncate())
@@ -118,6 +119,29 @@ impl DevicesPanel {
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.open_log(log_file.clone(), window, cx)
                                     })),
+                            )
+                        })
+                        .when(has_stray, |line| {
+                            let key = device.key.clone();
+                            let element_id = format!("{id}-stop-process");
+                            line.child(
+                                div()
+                                    .debug_selector({
+                                        let element_id = element_id.clone();
+                                        move || element_id
+                                    })
+                                    .child(
+                                        Button::new(
+                                            SharedString::from(element_id),
+                                            "Stop emulator",
+                                        )
+                                        .label_size(LabelSize::Small)
+                                        .on_click(
+                                            cx.listener(move |this, _, _window, cx| {
+                                                this.stop_stray_emulator(&key, cx)
+                                            }),
+                                        ),
+                                    ),
                             )
                         }),
                 )

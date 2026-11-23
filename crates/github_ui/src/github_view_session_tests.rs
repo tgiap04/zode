@@ -506,7 +506,7 @@ async fn a_token_refused_in_one_window_refuses_it_in_another_holding_it(cx: &mut
 }
 
 #[gpui::test]
-async fn disconnecting_one_window_leaves_another_holding_the_same_token_writing(
+async fn disconnecting_one_window_signs_out_another_holding_the_same_token(
     cx: &mut TestAppContext,
 ) {
     let (workspace, view, cx) = signed_in_tab(keychain_setup(), cx).await;
@@ -533,14 +533,14 @@ async fn disconnecting_one_window_leaves_another_holding_the_same_token_writing(
         Vec::new(),
         "the disconnected tab writes nothing"
     );
-    assert!(!other_detail.read_with(&mut other_cx, |detail, cx| detail.session_ended(cx)));
+    assert!(other_detail.read_with(&mut other_cx, |detail, cx| detail.session_ended(cx)));
     assert_eq!(
-        other_fake.writes().len(),
-        1,
-        "the other window's tab still writes with the same token"
+        other_fake.writes(),
+        Vec::new(),
+        "the token is disconnected, so the other window's tab writes nothing either"
     );
     assert!(matches!(
         auth(&other, &mut other_cx),
-        AuthState::SignedIn(_)
+        AuthState::SignedOut { .. }
     ));
 }

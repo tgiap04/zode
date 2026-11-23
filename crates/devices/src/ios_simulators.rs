@@ -27,7 +27,7 @@ struct SimulatorEntry {
     device_type_identifier: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct RuntimeList {
     runtimes: Vec<RuntimeEntry>,
 }
@@ -224,6 +224,29 @@ pub(crate) async fn read_simulators(runner: &dyn ToolRunner) -> SectionState {
             message: format!("{error:#}"),
         },
     }
+}
+
+/// Just one simulator, for following it: simctl filters its listing by a
+/// search term, and the runtimes only add a family and a version label the
+/// row already has. The row for a device simctl does not list is `None`.
+pub(crate) async fn read_simulator(
+    runner: &dyn ToolRunner,
+    udid: &str,
+) -> Result<Option<Device>, String> {
+    let output = run_simctl(
+        runner,
+        ToolInvocation::new(
+            XCRUN,
+            ["simctl", "list", "devices", "available", "-j", udid],
+        ),
+    )
+    .await;
+    let devices = successful_stdout(output)?;
+    let devices = simulators_with_runtimes(&devices, &RuntimeList::default())
+        .map_err(|error| format!("{error:#}"))?;
+    Ok(devices
+        .into_iter()
+        .find(|device| device.key == DeviceKey::Simulator(udid.to_string())))
 }
 
 fn successful_stdout(result: Result<ToolOutput, ToolFailure>) -> Result<String, String> {

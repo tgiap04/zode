@@ -5,6 +5,7 @@ use github::{
 };
 use gpui::{Entity, TestAppContext, VisualTestContext};
 
+use crate::github_view::AuthState;
 use crate::issues::issues_test_support::repository;
 use crate::projects::field_editor_tests::{rich_backend, writable};
 use crate::projects::projects_section_tests::{PROJECT, projects_tab, section};
@@ -335,4 +336,118 @@ async fn a_failed_removal_does_not_double_an_item_read_again_meanwhile(cx: &mut 
     release.send(()).ok();
     cx.run_until_parked();
     assert_eq!(item_ids(&section, cx), vec!["PVTI_7", "PVTI_9"]);
+}
+
+/// A read from the start swaps in its staged items once whole; one that
+/// began before an add must not make the added item vanish.
+#[gpui::test]
+async fn an_item_added_while_the_project_is_read_again_stays(cx: &mut TestAppContext) {
+    let backend = Arc::new(rich_backend().with_issue(&repository(), fake_issue(12, "Login fails")));
+    let (_workspace, view, cx) = projects_tab(backend.clone(), writable(), cx).await;
+    let section = section(&view, cx);
+    section.update(cx, |section, cx| {
+        section.open_add_item(cx);
+        section.search_add_item("#12".into(), cx);
+    });
+    cx.run_until_parked();
+    let found = section.read_with(cx, |section, _| {
+        section.add_item_picker().expect("picker").candidates[0].clone()
+    });
+
+    let release = backend.hold_next_project_item_list();
+    section.update(cx, |section, cx| section.reread_project(cx));
+    cx.run_until_parked();
+    section.update(cx, |section, cx| section.add_item(found, cx));
+    cx.run_until_parked();
+    assert!(has_item(&section, "PVTI_I_12", cx));
+
+    release.send(()).ok();
+    cx.run_until_parked();
+    assert!(
+        has_item(&section, "PVTI_I_12", cx),
+        "the read began before the add and cannot have it"
+    );
+    assert_eq!(item_ids(&section, cx).len(), 3);
+}
+
+/// The same read must not bring back an item whose removal succeeded.
+#[gpui::test]
+async fn an_item_removed_while_the_project_is_read_again_stays_removed(cx: &mut TestAppContext) {
+    let backend = Arc::new(rich_backend());
+    let (_workspace, view, cx) = projects_tab(backend.clone(), writable(), cx).await;
+    let section = section(&view, cx);
+
+    let release = backend.hold_next_project_item_list();
+    section.update(cx, |section, cx| section.reread_project(cx));
+    cx.run_until_parked();
+    section.update(cx, |section, cx| {
+        section.request_remove_item("PVTI_7", cx);
+        section.confirm_remove_item(cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(item_ids(&section, cx), vec!["PVTI_9"]);
+
+    release.send(()).ok();
+    cx.run_until_parked();
+    assert_eq!(
+        item_ids(&section, cx),
+        vec!["PVTI_9"],
+        "the read began before the removal and still lists the item"
+    );
+}
+
+/// A failed removal is not a removal: the read that saw the item keeps it.
+#[gpui::test]
+async fn an_item_whose_removal_failed_stays_when_the_read_lands(cx: &mut TestAppContext) {
+    let backend = Arc::new(rich_backend());
+    let (_workspace, view, cx) = projects_tab(backend.clone(), writable(), cx).await;
+    let section = section(&view, cx);
+    backend.fail_next_project_write(GithubError::NotFound);
+
+    let release = backend.hold_next_project_item_list();
+    section.update(cx, |section, cx| section.reread_project(cx));
+    cx.run_until_parked();
+    section.update(cx, |section, cx| {
+        section.request_remove_item("PVTI_7", cx);
+        section.confirm_remove_item(cx);
+    });
+    cx.run_until_parked();
+    release.send(()).ok();
+    cx.run_until_parked();
+    assert_eq!(item_ids(&section, cx), vec!["PVTI_7", "PVTI_9"]);
+}
+
+/// Only "no such pull request" sends a number on to the issues; any other
+/// failure of the lookup is told as it is and a refused token is reported.
+#[gpui::test]
+async fn a_failed_pull_request_lookup_is_told_not_taken_for_an_issue(cx: &mut TestAppContext) {
+    let backend = Arc::new(rich_backend().with_issue(&repository(), fake_issue(12, "Login fails")));
+    let (_workspace, view, cx) = projects_tab(backend.clone(), writable(), cx).await;
+    let section = section(&view, cx);
+    section.update(cx, |section, cx| section.open_add_item(cx));
+
+    backend.set_failure(Some(GithubError::TokenRevoked));
+    section.update(cx, |section, cx| section.search_add_item("12".into(), cx));
+    cx.run_until_parked();
+    assert!(candidates(&section, cx).is_empty());
+    let message = section.read_with(cx, |section, _| {
+        section.add_item_message().map(str::to_string)
+    });
+    assert_eq!(
+        message.as_deref(),
+        Some(GithubError::TokenRevoked.to_string().as_str())
+    );
+    assert!(matches!(
+        view.read_with(cx, |view, _| view.auth().clone()),
+        AuthState::Revoked { .. }
+    ));
+
+    backend.set_failure(None);
+    section.update(cx, |section, cx| section.search_add_item("12".into(), cx));
+    cx.run_until_parked();
+    assert_eq!(
+        candidates(&section, cx),
+        vec![12],
+        "a number that is no pull request is an issue"
+    );
 }

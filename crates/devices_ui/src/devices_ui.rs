@@ -19,6 +19,7 @@ mod run_app_start;
 mod run_app_trust;
 mod run_task;
 mod run_terminals;
+mod stray_emulators;
 mod wireless_modal;
 mod wireless_modal_render;
 

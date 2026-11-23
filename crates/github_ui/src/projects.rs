@@ -11,6 +11,7 @@ mod create_project_render;
 mod drag_state;
 mod field_editor;
 mod field_editor_render;
+mod layout_cache;
 mod move_item;
 mod project_layout;
 mod project_reads;

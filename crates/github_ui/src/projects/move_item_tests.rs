@@ -200,6 +200,36 @@ async fn a_failed_move_does_not_undo_a_later_one_that_went_through(cx: &mut Test
     assert_eq!(column_of(&section, "PVTI_9", cx), todo());
 }
 
+/// A write that timed out may have reached GitHub. The card goes back to the
+/// last value known, but a read that saw the write applied is not overruled
+/// by that guess.
+#[gpui::test]
+async fn an_unknown_outcome_does_not_overrule_a_read_that_saw_the_move(cx: &mut TestAppContext) {
+    let backend = Arc::new(backend());
+    let (_workspace, view, cx) = projects_tab(backend.clone(), writable(), cx).await;
+    let section = section(&view, cx);
+    let release_write =
+        backend.fail_next_project_field_write_after_applying(GithubError::OutcomeUnknown {
+            message: "timed out".into(),
+        });
+    section.update(cx, |section, cx| section.move_item("PVTI_7", &done(), cx));
+    cx.run_until_parked();
+    let release_read = backend.hold_next_project_item_list();
+    section.update(cx, |section, cx| section.reread_project(cx));
+    cx.run_until_parked();
+
+    release_write.send(()).ok();
+    cx.run_until_parked();
+    assert_eq!(column_of(&section, "PVTI_7", cx), todo(), "rolled back");
+    release_read.send(()).ok();
+    cx.run_until_parked();
+    assert_eq!(
+        column_of(&section, "PVTI_7", cx),
+        done(),
+        "the read saw the move applied"
+    );
+}
+
 #[gpui::test]
 async fn a_missing_scope_on_write_puts_the_card_back_and_guides(cx: &mut TestAppContext) {
     let backend = Arc::new(backend());

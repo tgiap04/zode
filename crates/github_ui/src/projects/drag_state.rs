@@ -3,7 +3,7 @@
 use gpui::{Context, IntoElement, Render, SharedString, Window};
 use ui::prelude::*;
 
-use crate::projects::project_layout::{ColumnKey, board_columns};
+use crate::projects::project_layout::ColumnKey;
 use crate::projects::projects_section::ProjectsSection;
 
 #[derive(Clone, Debug)]
@@ -84,13 +84,13 @@ impl ProjectsSection {
         target_id: &str,
         moved_id: &str,
     ) -> Option<String> {
-        let details = self.details()?;
-        let ids = board_columns(self.view(), details, self.items())
-            .into_iter()
+        let columns = self.columns()?;
+        let ids = columns
+            .iter()
             .find(|candidate| &candidate.key == column)?
             .items
-            .into_iter()
-            .filter_map(|index| self.items().get(index).map(|item| item.id.clone()))
+            .iter()
+            .filter_map(|index| self.items().get(*index).map(|item| item.id.clone()))
             .filter(|id| id != moved_id)
             .collect::<Vec<_>>();
         let target = ids.iter().position(|id| id == target_id)?;
@@ -123,6 +123,7 @@ impl ProjectsSection {
             .and_then(|after_id| self.items.iter().position(|item| &item.id == after_id))
             .map_or(0, |after| after + 1);
         self.items.insert(to, moved);
+        self.layout_changed();
         self.move_message = None;
         let write =
             self.context

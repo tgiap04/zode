@@ -443,3 +443,156 @@ fn a_trusted_folder_inside_a_restricted_one_is_still_scanned() {
         vec![(Framework::Expo, inner.join("mobile"))]
     );
 }
+
+#[test]
+fn a_symlinked_example_folder_is_not_followed() {
+    let host = FakeHost::new(HostOs::MacOs);
+    host.add_file(
+        root().join("pubspec.yaml"),
+        "name: a_plugin\ndependencies:\n  flutter:\n    sdk: flutter\n",
+    );
+    add_flutter_app(&host, &root().join("example"));
+    host.add_symlink(root().join("example"));
+
+    assert_eq!(found(&detect(&host)), vec![]);
+    assert!(
+        host.reads()
+            .iter()
+            .all(|path| !path.starts_with(root().join("example"))),
+        "{:?}",
+        host.reads()
+    );
+}
+
+#[test]
+fn a_symlinked_gradle_module_is_not_followed() {
+    let host = FakeHost::new(HostOs::Linux);
+    host.add_file(root().join("gradlew"), "#!/bin/sh\n");
+    host.add_file(root().join("settings.gradle"), "include ':app'\n");
+    host.add_file(
+        root().join("app/build.gradle"),
+        "plugins { id 'com.android.application' }\n",
+    );
+    host.add_symlink(root().join("app"));
+
+    assert_eq!(found(&detect(&host)), vec![]);
+    assert!(
+        host.reads()
+            .iter()
+            .all(|path| !path.starts_with(root().join("app"))),
+        "{:?}",
+        host.reads()
+    );
+}
+
+#[test]
+fn a_name_from_a_project_file_cannot_carry_control_characters_or_run_on() {
+    let host = FakeHost::new(HostOs::MacOs);
+    let escaped = root().join("escaped");
+    add_expo_app(&host, &escaped);
+    host.add_file(
+        escaped.join("package.json"),
+        r#"{"name":"\u001b[2Jevil\u001b]0;pwned\u0007\nname\r\u0000","dependencies":{"expo":"~58.0.0"}}"#,
+    );
+    let long = root().join("long");
+    add_expo_app(&host, &long);
+    host.add_file(
+        long.join("package.json"),
+        format!(
+            r#"{{"name":"{}","dependencies":{{"expo":"~58.0.0"}}}}"#,
+            "n".repeat(500_000)
+        ),
+    );
+    let plain = root().join("plain");
+    add_flutter_app(&host, &plain);
+    host.add_file(
+        plain.join("pubspec.yaml"),
+        "name: \"fl\u{1b}[31mutter\u{7}_app\"\ndependencies:\n  flutter:\n    sdk: flutter\n",
+    );
+
+    let names: Vec<String> = detect(&host)
+        .into_iter()
+        .map(|project| project.display_name)
+        .collect();
+    assert_eq!(names.len(), 3, "{names:?}");
+    for name in &names {
+        assert!(
+            !name.chars().any(char::is_control),
+            "{name:?} must carry no control character"
+        );
+        assert!(name.chars().count() <= 80, "{} chars", name.chars().count());
+    }
+    assert_eq!(names[0], "[2Jevil]0;pwnedname");
+    assert!(
+        names[1].starts_with("nnnn") && names[1].ends_with('…'),
+        "{}",
+        names[1]
+    );
+    assert_eq!(names[2], "fl[31mutter_app");
+}
+
+#[test]
+fn a_name_cannot_carry_bidi_overrides_or_other_invisible_characters() {
+    use crate::run_app_detect::display_name;
+
+    for hidden in [
+        '\u{202A}',
+        '\u{202D}',
+        '\u{202E}',
+        '\u{2066}',
+        '\u{2067}',
+        '\u{2068}',
+        '\u{2069}',
+        '\u{200B}',
+        '\u{200F}',
+        '\u{2028}',
+        '\u{2060}',
+        '\u{2064}',
+        '\u{206F}',
+        '\u{00AD}',
+        '\u{3164}',
+        '\u{FEFF}',
+        '\u{FFA0}',
+        '\u{E0041}',
+    ] {
+        let name = display_name(Some(&format!("app{hidden}name")), Path::new("/x"));
+        assert_eq!(name, "appname", "U+{:04X}", hidden as u32);
+    }
+    // Ordinary non-ASCII text is not touched.
+    assert_eq!(
+        display_name(Some("ứng dụng 日本語"), Path::new("/x")),
+        "ứng dụng 日本語"
+    );
+}
+
+#[test]
+fn a_folder_name_with_control_characters_is_cleaned_too() {
+    let host = FakeHost::new(HostOs::MacOs);
+    add_expo_app(&host, &root().join("bad\u{1b}[2Jfolder"));
+    host.add_file(
+        root().join("bad\u{1b}[2Jfolder/package.json"),
+        r#"{"dependencies":{"expo":"~58.0.0"}}"#,
+    );
+    let names: Vec<String> = detect(&host)
+        .into_iter()
+        .map(|project| project.display_name)
+        .collect();
+    assert_eq!(names, ["bad[2Jfolder"]);
+}
+
+#[test]
+fn a_name_of_exactly_the_limit_is_kept_whole() {
+    use crate::run_app_detect::display_name;
+
+    let at_limit = "n".repeat(80);
+    assert_eq!(display_name(Some(&at_limit), Path::new("/x")), at_limit);
+    let over = "n".repeat(81);
+    let shown = display_name(Some(&over), Path::new("/x"));
+    assert_eq!(shown.chars().count(), 80);
+    assert!(shown.ends_with('…'));
+    // Cleaning can leave nothing; the folder name then stands in.
+    assert_eq!(
+        display_name(Some("\u{1b}\u{7}"), Path::new("/work/folder")),
+        "folder"
+    );
+}

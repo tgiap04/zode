@@ -99,7 +99,11 @@ pub trait CheckoutGit {
     /// one would be overwritten.
     fn has_uncommitted_changes(&self, cx: &App) -> bool;
     fn local_branches(&self, cx: &mut App) -> LocalBoxFuture<'static, Result<Vec<String>>>;
+    /// The branch checked out now; `None` on a detached HEAD.
+    fn current_branch(&self, cx: &App) -> Option<String>;
     fn fetch(&self, options: FetchOptions, cx: &mut App) -> LocalBoxFuture<'static, Result<()>>;
+    /// Makes the branch and switches to it, as `git switch -c <name> <base>`
+    /// does.
     fn create_branch(
         &self,
         name: String,
@@ -245,6 +249,9 @@ pub async fn run_checkout(
     if !fetched.eq_ignore_ascii_case(request.expected_head.trim()) {
         return CheckoutOutcome::PullRequestChanged { fetched };
     }
+    // `create_branch` switches to the new branch, so where the user was has
+    // to be known before it runs.
+    let previous = cx.update(|cx| git.current_branch(cx));
     if let Err(error) = cx
         .update(|cx| git.create_branch(branch.clone(), base, cx))
         .await
@@ -260,19 +267,50 @@ pub async fn run_checkout(
         Err(error) => Some(format!("could not be read back ({error})")),
     };
     if let Some(started_at) = started_at {
-        let cleanup = match git.force_delete_new_branch(branch.clone(), cx).await {
-            Ok(()) => format!("{branch} was deleted."),
-            Err(error) => format!("{branch} could not be deleted ({error}); delete it yourself."),
-        };
+        let cleanup = undo_new_branch(&*git, &branch, previous, cx).await;
         return CheckoutOutcome::Failed(format!(
             "The new branch {started_at}, not at the pull request's head {}: the git host may \
-             be too old to start a branch from a fetched ref. {cleanup} Nothing was switched.",
+             be too old to start a branch from a fetched ref. {cleanup}",
             short_commit(&fetched)
         ));
     }
     match cx.update(|cx| git.change_branch(branch.clone(), cx)).await {
         Ok(()) => CheckoutOutcome::CheckedOut { branch },
         Err(error) => CheckoutOutcome::Failed(format!("Could not switch to {branch}: {error}")),
+    }
+}
+
+/// Puts the user back on `previous` and deletes the branch just made, which
+/// git refuses to delete while it is checked out. Says what is true after:
+/// with no branch to go back to, or a way back that fails, the new branch is
+/// still checked out and stays.
+async fn undo_new_branch(
+    git: &dyn CheckoutGit,
+    branch: &str,
+    previous: Option<String>,
+    cx: &mut AsyncApp,
+) -> String {
+    let Some(previous) = previous else {
+        return format!(
+            "{branch} is checked out and was not removed: the checkout started from a detached \
+             HEAD, so there is no branch to go back to. Switch to another branch and delete \
+             {branch} yourself."
+        );
+    };
+    if let Err(error) = cx
+        .update(|cx| git.change_branch(previous.clone(), cx))
+        .await
+    {
+        return format!(
+            "{branch} is checked out and was not removed: switching back to {previous} failed \
+             ({error}). Switch back and delete {branch} yourself."
+        );
+    }
+    match git.force_delete_new_branch(branch.to_string(), cx).await {
+        Ok(()) => format!("{branch} was deleted and you are back on {previous}."),
+        Err(error) => {
+            format!("You are back on {previous}; {branch} could not be deleted ({error}).")
+        }
     }
 }
 
@@ -335,6 +373,14 @@ impl CheckoutGit for RepositoryGit {
                 .collect())
         }
         .boxed_local()
+    }
+
+    fn current_branch(&self, cx: &App) -> Option<String> {
+        let repository = self.repository.read(cx);
+        repository
+            .branch
+            .as_ref()
+            .map(|branch| branch.name().to_string())
     }
 
     fn fetch(&self, options: FetchOptions, cx: &mut App) -> LocalBoxFuture<'static, Result<()>> {

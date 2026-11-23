@@ -25,6 +25,7 @@ gpui.workspace = true
 http_client.workspace = true
 log.workspace = true
 parking_lot = { workspace = true, optional = true }
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -37,3 +38,4 @@ which.workspace = true
 github = { path = ".", features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 http_client = { workspace = true, features = ["test-support"] }
+reqwest_client.workspace = true

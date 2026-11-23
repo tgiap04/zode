@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures::future::{Either, select};
 use futures::{AsyncReadExt as _, FutureExt as _};
 use gpui::BackgroundExecutor;
-use http_client::http::HeaderMap;
+use http_client::http::{HeaderMap, HeaderValue};
 use http_client::{AsyncBody, HttpClient, Method, RedirectPolicy, Request};
 use serde_json::Value;
 use url::Url;
@@ -28,6 +28,66 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// A page of 100 issues with long bodies is a few hundred kilobytes; anything
 /// far bigger is not an answer worth holding in memory.
 pub const MAX_RESPONSE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Whether a request only reads. It decides what a lost answer means: a read
+/// that got none can simply be asked again, a write may already be applied.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Access {
+    Read,
+    Write,
+}
+
+impl Access {
+    /// `never_sent` is true when the request provably did not leave this
+    /// machine, so a write is safe to try again and is reported as a plain
+    /// network failure rather than an unknown outcome.
+    fn lost_answer(self, cause: &str, never_sent: bool) -> GithubError {
+        let cause = cause.trim_end_matches('.');
+        match self {
+            Self::Write if !never_sent => GithubError::OutcomeUnknown {
+                message: cause.to_string(),
+            },
+            Self::Read | Self::Write => GithubError::Network {
+                message: format!("{cause}."),
+            },
+        }
+    }
+}
+
+/// Whether `http_client.send` failed while still making the connection (DNS,
+/// refused, unreachable, TLS handshake), before any byte of the request was
+/// written. The reqwest client reports this itself; for any other client the
+/// `io::Error` kinds in the chain are the only evidence. Whatever is neither
+/// is treated as possibly sent: a failure that cannot be placed must not
+/// invite a retry of a write that may have been applied.
+pub(crate) fn failed_before_the_request_was_sent(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        if let Some(error) = cause.downcast_ref::<reqwest::Error>() {
+            return error.is_connect();
+        }
+        cause.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::HostUnreachable
+                    | std::io::ErrorKind::NetworkUnreachable
+                    | std::io::ErrorKind::AddrNotAvailable
+            )
+        })
+    })
+}
+
+/// Why an exchange produced no answer, and whether the request went out.
+struct LostExchange {
+    message: String,
+    never_sent: bool,
+}
+
+/// What came back from one exchange with GitHub.
+enum Exchange {
+    Answered(Answer),
+    TooLarge,
+}
 
 pub(crate) struct Transport {
     pub http_client: Arc<dyn HttpClient>,
@@ -101,15 +161,19 @@ impl Transport {
     /// than followed, so the token never goes to an address GitHub names.
     async fn send(
         &self,
+        access: Access,
         method: Method,
         url: &Url,
         body: Option<&Value>,
         if_none_match: Option<&str>,
     ) -> GithubResult<Answer> {
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", self.token.secret()))
+            .map_err(unexpected)?;
+        authorization.set_sensitive(true);
         let mut builder = Request::builder()
             .method(method)
             .uri(url.as_str())
-            .header("Authorization", format!("Bearer {}", self.token.secret()))
+            .header("Authorization", authorization)
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", API_VERSION)
             .header("User-Agent", "Zode");
@@ -127,30 +191,62 @@ impl Transport {
         request.extensions_mut().insert(RedirectPolicy::NoFollow);
 
         let exchange = async {
-            let mut response = self.http_client.send(request).await?;
+            let mut response =
+                self.http_client
+                    .send(request)
+                    .await
+                    .map_err(|error| LostExchange {
+                        never_sent: failed_before_the_request_was_sent(&error),
+                        message: error.to_string(),
+                    })?;
             let mut bytes = Vec::new();
+            // One byte past the cap tells an answer of exactly the cap from a
+            // longer one, which would otherwise be cut and fail as bad JSON.
             response
                 .body_mut()
-                .take(MAX_RESPONSE_BYTES)
+                .take(MAX_RESPONSE_BYTES + 1)
                 .read_to_end(&mut bytes)
-                .await?;
-            anyhow::Ok(Answer {
+                .await
+                .map_err(|error| LostExchange {
+                    never_sent: false,
+                    message: error.to_string(),
+                })?;
+            if bytes.len() as u64 > MAX_RESPONSE_BYTES {
+                return Ok(Exchange::TooLarge);
+            }
+            Ok::<_, LostExchange>(Exchange::Answered(Answer {
                 status: response.status().as_u16(),
                 headers: response.headers().clone(),
                 body: String::from_utf8_lossy(&bytes).into_owned(),
-            })
+            }))
         };
         let timer = self.executor.timer(REQUEST_TIMEOUT);
-        let answer = match select(exchange.boxed(), timer).await {
-            Either::Left((answer, _)) => answer.map_err(|error| GithubError::Network {
-                message: crate::error::shorten_message(&error.to_string()),
+        let exchange = match select(exchange.boxed(), timer).await {
+            Either::Left((exchange, _)) => exchange.map_err(|lost| {
+                access.lost_answer(
+                    &crate::error::shorten_message(&lost.message),
+                    lost.never_sent,
+                )
             })?,
             Either::Right(_) => {
-                return Err(GithubError::Network {
-                    message: format!(
-                        "GitHub did not answer within {} seconds.",
+                return Err(access.lost_answer(
+                    &format!(
+                        "GitHub did not answer within {} seconds",
                         REQUEST_TIMEOUT.as_secs()
                     ),
+                    false,
+                ));
+            }
+        };
+        let answer = match exchange {
+            Exchange::Answered(answer) => answer,
+            Exchange::TooLarge => {
+                return Err(match access {
+                    Access::Read => unexpected(format!(
+                        "GitHub's answer is too large to read (over {} MB).",
+                        MAX_RESPONSE_BYTES / (1024 * 1024)
+                    )),
+                    Access::Write => access.lost_answer("the answer was too large to read", false),
                 });
             }
         };
@@ -175,37 +271,50 @@ impl Transport {
         match rest::rate_limit_resource(headers) {
             Some("graphql") => rate_limits.graphql = Some(limit),
             Some("core") | None => rate_limits.rest = Some(limit),
+            // `search` (30 a minute) is a bucket of its own. `RateLimits`
+            // has no slot for it, and filing it under `rest` would show the
+            // search budget as the REST one.
             Some(_) => {}
         }
     }
 
     pub async fn get(&self, url: Url, use_cache: bool) -> GithubResult<RestAnswer> {
         let identity = self.token.identity().clone();
-        let cached = use_cache
+        let etag = use_cache
             .then(|| {
                 self.etags
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .get(&identity, url.as_str())
-                    .cloned()
+                    .map(|cached| cached.etag.clone())
             })
             .flatten();
-        let answer = self
-            .send(
-                Method::GET,
-                &url,
-                None,
-                cached.as_ref().map(|cached| cached.etag.as_str()),
-            )
+        let mut answer = self
+            .send(Access::Read, Method::GET, &url, None, etag.as_deref())
             .await?;
-        if answer.status == 304
-            && let Some(cached) = cached
-        {
-            return Ok(RestAnswer {
-                body: cached.body,
-                headers: answer.headers,
-                next_page: cached.next_page,
-            });
+        if answer.status == 304 {
+            let cached = self
+                .etags
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&identity, url.as_str())
+                .cloned();
+            match cached {
+                Some(cached) => {
+                    return Ok(RestAnswer {
+                        body: cached.body,
+                        headers: answer.headers,
+                        next_page: cached.next_page,
+                    });
+                }
+                // Evicted while the request was out, so there is nothing to
+                // answer a 304 with.
+                None => {
+                    answer = self
+                        .send(Access::Read, Method::GET, &url, None, None)
+                        .await?;
+                }
+            }
         }
         if !(200..300).contains(&answer.status) {
             return Err(rest::error_for_response(
@@ -246,7 +355,10 @@ impl Transport {
     ) -> GithubResult<String> {
         self.write_queue
             .run(ticket, async {
-                let answer = match self.send(method, &url, body.as_ref(), None).await {
+                let answer = match self
+                    .send(Access::Write, method, &url, body.as_ref(), None)
+                    .await
+                {
                     Ok(answer) => answer,
                     Err(error) => return failed_write(error, None),
                 };
@@ -269,7 +381,9 @@ impl Transport {
     /// rather than failing the whole read.
     pub async fn graphql(&self, document: &str, variables: Value) -> GithubResult<Value> {
         graphql_data(
-            &self.graphql_answer(document, variables).await?,
+            &self
+                .graphql_answer(Access::Read, document, variables)
+                .await?,
             crate::graphql::Partial::KeepNestedNodes,
         )
     }
@@ -283,7 +397,10 @@ impl Transport {
     ) -> GithubResult<Value> {
         self.write_queue
             .run(ticket, async {
-                let answer = match self.graphql_answer(document, variables).await {
+                let answer = match self
+                    .graphql_answer(Access::Write, document, variables)
+                    .await
+                {
                     Ok(answer) => answer,
                     Err(error) => return failed_write(error, None),
                 };
@@ -299,10 +416,16 @@ impl Transport {
             .await
     }
 
-    async fn graphql_answer(&self, document: &str, variables: Value) -> GithubResult<Answer> {
+    async fn graphql_answer(
+        &self,
+        access: Access,
+        document: &str,
+        variables: Value,
+    ) -> GithubResult<Answer> {
         let url = api_url(&["graphql"], &[])?;
         let body = crate::graphql::request_body(document, variables);
-        self.send(Method::POST, &url, Some(&body), None).await
+        self.send(access, Method::POST, &url, Some(&body), None)
+            .await
     }
 }
 
@@ -325,6 +448,12 @@ fn graphql_data(answer: &Answer, partial: crate::graphql::Partial) -> GithubResu
             reset_at: rest::reset_at(&answer.headers),
             retry_after,
         },
+        // GraphQL answers an SSO refusal with HTTP 200 and the same header
+        // REST sends.
+        GithubError::Forbidden { .. } => rest::sso_authorize_url(&answer.headers)
+            .map_or(error, |authorize_url| GithubError::SsoRequired {
+                authorize_url,
+            }),
         error => error,
     })
 }

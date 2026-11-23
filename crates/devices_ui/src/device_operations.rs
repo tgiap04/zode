@@ -115,10 +115,61 @@ pub(crate) fn plan_for(
 }
 
 /// Replaces the home directory with `~` so a message pasted into a bug report
-/// does not carry the user's name.
+/// does not carry the user's name. Only whole path parts are replaced: a home
+/// of `/` would otherwise turn every slash into a `~`, and `/home/a` would
+/// eat the start of `/home/ab`.
 pub(crate) fn shorten_home(message: &str, home: Option<&Path>) -> String {
-    match home.and_then(Path::to_str).filter(|home| !home.is_empty()) {
-        Some(home) => message.replace(home, "~"),
-        None => message.to_string(),
+    shorten_home_matching(message, home, cfg!(windows))
+}
+
+/// Windows paths ignore case, so there `C:\users\ALICE` is the home too.
+pub(crate) fn shorten_home_matching(
+    message: &str,
+    home: Option<&Path>,
+    ignore_case: bool,
+) -> String {
+    let home = home
+        .and_then(Path::to_str)
+        .map(|home| home.trim_end_matches(['/', '\\']))
+        .filter(|home| home.chars().count() >= 2);
+    let Some(home) = home else {
+        return message.to_string();
+    };
+    // A dot ends a sentence ("cannot open /home/a.") unless a name goes on
+    // after it ("/home/a.b" is another user's home).
+    let continues_the_name = |after: &str| {
+        let mut characters = after.chars();
+        match characters.next() {
+            Some('.') => characters
+                .next()
+                .is_some_and(|next| next.is_alphanumeric() || matches!(next, '_' | '-')),
+            Some(character) => character.is_alphanumeric() || matches!(character, '_' | '-'),
+            None => false,
+        }
+    };
+    let is_name_character =
+        |character: char| character.is_alphanumeric() || matches!(character, '_' | '-' | '.');
+    // ASCII lowering keeps every byte offset, so matches map back to `message`.
+    let (haystack, needle) = if ignore_case {
+        (message.to_ascii_lowercase(), home.to_ascii_lowercase())
+    } else {
+        (message.to_string(), home.to_string())
+    };
+    let mut shortened = String::with_capacity(message.len());
+    let mut copied_to = 0;
+    for (start, _) in haystack.match_indices(&needle) {
+        let end = start + needle.len();
+        let starts_a_path = message[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|before| !is_name_character(before) && !matches!(before, '/' | '\\'));
+        let ends_a_path = !continues_the_name(&message[end..]);
+        if start >= copied_to && starts_a_path && ends_a_path {
+            shortened.push_str(&message[copied_to..start]);
+            shortened.push('~');
+            copied_to = end;
+        }
     }
+    shortened.push_str(&message[copied_to..]);
+    shortened
 }

@@ -5,6 +5,7 @@ use ui::{Callout, Tooltip, prelude::*};
 
 use crate::github_view_session::session_ended_message;
 use crate::issues::{callout, composer_field, editor_field, render_target, updated_label};
+use crate::pull_requests::check_link::check_link_host;
 use crate::pull_requests::merge_modal::MergeAvailability;
 use crate::pull_requests::pr_detail_checkout::CheckoutState;
 use crate::pull_requests::pr_detail_view::{PullRequestComment, PullRequestDetailView};
@@ -217,7 +218,7 @@ impl PullRequestDetailView {
             )
     }
 
-    fn render_checks(&self, details: &PullRequestDetails) -> AnyElement {
+    fn render_checks(&self, details: &PullRequestDetails, cx: &mut Context<Self>) -> AnyElement {
         let more = details
             .checks_total
             .saturating_sub(details.checks.len() as u64);
@@ -238,12 +239,10 @@ impl PullRequestDetailView {
                         row.child(
                             Button::new(("github-pr-check-link", index), "Details")
                                 .label_size(LabelSize::XSmall)
-                                .on_click(move |_, _window, cx| {
-                                    if let crate::LinkTarget::Web(url) = crate::classify_link(&url)
-                                    {
-                                        cx.open_url(url.as_str());
-                                    }
-                                }),
+                                .tooltip(Tooltip::text(format!("Opens {}", check_link_host(&url))))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.open_check_details(&url, window, cx)
+                                })),
                         )
                     })
             }))
@@ -381,7 +380,7 @@ impl Render for PullRequestDetailView {
             .map(|details| self.render_summary(details).into_any_element());
         let sections = details.as_ref().map(|details| {
             [
-                self.render_checks(details),
+                self.render_checks(details, cx),
                 self.render_reviews(details),
                 self.render_files(details),
             ]

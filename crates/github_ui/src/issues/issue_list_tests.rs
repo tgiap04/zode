@@ -10,7 +10,7 @@ use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
 use http_client::{AsyncBody, FakeHttpClient, Response};
 use serde_json::json;
 
-use crate::issues::issues_test_support::{context, init, workspace_window};
+use crate::issues::issues_test_support::{context, init, repository, workspace_window};
 use crate::issues::{IssueList, ListLoad, ListPlaceholder, MineFilter};
 use crate::untrusted_text::reveal_hidden_characters;
 
@@ -376,4 +376,204 @@ async fn an_empty_list_says_why_it_is_empty(cx: &mut TestAppContext) {
         failing.read_with(cx, |list, _| list.placeholder()),
         Some(ListPlaceholder::Failed(GithubError::NotFound))
     );
+}
+
+fn many_labels_and_milestones(count: u64, page_size: usize) -> FakeGithubBackend {
+    let repository = repository();
+    (1..=count).fold(
+        FakeGithubBackend::new().with_page_size(page_size),
+        |fake, number| {
+            fake.with_label(&repository, label(&format!("label-{number}")))
+                .with_milestone(&repository, milestone(number))
+        },
+    )
+}
+
+/// The filter menus offer every label and milestone, not the first page.
+#[gpui::test]
+async fn the_filter_menus_read_every_page_of_labels_and_milestones(cx: &mut TestAppContext) {
+    init(cx);
+    let (_workspace, cx) = workspace_window(cx).await;
+    let list = list_over(Arc::new(many_labels_and_milestones(5, 2)), cx);
+    list.read_with(cx, |list, _| {
+        assert_eq!(list.labels().len(), 5);
+        assert_eq!(list.milestones().len(), 5);
+        assert_eq!(list.options_note(), None, "nothing was left out");
+    });
+}
+
+/// A repository with more than the limit of labels gets the first ones and
+/// is told so.
+#[gpui::test]
+async fn the_filter_menus_stop_at_the_page_limit_and_say_so(cx: &mut TestAppContext) {
+    init(cx);
+    let (_workspace, cx) = workspace_window(cx).await;
+    let list = list_over(Arc::new(many_labels_and_milestones(12, 1)), cx);
+    list.read_with(cx, |list, _| {
+        assert_eq!(list.labels().len(), 10);
+        assert_eq!(list.milestones().len(), 10);
+        let note = list.options_note();
+        assert!(
+            note.as_deref()
+                .is_some_and(|note| note.contains("first 10")),
+            "{note:?}"
+        );
+    });
+}
+
+/// Load more after a failed page tries that page again; the rows already
+/// read stay.
+#[gpui::test]
+async fn a_failed_load_more_can_be_tried_again(cx: &mut TestAppContext) {
+    init(cx);
+    let (_workspace, cx) = workspace_window(cx).await;
+    let repository = repository();
+    let fake = Arc::new((1..=5).fold(
+        FakeGithubBackend::new().with_page_size(2),
+        |fake, number| fake.with_issue(&repository, fake_issue(number, &format!("Issue {number}"))),
+    ));
+    let list = list_over(fake.clone(), cx);
+
+    fake.set_failure(Some(GithubError::Network {
+        message: "offline".to_string(),
+    }));
+    list.update(cx, |list, cx| list.load_more(cx));
+    cx.run_until_parked();
+    list.read_with(cx, |list, _| {
+        assert!(matches!(list.load_state(), ListLoad::Failed(_)));
+        assert!(list.has_more(), "the next page is still there to ask for");
+    });
+    assert_eq!(shown(&list, cx), vec![1, 2]);
+
+    fake.set_failure(None);
+    list.update(cx, |list, cx| list.load_more(cx));
+    cx.run_until_parked();
+    assert_eq!(shown(&list, cx), vec![1, 2, 3, 4]);
+    list.read_with(cx, |list, _| assert_eq!(list.load_state(), &ListLoad::Idle));
+}
+
+/// A failed reload is not a failed page: its cursor belongs to the list
+/// before it, so no "Load more" is left that would append the wrong page.
+#[gpui::test]
+async fn a_failed_reload_leaves_no_load_more(cx: &mut TestAppContext) {
+    init(cx);
+    let (_workspace, cx) = workspace_window(cx).await;
+    let repository = repository();
+    let fake = Arc::new((1..=5).fold(
+        FakeGithubBackend::new().with_page_size(2),
+        |fake, number| fake.with_issue(&repository, fake_issue(number, &format!("Issue {number}"))),
+    ));
+    let list = list_over(fake.clone(), cx);
+    list.read_with(cx, |list, _| assert!(list.has_more()));
+
+    fake.set_failure(Some(GithubError::Network {
+        message: "offline".to_string(),
+    }));
+    list.update(cx, |list, cx| list.reload(cx));
+    cx.run_until_parked();
+    list.read_with(cx, |list, _| {
+        assert!(matches!(list.load_state(), ListLoad::Failed(_)));
+        assert!(!list.has_more());
+    });
+    fake.set_failure(None);
+    list.update(cx, |list, cx| list.load_more(cx));
+    cx.run_until_parked();
+    assert_eq!(shown(&list, cx), vec![1, 2], "load more did nothing");
+}
+
+/// Ticked rows the typed text hides are still in the selection; the bar
+/// counts them.
+#[gpui::test]
+async fn the_selection_counts_the_rows_the_text_filter_hides(cx: &mut TestAppContext) {
+    init(cx);
+    let (_workspace, cx) = workspace_window(cx).await;
+    let list = list_over(Arc::new(backend()), cx);
+    list.update(cx, |list, cx| {
+        list.toggle_selected(1, cx);
+        list.toggle_selected(3, cx);
+    });
+    list.read_with(cx, |list, _| assert_eq!(list.hidden_selected_count(), 0));
+
+    list.update(cx, |list, cx| list.set_query("slow".to_string(), cx));
+    list.read_with(cx, |list, _| {
+        assert_eq!(list.hidden_selected_count(), 1, "#1 is ticked but hidden");
+        assert_eq!(list.selected().len(), 2);
+    });
+    list.update(cx, |list, cx| list.set_query("nothing".to_string(), cx));
+    list.read_with(cx, |list, _| assert_eq!(list.hidden_selected_count(), 2));
+}
+
+/// Drawing again with nothing changed does not filter and copy every row
+/// again; each change that matters does.
+#[gpui::test]
+async fn the_rows_are_built_once_until_something_changes(cx: &mut TestAppContext) {
+    init(cx);
+    let (_workspace, cx) = workspace_window(cx).await;
+    let repository = repository();
+    let fake = Arc::new((1..=30).fold(FakeGithubBackend::new(), |fake, number| {
+        fake.with_issue(&repository, fake_issue(number, &format!("Issue {number}")))
+    }));
+    let list = list_over(fake, cx);
+    let rebuilds = |cx: &mut VisualTestContext| list.read_with(cx, |list, _| list.row_rebuilds());
+    list.update(cx, |list, _| list.ensure_rows());
+    let first = rebuilds(cx);
+    assert_eq!(first, 1);
+    for _ in 0..3 {
+        list.update(cx, |list, _| list.ensure_rows());
+    }
+    assert_eq!(rebuilds(cx), first, "nothing changed, nothing rebuilt");
+
+    list.update(cx, |list, cx| list.set_query("Issue 1".to_string(), cx));
+    list.update(cx, |list, _| list.ensure_rows());
+    assert_eq!(rebuilds(cx), first + 1, "typing changes the rows");
+    list.update(cx, |list, cx| {
+        list.update_row(1, |issue| issue.title = "Changed".to_string(), cx)
+    });
+    list.update(cx, |list, _| list.ensure_rows());
+    assert_eq!(rebuilds(cx), first + 2, "a changed row is shown changed");
+}
+
+/// Drawn in a window, a long list builds its rows once however many frames
+/// are drawn, and still draws after something changes.
+#[gpui::test]
+async fn drawing_a_long_list_builds_its_rows_once(cx: &mut TestAppContext) {
+    init(cx);
+    let repository = repository();
+    let fake = (1..=300).fold(FakeGithubBackend::new(), |fake, number| {
+        fake.with_issue(&repository, fake_issue(number, &format!("Issue {number}")))
+    });
+    let backend: Arc<dyn GithubBackend> = Arc::new(fake);
+    let (list, cx) = cx.add_window_view(|_window, cx| {
+        let mut list = IssueList::new(context(backend));
+        list.reload(cx);
+        list
+    });
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    let built = list.read_with(cx, |list, _| list.row_rebuilds());
+    assert!(built >= 1);
+    for _ in 0..3 {
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
+    }
+    list.read_with(cx, |list, _| {
+        assert_eq!(list.row_rebuilds(), built, "three more frames, no build");
+        assert_eq!(list.rows().len(), 50, "the first page");
+    });
+
+    let first = cx.debug_bounds("github-issue-row-0");
+    assert!(
+        first.is_some_and(|bounds| bounds.size.height > gpui::px(0.)),
+        "the first row is drawn: {first:?}"
+    );
+    assert!(
+        cx.debug_bounds("github-issue-row-49").is_none(),
+        "a row far below the view is not built"
+    );
+
+    list.update(cx, |list, cx| list.set_query("Issue 4".to_string(), cx));
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    list.read_with(cx, |list, _| assert_eq!(list.row_rebuilds(), built + 1));
 }

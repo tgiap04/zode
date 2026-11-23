@@ -60,8 +60,7 @@ pub fn detect_app_projects_excluding(
             // The app at the root owns these; they are not apps of their own.
             || (root_is_app && NATIVE_FOLDERS.contains(&name.as_str()));
         let child = root.join(&name);
-        // A link may lead out of the trusted folder.
-        let skipped = skipped || host.is_symlink(&child) || is_excluded(&child, excluded);
+        let skipped = skipped || is_link_or_excluded(host, &child, excluded);
         if !skipped && host.is_dir(&child) {
             detect_into(host, root, &child, excluded, &mut projects);
         }
@@ -69,7 +68,16 @@ pub fn detect_app_projects_excluding(
     projects
 }
 
-pub(crate) fn is_excluded(path: &Path, excluded: &[PathBuf]) -> bool {
+/// A link may lead out of the trusted folder, so it is never followed.
+pub(crate) fn is_link_or_excluded(
+    host: &dyn HostSystem,
+    path: &Path,
+    excluded: &[PathBuf],
+) -> bool {
+    host.is_symlink(path) || is_excluded(path, excluded)
+}
+
+fn is_excluded(path: &Path, excluded: &[PathBuf]) -> bool {
     excluded.iter().any(|folder| path.starts_with(folder))
 }
 
@@ -107,7 +115,7 @@ fn detect_into(
     }
     let example = directory.join("example");
     if pubspec.is_some_and(|pubspec| pubspec.depends_on_flutter)
-        && !is_excluded(&example, excluded)
+        && !is_link_or_excluded(host, &example, excluded)
         && let Some(pubspec) = read_pubspec(host, &example)
         && let Some(project) = flutter_app(host, &example, &pubspec)
     {
@@ -286,13 +294,54 @@ pub(crate) fn read_project_file(host: &dyn HostSystem, path: &Path) -> Option<St
     }
 }
 
+/// How much of a name is shown; one from a project file may be a megabyte.
+const MAX_DISPLAY_NAME_CHARS: usize = 80;
+
+/// The name reaches a terminal tab, a task id and a notification, and comes
+/// from a file anyone may have put in the project, so it is cut down to plain
+/// text of a bounded length: an escape sequence in it would reach the terminal.
 pub(crate) fn display_name(name: Option<&str>, directory: &Path) -> String {
-    name.filter(|name| !name.trim().is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            directory
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .unwrap_or_else(|| directory.display().to_string())
+    let from_directory = || {
+        directory
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    };
+    name.map(plain_text)
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| from_directory().map(|name| plain_text(&name)))
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| plain_text(&directory.display().to_string()))
+}
+
+/// Characters that draw nothing but can reorder or hide text around them
+/// (bidi overrides and isolates, zero-width and blank filler characters).
+fn is_invisible(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character,
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{061C}'
+                | '\u{115F}'
+                | '\u{1160}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{3164}'
+                | '\u{FEFF}'
+                | '\u{FFA0}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{E0000}'..='\u{E007F}'
+        )
+}
+
+fn plain_text(text: &str) -> String {
+    let mut characters = text.chars().filter(|character| !is_invisible(*character));
+    let mut shown: String = characters.by_ref().take(MAX_DISPLAY_NAME_CHARS).collect();
+    if characters.next().is_some() {
+        shown.pop();
+        shown.push('…');
+    }
+    shown
 }

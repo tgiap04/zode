@@ -50,6 +50,14 @@ pub struct IssueDetailView {
     awaited_issue: u64,
     awaited_comments: u64,
     issue_task: Option<Task<()>>,
+    /// The read after this tab's own write, apart from `issue_task`: a newer
+    /// answer drops the Reload but not the rebase of an open edit's base.
+    own_write_task: Option<Task<()>>,
+    /// The comments load on its way is a "Load more", not a first page.
+    pub(crate) loading_more_comments: bool,
+    /// Comments sent while a "Load more" was on its way: that page may have
+    /// been read before they existed.
+    pub(crate) sent_during_load_more: Vec<Comment>,
     comments_task: Option<Task<()>>,
     pub(crate) languages: Option<Arc<LanguageRegistry>>,
     /// The signed-in account, for "Assign me", read with the first load.
@@ -64,6 +72,9 @@ pub struct IssueDetailView {
     /// The labels and milestones the menus offer, read with the first load.
     pub(crate) labels: Vec<Label>,
     pub(crate) milestones: Vec<Milestone>,
+    /// There are more labels or milestones than were read.
+    pub(crate) labels_cut_short: bool,
+    pub(crate) milestones_cut_short: bool,
     /// Empty when the repository's owner has no issue types.
     pub(crate) issue_types: Vec<IssueType>,
     /// `None` until read, or when GitHub did not say.
@@ -191,6 +202,9 @@ impl IssueDetailView {
             awaited_issue: 0,
             awaited_comments: 0,
             issue_task: None,
+            own_write_task: None,
+            loading_more_comments: false,
+            sent_during_load_more: Vec::new(),
             comments_task: None,
             languages: None,
             login: None,
@@ -202,6 +216,8 @@ impl IssueDetailView {
             assignee_picker: None,
             labels: Vec::new(),
             milestones: Vec::new(),
+            labels_cut_short: false,
+            milestones_cut_short: false,
             issue_types: Vec::new(),
             permission: None,
             epic: EpicSection::default(),
@@ -269,13 +285,29 @@ impl IssueDetailView {
     }
 
     pub(crate) fn reload_issue(&mut self, cx: &mut Context<Self>) {
+        self.read_issue(false, cx);
+    }
+
+    /// Reads the issue after a write this tab made that moved its
+    /// `updated_at`, so an edit left open does not take that for someone
+    /// else's change.
+    pub(crate) fn refresh_issue_after_own_write(&mut self, cx: &mut Context<Self>) {
+        self.read_issue(true, cx);
+    }
+
+    fn read_issue(&mut self, own_write: bool, cx: &mut Context<Self>) {
         let load = self.next_load();
         self.awaited_issue = load;
         let backend = self.backend.clone();
         let key = self.key.clone();
-        self.issue_task = Some(cx.spawn(async move |this, cx| {
+        let task = cx.spawn(async move |this, cx| {
             let issue = backend.issue(&key.repository, key.number).await;
             this.update(cx, |this, cx| {
+                // Read after the write, so the edit's base moves even if a
+                // newer Reload has since taken the screen.
+                if own_write && let Ok(issue) = &issue {
+                    this.rebase_edit(issue);
+                }
                 if this.awaited_issue != load {
                     return;
                 }
@@ -289,7 +321,28 @@ impl IssueDetailView {
                 cx.notify();
             })
             .ok();
-        }));
+        });
+        if own_write {
+            self.own_write_task = Some(task);
+        } else {
+            self.issue_task = Some(task);
+        }
+    }
+
+    /// Drops any Reload still on its way, which was asked for before what is
+    /// about to be shown and would put the older issue back (the read after
+    /// this tab's own write is kept: it still rebases an open edit), and
+    /// returns the mark [`Self::is_latest_issue_read`] tells a newer Reload apart by.
+    pub(crate) fn supersede_issue_reads(&mut self) -> u64 {
+        let load = self.next_load();
+        self.awaited_issue = load;
+        self.issue_task = None;
+        load
+    }
+
+    /// Whether no Reload has been asked for since `mark` was taken.
+    pub(crate) fn is_latest_issue_read(&self, mark: u64) -> bool {
+        self.awaited_issue == mark
     }
 
     pub fn load_more_comments(&mut self, cx: &mut Context<Self>) {
@@ -313,11 +366,16 @@ impl IssueDetailView {
         cx.new(|cx| GithubMarkdown::new(source, &repository, backend, session, cx))
     }
 
-    fn fetch_comments(&mut self, cursor: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn fetch_comments(&mut self, cursor: Option<String>, cx: &mut Context<Self>) {
         let load = self.next_load();
         self.awaited_comments = load;
         self.loading_comments = true;
         let appending = cursor.is_some();
+        self.loading_more_comments = appending;
+        if !appending {
+            // The first page read now has what was sent before it.
+            self.sent_during_load_more.clear();
+        }
         let backend = self.backend.clone();
         let key = self.key.clone();
         self.comments_task = Some(cx.spawn(async move |this, cx| {
@@ -329,6 +387,7 @@ impl IssueDetailView {
                     return;
                 }
                 this.loading_comments = false;
+                this.loading_more_comments = false;
                 match page {
                     Ok(page) => {
                         if !appending {
@@ -348,6 +407,7 @@ impl IssueDetailView {
                         }
                         this.next_comment_cursor = page.next_cursor;
                         this.comments_error = None;
+                        this.place_comments_sent_during_load_more(&mut known, cx);
                     }
                     Err(error) => {
                         this.note_error(&error, cx);

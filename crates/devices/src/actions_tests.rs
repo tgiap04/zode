@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime};
 use crate::actions::*;
 use crate::android_sdk::AndroidSdk;
 use crate::fake_host::FakeHost;
-use crate::host::{HostOs, HostSystem};
+use crate::host::{HostOs, HostSystem, ToolInvocation, ToolRunner};
 use crate::input_validation::{parse_pairing_code, parse_wireless_address};
 use crate::ios_simulators::XCRUN;
 use crate::resources::emulator_log_file_name;
@@ -142,6 +142,138 @@ fn an_emulator_starts_detached_with_a_fresh_log_and_old_logs_pruned() {
 }
 
 #[test]
+fn starting_an_emulator_also_clears_stale_logs_of_other_avds() {
+    let host = FakeHost::new(HostOs::Linux);
+    let log_dir = PathBuf::from("/logs");
+    let started_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+    let long_ago = started_at - Duration::from_secs(30 * 24 * 60 * 60);
+    let stale = log_dir.join(emulator_log_file_name("Tablet", long_ago));
+    let recent = log_dir.join(emulator_log_file_name(
+        "Tablet",
+        started_at - Duration::from_secs(60),
+    ));
+    host.add_file(&stale, "x");
+    host.add_file(&recent, "x");
+
+    start_emulator(&host, &host, &sdk(), "Medium_Phone", &log_dir, started_at).expect("starts");
+
+    assert!(!host.has_file(&stale));
+    assert!(host.has_file(&recent));
+}
+
+#[test]
+fn a_started_emulator_that_never_reached_adb_is_stopped_through_its_process_group() {
+    let host = FakeHost::new(HostOs::Linux);
+    let mut started = start_emulator(
+        &host,
+        &host,
+        &sdk(),
+        "Medium_Phone",
+        Path::new("/logs"),
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("starts");
+    smol::block_on(stop_detached_emulator(
+        &host,
+        &host,
+        started.process_id,
+        &mut started.exit,
+    ))
+    .expect("stops");
+    assert_eq!(host.terminated_groups(), [started.process_id]);
+    assert!(
+        host.invocations()
+            .iter()
+            .all(|invocation| invocation.program != Path::new("/bin/kill")),
+        "no external kill program is needed"
+    );
+
+    let refusing = FakeHost::new(HostOs::MacOs);
+    refusing.fail_terminate("Operation not permitted");
+    let mut exit = running_exit(&refusing);
+    let error = smol::block_on(stop_detached_emulator(&refusing, &refusing, 9, &mut exit))
+        .expect_err("a refused signal is an error");
+    assert!(
+        error.to_string().contains("Operation not permitted"),
+        "{error}"
+    );
+}
+
+#[test]
+fn an_emulator_that_ended_before_the_kill_is_never_signalled_by_its_stale_id() {
+    let host = FakeHost::new(HostOs::Linux);
+    let mut started = start_emulator(
+        &host,
+        &host,
+        &sdk(),
+        "Medium_Phone",
+        Path::new("/logs"),
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("starts");
+    host.exit_detached(0, Some(0), "");
+    smol::block_on(stop_detached_emulator(
+        &host,
+        &host,
+        started.process_id,
+        &mut started.exit,
+    ))
+    .expect("an ended emulator is already stopped");
+    assert!(host.terminated_groups().is_empty());
+
+    let windows = FakeHost::new(HostOs::Windows);
+    windows.set_environment_variable("SystemRoot", "/win");
+    let mut started = start_emulator(
+        &windows,
+        &windows,
+        &sdk(),
+        "Medium_Phone",
+        Path::new("/logs"),
+        SystemTime::UNIX_EPOCH,
+    )
+    .expect("starts");
+    windows.exit_detached(0, None, "");
+    smol::block_on(stop_detached_emulator(
+        &windows,
+        &windows,
+        started.process_id,
+        &mut started.exit,
+    ))
+    .expect("an ended emulator is already stopped");
+    let invocations = windows.invocations();
+    assert!(
+        invocations
+            .iter()
+            .all(|invocation| !invocation.program.ends_with("taskkill.exe")),
+        "{invocations:?}"
+    );
+}
+
+#[test]
+fn on_windows_the_emulator_and_its_children_are_stopped_with_taskkill() {
+    let host = FakeHost::new(HostOs::Windows);
+    // A rooted path on every system the tests run on.
+    host.set_environment_variable("SystemRoot", "/win");
+    let taskkill = PathBuf::from("/win").join("System32").join("taskkill.exe");
+    host.script_output(&taskkill, ["/PID", "77", "/T", "/F"], 0, "", "");
+    let mut exit = running_exit(&host);
+    smol::block_on(stop_detached_emulator(&host, &host, 77, &mut exit)).expect("stops");
+    let invocation = host.invocations().pop().expect("taskkill ran");
+    assert_eq!(invocation.program, taskkill);
+    assert_eq!(invocation.args, ["/PID", "77", "/T", "/F"]);
+}
+
+/// The exit signal of a process that is still running.
+fn running_exit(host: &FakeHost) -> crate::host::DetachedExit {
+    host.spawn_detached(
+        ToolInvocation::new("/bin/true", ["x"]),
+        Path::new("/logs/running.log"),
+    )
+    .expect("starts")
+    .exit
+}
+
+#[test]
 fn an_sdk_without_the_emulator_cannot_start_one() {
     let host = FakeHost::new(HostOs::MacOs);
     let mut sdk = sdk();
@@ -226,6 +358,43 @@ fn the_pairing_code_goes_through_stdin_and_never_into_argv_or_errors() {
         "",
     );
     smol::block_on(adb_pair(&host, &sdk(), &address, &code)).expect("paired");
+}
+
+#[test]
+fn a_pairing_is_judged_by_its_success_line_not_by_words_in_the_guid() {
+    let address = parse_wireless_address("192.168.1.5:37099").expect("valid");
+    let code = parse_pairing_code(CODE).expect("valid");
+    for (exit_code, stdout, paired) in [
+        (
+            0,
+            "Enter pairing code: Successfully paired to 192.168.1.5:37099 [guid=adb-failsafe-error-x]",
+            true,
+        ),
+        (
+            0,
+            "Successfully paired to 192.168.1.5:37099 [guid=adb-R58M-x]\n",
+            true,
+        ),
+        // The tool exited 1: no success line can rescue it.
+        (
+            1,
+            "Enter pairing code: Successfully paired to 192.168.1.5:37099 [guid=adb-R58M-x]",
+            false,
+        ),
+        // Exit 0 without a success line is not a pairing, whatever it says.
+        (0, "Enter pairing code: ", false),
+        (0, "Enter pairing code: Wrong password", false),
+        (
+            0,
+            "Enter pairing code: Failed: Wrong password or connection was dropped.",
+            false,
+        ),
+    ] {
+        let host = FakeHost::new(HostOs::MacOs);
+        host.script_output(ADB, ["pair", "192.168.1.5:37099"], exit_code, stdout, "");
+        let result = smol::block_on(adb_pair(&host, &sdk(), &address, &code));
+        assert_eq!(result.is_ok(), paired, "{stdout:?}: {result:?}");
+    }
 }
 
 #[test]

@@ -1,5 +1,4 @@
 use std::ops::Range;
-use std::rc::Rc;
 
 use github::{ProjectField, ProjectFieldKind, ProjectV2Item, ProjectValue};
 use gpui::{App, Context, IntoElement, MouseButton, MouseDownEvent, WeakEntity, px};
@@ -9,7 +8,7 @@ use crate::avatar::render_people;
 use crate::projects::board_card_render::{card_icon, item_people};
 use crate::projects::field_editor::{FieldEditing, field_editing};
 use crate::projects::field_editor_render::FieldEditorParts;
-use crate::projects::project_layout::{CardIcon, cell_text, sorted_items, table_fields, value_of};
+use crate::projects::project_layout::{CardIcon, cell_text, table_fields, value_of};
 use crate::projects::projects_section::ProjectsSection;
 use crate::untrusted_text::reveal_hidden_characters;
 
@@ -48,13 +47,9 @@ impl ProjectsSection {
             .iter()
             .map(|field| SharedString::from(reveal_hidden_characters(&field.name).into_owned()))
             .collect::<Vec<_>>();
-        let order = sorted_items(self.view(), details, self.items());
-        let row_items = Rc::new(
-            order
-                .iter()
-                .filter_map(|index| Some(self.items().get(*index)?.id.clone()))
-                .collect::<Vec<_>>(),
-        );
+        let Some(order) = self.sorted_order() else {
+            return div().into_any_element();
+        };
         let editing = self.field_edit().map(|edit| {
             (
                 edit.item_id.clone(),
@@ -63,20 +58,28 @@ impl ProjectsSection {
             )
         });
         let handle = cx.entity().downgrade();
-        let count = row_items.len();
+        let count = order.len();
         let row_handle = handle.clone();
-        let rows_order = Rc::new(order.clone());
+        let rows_order = order.clone();
         div()
             .size_full()
             .child(
                 Table::new(fields.len())
                     .striped()
                     .interactable(&self.table_state)
-                    .map_row(move |(position, row), _window, _cx| {
-                        let (Some(index), Some(item_id)) = (
-                            order.get(position).copied(),
-                            row_items.get(position).cloned(),
-                        ) else {
+                    .map_row(move |(position, row), _window, cx| {
+                        // Only the rows on screen get here, so the item is
+                        // looked up for those alone.
+                        let Some(index) = order.get(position).copied() else {
+                            return row.into_any_element();
+                        };
+                        let Some(item_id) = row_handle
+                            .read_with(cx, |section, _| {
+                                section.items().get(index).map(|item| item.id.clone())
+                            })
+                            .ok()
+                            .flatten()
+                        else {
                             return row.into_any_element();
                         };
                         let opener = row_handle.clone();

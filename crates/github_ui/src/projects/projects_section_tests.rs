@@ -1,3 +1,5 @@
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use github::{
@@ -10,6 +12,8 @@ use workspace::Workspace;
 
 use crate::github_view::{AuthState, GithubSection, GithubView};
 use crate::issues::issues_test_support::{detail_tabs, repository, signed_in_github_tab};
+use crate::projects::move_item::{FieldWriteKey, PendingFieldWrites};
+use crate::projects::project_layout::value_of;
 use crate::projects::{ColumnKey, PROJECT_ITEM_CAP, ProjectsSection, board_columns};
 
 pub(super) const PROJECT: &str = "PVT_1";
@@ -424,5 +428,354 @@ async fn an_empty_item_page_under_a_new_cursor_keeps_reading(cx: &mut TestAppCon
         backend.project_requests(),
         5,
         "projects, details, two empty pages, then the items"
+    );
+}
+
+const OTHER_PROJECT: &str = "PVT_2";
+
+/// Two projects: the first (`PROJECT`) is picked, the second holds one item.
+fn two_projects() -> FakeGithubBackend {
+    backend()
+        .with_project(
+            &repository(),
+            ProjectV2 {
+                id: OTHER_PROJECT.into(),
+                number: 2,
+                title: "Other".into(),
+                url: "https://github.com/orgs/octo/projects/2".into(),
+                closed: false,
+            },
+        )
+        .with_project_details(OTHER_PROJECT, details())
+        .with_project_item(OTHER_PROJECT, item("PVTI_other", issue(30), Some("todo")))
+}
+
+fn write_scope() -> OAuthScopes {
+    OAuthScopes::Granted(vec!["repo".into(), "project".into()])
+}
+
+fn item_ids(section: &Entity<ProjectsSection>, cx: &mut VisualTestContext) -> Vec<String> {
+    section.read_with(cx, |section, _| {
+        section.items().iter().map(|item| item.id.clone()).collect()
+    })
+}
+
+/// The cards of the project that was left are not the new project's: a
+/// write aimed at one of them must not go out under the new project's id.
+#[gpui::test]
+async fn switching_projects_drops_the_old_items_at_once(cx: &mut TestAppContext) {
+    let backend = Arc::new(two_projects());
+    let (_workspace, view, cx) = projects_tab(backend.clone(), write_scope(), cx).await;
+    let section = section(&view, cx);
+    assert_eq!(item_ids(&section, cx).len(), 3);
+
+    section.update(cx, |section, cx| {
+        section.select_project(OTHER_PROJECT.into(), cx);
+        assert!(
+            section.items().is_empty(),
+            "the old project's items are not shown for the new one"
+        );
+        section.move_item("PVTI_7", &ColumnKey::Option("done".into()), cx);
+    });
+    assert_eq!(
+        backend.writes(),
+        Vec::new(),
+        "nothing is written for an item of the other project"
+    );
+    cx.run_until_parked();
+    assert_eq!(item_ids(&section, cx), vec!["PVTI_other".to_string()]);
+}
+
+/// A write of PVTI_7 to Done is out, and GitHub still says Todo.
+fn pretend_a_write_to_done_is_out(section: &Entity<ProjectsSection>, cx: &mut VisualTestContext) {
+    section.update(cx, |section, _| {
+        let item = section
+            .items
+            .iter_mut()
+            .find(|item| item.id == "PVTI_7")
+            .expect("the item");
+        item.field_values
+            .retain(|value| value.field_id != "F_status");
+        item.field_values.push(ProjectFieldValue {
+            field_id: "F_status".into(),
+            value: ProjectValue::SingleSelect {
+                option_id: "done".into(),
+                name: "Done".into(),
+            },
+        });
+        section.layout_changed();
+        section.field_writes.insert(
+            FieldWriteKey {
+                item_id: "PVTI_7".into(),
+                field_id: "F_status".into(),
+            },
+            PendingFieldWrites {
+                latest: 1,
+                in_flight: 1,
+                confirmed: Some(ProjectValue::SingleSelect {
+                    option_id: "todo".into(),
+                    name: "Todo".into(),
+                }),
+                shown: Some(ProjectValue::SingleSelect {
+                    option_id: "done".into(),
+                    name: "Done".into(),
+                }),
+            },
+        );
+    });
+}
+
+/// Reading a project again replaces its items in place: the board never
+/// goes blank.
+#[gpui::test]
+async fn reading_again_never_blanks_the_board(cx: &mut TestAppContext) {
+    let backend = Arc::new(backend());
+    let (_workspace, view, cx) = projects_tab(backend.clone(), write_scope(), cx).await;
+    let section = section(&view, cx);
+    let counts = Rc::new(RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        let counts = counts.clone();
+        cx.observe(&section, move |section, cx| {
+            counts.borrow_mut().push(section.read(cx).items().len());
+        })
+        .detach();
+    });
+    section.update(cx, |section, cx| section.reload(cx));
+    cx.run_until_parked();
+    assert!(
+        counts.borrow().iter().all(|count| *count > 0),
+        "the board was blank while reading again: {:?}",
+        counts.borrow()
+    );
+    assert_eq!(item_ids(&section, cx).len(), 3);
+}
+
+/// A value being written stays shown whatever GitHub still reports.
+#[gpui::test]
+async fn reading_again_keeps_the_values_being_written(cx: &mut TestAppContext) {
+    let backend = Arc::new(backend());
+    let (_workspace, view, cx) = projects_tab(backend.clone(), write_scope(), cx).await;
+    let section = section(&view, cx);
+    pretend_a_write_to_done_is_out(&section, cx);
+    section.update(cx, |section, cx| section.reload(cx));
+    cx.run_until_parked();
+    let shown = section.read_with(cx, |section, _| {
+        let item = section.items().iter().find(|item| item.id == "PVTI_7");
+        item.and_then(|item| value_of(item, "F_status").cloned())
+    });
+    assert_eq!(
+        shown,
+        Some(ProjectValue::SingleSelect {
+            option_id: "done".into(),
+            name: "Done".into(),
+        }),
+        "the value being written is not undone by a read that predates it"
+    );
+}
+
+fn redraw(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+}
+
+/// Sorting and grouping every item is worked out once, not on every frame;
+/// a change to the items or the view works it out again.
+#[gpui::test]
+async fn the_layout_is_worked_out_again_only_when_something_it_depends_on_changes(
+    cx: &mut TestAppContext,
+) {
+    let backend = Arc::new(backend());
+    let (_workspace, view, cx) = projects_tab(backend.clone(), write_scope(), cx).await;
+    let section = section(&view, cx);
+    redraw(cx);
+    let builds = |cx: &mut VisualTestContext| section.read_with(cx, |s, _| s.layout.builds.get());
+    let first = builds(cx);
+    assert!(first > 0, "the board was laid out");
+    for _ in 0..3 {
+        redraw(cx);
+    }
+    assert_eq!(builds(cx), first, "drawing again changes nothing");
+
+    section.update(cx, |section, cx| {
+        section.move_item("PVTI_7", &ColumnKey::Option("done".into()), cx)
+    });
+    redraw(cx);
+    let after_move = builds(cx);
+    assert!(after_move > first, "a moved card changes the columns");
+    redraw(cx);
+    assert_eq!(builds(cx), after_move);
+
+    section.update(cx, |section, cx| section.select_view(2, cx));
+    redraw(cx);
+    let table = builds(cx);
+    assert!(table > after_move, "another view is laid out again");
+    redraw(cx);
+    assert_eq!(builds(cx), table);
+}
+
+/// The cards' scrolling lists are kept per column; those of columns the
+/// view no longer has are dropped, not kept for good.
+#[gpui::test]
+async fn the_lists_of_columns_that_are_gone_are_dropped(cx: &mut TestAppContext) {
+    let mut project_details = crate::projects::field_editor_tests::rich_details();
+    project_details.views.push(ProjectView {
+        id: "V_3".into(),
+        number: 3,
+        name: "Sprints".into(),
+        layout: ProjectViewLayout::Board,
+        filter: None,
+        group_by_fields: vec!["F_sprint".into()],
+        vertical_group_by_fields: Vec::new(),
+        sort_by_fields: Vec::new(),
+        visible_fields: vec!["F_title".into()],
+    });
+    let backend = Arc::new(
+        FakeGithubBackend::new()
+            .with_project(&repository(), project())
+            .with_project_details(PROJECT, project_details)
+            .with_project_item(PROJECT, item("PVTI_7", issue(7), Some("todo"))),
+    );
+    let (_workspace, view, cx) = projects_tab(backend, write_scope(), cx).await;
+    let section = section(&view, cx);
+    redraw(cx);
+    let kept = |cx: &mut VisualTestContext| {
+        section.read_with(cx, |section, _| section.layout.column_list_keys())
+    };
+    let status_columns = kept(cx);
+    assert!(
+        status_columns.contains(&ColumnKey::Option("todo".into())),
+        "{status_columns:?}"
+    );
+
+    section.update(cx, |section, cx| section.select_view(3, cx));
+    redraw(cx);
+    let sprint_columns = kept(cx);
+    assert!(
+        sprint_columns.contains(&ColumnKey::Iteration("it_1".into())),
+        "{sprint_columns:?}"
+    );
+    assert!(
+        !sprint_columns.contains(&ColumnKey::Option("todo".into())),
+        "the status columns are gone: {sprint_columns:?}"
+    );
+}
+
+/// What a read brings is put under the writes made since it began (kept in
+/// `recent_writes` once they land) and the ones still out, which win.
+#[gpui::test]
+async fn a_read_is_overlaid_with_the_writes_that_landed_and_the_ones_still_out(
+    cx: &mut TestAppContext,
+) {
+    let backend = Arc::new(backend());
+    let (_workspace, view, cx) = projects_tab(backend.clone(), write_scope(), cx).await;
+    let section = section(&view, cx);
+    let option = |id: &str| ProjectValue::SingleSelect {
+        option_id: id.into(),
+        name: id.into(),
+    };
+    let status_of = |items: &[ProjectV2Item], id: &str| {
+        items
+            .iter()
+            .find(|item| item.id == id)
+            .and_then(|item| value_of(item, "F_status").cloned())
+    };
+    let overlaid = section.update(cx, |section, _| {
+        let key = |id: &str| FieldWriteKey {
+            item_id: id.into(),
+            field_id: "F_status".into(),
+        };
+        // PVTI_7 landed as Done; PVTI_9 landed, then another write is out.
+        section
+            .recent_writes
+            .insert(key("PVTI_7"), Some(option("done")));
+        section
+            .recent_writes
+            .insert(key("PVTI_9"), Some(option("todo")));
+        section.field_writes.insert(
+            key("PVTI_9"),
+            PendingFieldWrites {
+                latest: 2,
+                in_flight: 1,
+                confirmed: Some(option("todo")),
+                shown: None,
+            },
+        );
+        let mut read = section.items.clone();
+        section.overlay_field_writes(&mut read);
+        read
+    });
+    assert_eq!(status_of(&overlaid, "PVTI_7"), Some(option("done")));
+    assert_eq!(
+        status_of(&overlaid, "PVTI_9"),
+        None,
+        "the write still out wins"
+    );
+    assert_eq!(
+        status_of(&overlaid, "PVTI_hidden"),
+        Some(option("done")),
+        "an item nothing was written to is as it was read"
+    );
+}
+
+/// A column holding hundreds of cards draws the ones in view (and a margin),
+/// not every one of them on every frame.
+#[gpui::test]
+async fn a_long_column_draws_only_the_cards_in_view(cx: &mut TestAppContext) {
+    let mut fake = FakeGithubBackend::new()
+        .with_project(&repository(), project())
+        .with_project_details(PROJECT, details());
+    for number in 0..300 {
+        fake = fake.with_project_item(
+            PROJECT,
+            item(&format!("PVTI_{number}"), issue(number), Some("todo")),
+        );
+    }
+    let backend = Arc::new(fake);
+    let (_workspace, view, cx) = projects_tab(backend, write_scope(), cx).await;
+    let section = section(&view, cx);
+    redraw(cx);
+    assert_eq!(
+        section.read_with(cx, |section, _| section.items().len()),
+        300
+    );
+    let drawn = (0..300)
+        .filter(|number| {
+            cx.debug_bounds(format!("github-project-card-PVTI_{number}").leak())
+                .is_some()
+        })
+        .count();
+    assert!(drawn > 0, "the cards in view are drawn");
+    assert!(drawn < 60, "{drawn} of 300 cards were drawn");
+}
+
+/// A read of several pages commits only once its last page is in; a move
+/// that lands after the item's own page was read is not undone by it.
+#[gpui::test]
+async fn a_move_that_lands_during_a_long_read_survives_it(cx: &mut TestAppContext) {
+    let backend = Arc::new(backend().with_stuck_project_item_cursor(3));
+    let (_workspace, view, cx) = projects_tab(backend.clone(), write_scope(), cx).await;
+    let section = section(&view, cx);
+    let first_page = backend.hold_next_project_item_list();
+    let last_page = backend.hold_next_project_item_list();
+    section.update(cx, |section, cx| section.reload(cx));
+    cx.run_until_parked();
+    first_page.send(()).ok();
+    cx.run_until_parked();
+
+    section.update(cx, |section, cx| {
+        section.move_item("PVTI_7", &ColumnKey::Option("done".into()), cx)
+    });
+    cx.run_until_parked();
+    last_page.send(()).ok();
+    cx.run_until_parked();
+
+    let shown = section.read_with(cx, |section, _| {
+        let item = section.items().iter().find(|item| item.id == "PVTI_7");
+        item.and_then(|item| value_of(item, "F_status").cloned())
+    });
+    assert!(
+        matches!(&shown, Some(ProjectValue::SingleSelect { option_id, .. }) if option_id == "done"),
+        "the landed move is kept when the read commits: {shown:?}"
     );
 }

@@ -11,12 +11,14 @@ use crate::backend::GithubBackend;
 use crate::error::GithubError;
 use crate::graphql::documents;
 use crate::http_backend::HttpBackend;
-use crate::http_transport::REQUEST_TIMEOUT;
+use crate::http_backend::SEARCH_TEXT_MAX_CHARACTERS;
+use crate::http_transport::{MAX_RESPONSE_BYTES, REQUEST_TIMEOUT};
 use crate::model::{
     IssueFilter, IssueState, IssueStateFilter, OAuthScopes, ParentIssue, RateLimit, RepositoryId,
     RepositoryVisibility, SubIssuePosition, SubIssuesSummary,
 };
 use crate::projects::ProjectFieldInput;
+use crate::pull_requests::MergeMethod;
 use crate::token::{GithubToken, TokenSource};
 use crate::write_queue::{MIN_WRITE_INTERVAL, RATE_LIMITED_PAUSE};
 
@@ -30,6 +32,26 @@ enum Canned {
         body: String,
     },
     Hang,
+    /// The connection drops after the request was read.
+    Fail,
+    /// The client cannot reach GitHub at all: DNS, refused, offline.
+    FailToConnect(std::io::ErrorKind),
+    /// The headers arrive, then the connection breaks while the body is read.
+    /// The kind is one that, in the connect phase, would prove nothing was sent.
+    BrokenBody(std::io::ErrorKind),
+}
+
+/// A reader that fails, to stand in for a body cut off mid-stream.
+struct BrokenReader(std::io::ErrorKind);
+
+impl futures::AsyncRead for BrokenReader {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        _buf: &mut [u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::task::Poll::Ready(Err(std::io::Error::new(self.0, "body cut off")))
+    }
 }
 
 fn answer(status: u16, headers: &[(&'static str, &str)], body: impl Into<String>) -> Canned {
@@ -50,6 +72,7 @@ struct Sent {
     headers: Vec<(String, String)>,
     body: Value,
     redirect_policy: Option<RedirectPolicy>,
+    authorization_is_sensitive: bool,
 }
 
 impl Sent {
@@ -97,6 +120,10 @@ fn set_up(source: TokenSource, answers: Vec<Canned>, cx: &mut TestAppContext) ->
                 .pop_front();
             async move {
                 let redirect_policy = request.extensions().get::<RedirectPolicy>().cloned();
+                let authorization_is_sensitive = request
+                    .headers()
+                    .get("authorization")
+                    .is_some_and(|value| value.is_sensitive());
                 let (parts, mut body) = request.into_parts();
                 let mut bytes = Vec::new();
                 body.read_to_end(&mut bytes).await?;
@@ -117,6 +144,7 @@ fn set_up(source: TokenSource, answers: Vec<Canned>, cx: &mut TestAppContext) ->
                             .collect(),
                         body: serde_json::from_slice(&bytes).unwrap_or(Value::Null),
                         redirect_policy,
+                        authorization_is_sensitive,
                     });
                 match next {
                     Some(Canned::Answer {
@@ -131,6 +159,14 @@ fn set_up(source: TokenSource, answers: Vec<Canned>, cx: &mut TestAppContext) ->
                         Ok(builder.body(AsyncBody::from(body))?)
                     }
                     Some(Canned::Hang) => futures::future::pending().await,
+                    Some(Canned::Fail) => Err(anyhow::anyhow!("connection reset by peer")),
+                    Some(Canned::FailToConnect(kind)) => Err(anyhow::Error::new(
+                        std::io::Error::new(kind, "connect failed"),
+                    )
+                    .context("error sending request for url (https://api.github.com/)")),
+                    Some(Canned::BrokenBody(kind)) => Ok(Response::builder()
+                        .status(200)
+                        .body(AsyncBody::from_reader(BrokenReader(kind)))?),
                     None => Err(anyhow::anyhow!("no answer was set up")),
                 }
             }
@@ -1712,4 +1748,350 @@ async fn an_issue_keeps_its_assignees_avatar_urls(cx: &mut TestAppContext) {
         Some("https://avatars.githubusercontent.com/u/583231?v=4")
     );
     assert_eq!(issue.assignee_avatars.get("ghost"), None);
+}
+
+#[gpui::test]
+async fn the_authorization_header_is_marked_sensitive(cx: &mut TestAppContext) {
+    let harness = set_up(
+        TokenSource::GhCli,
+        vec![
+            answer(200, &[], r#"{"login":"octocat"}"#),
+            answer(201, &[], comment_json(1).to_string()),
+        ],
+        cx,
+    );
+    harness.backend.viewer().await.expect("a viewer");
+    harness
+        .backend
+        .add_comment(&repository(), 1, "hello".to_string())
+        .await
+        .expect("a comment");
+    let sent = harness.sent();
+    assert!(
+        sent.iter()
+            .all(|request| request.authorization_is_sensitive)
+    );
+}
+
+#[gpui::test]
+async fn a_write_that_gets_no_answer_may_have_been_applied(cx: &mut TestAppContext) {
+    let harness = set_up(TokenSource::GhCli, vec![Canned::Hang, Canned::Hang], cx);
+    let comment = cx.background_executor.spawn(harness.backend.add_comment(
+        &repository(),
+        1,
+        "hello".to_string(),
+    ));
+    cx.run_until_parked();
+    cx.executor().advance_clock(REQUEST_TIMEOUT);
+    cx.run_until_parked();
+    let error = comment.await.expect_err("timed out");
+    assert!(
+        matches!(error, GithubError::OutcomeUnknown { ref message } if message.contains("30 seconds")),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("Reload and check"));
+
+    cx.executor().advance_clock(MIN_WRITE_INTERVAL);
+    let merge = cx
+        .background_executor
+        .spawn(harness.backend.merge_pull_request(
+            "PR_1".to_string(),
+            MergeMethod::Squash,
+            "abc".to_string(),
+        ));
+    cx.run_until_parked();
+    cx.executor().advance_clock(REQUEST_TIMEOUT);
+    cx.run_until_parked();
+    assert!(matches!(
+        merge.await,
+        Err(GithubError::OutcomeUnknown { .. })
+    ));
+}
+
+#[gpui::test]
+async fn a_write_whose_connection_drops_may_have_been_applied(cx: &mut TestAppContext) {
+    let harness = set_up(TokenSource::GhCli, vec![Canned::Fail, Canned::Fail], cx);
+    let error = harness
+        .backend
+        .add_comment(&repository(), 1, "hello".to_string())
+        .await
+        .expect_err("dropped");
+    assert!(
+        matches!(error, GithubError::OutcomeUnknown { ref message } if message.contains("connection reset")),
+        "{error:?}"
+    );
+    cx.executor().advance_clock(MIN_WRITE_INTERVAL);
+    let error = harness
+        .backend
+        .merge_pull_request("PR_1".to_string(), MergeMethod::Squash, "abc".to_string())
+        .await
+        .expect_err("dropped");
+    assert!(
+        matches!(error, GithubError::OutcomeUnknown { .. }),
+        "{error:?}"
+    );
+}
+
+#[gpui::test]
+async fn a_read_whose_connection_drops_stays_a_network_error(cx: &mut TestAppContext) {
+    let harness = set_up(TokenSource::GhCli, vec![Canned::Fail, Canned::Fail], cx);
+    let error = harness
+        .backend
+        .issue(&repository(), 1)
+        .await
+        .expect_err("dropped");
+    assert!(matches!(error, GithubError::Network { .. }), "{error:?}");
+    let error = harness
+        .backend
+        .list_projects(&repository(), None)
+        .await
+        .expect_err("dropped");
+    assert!(
+        matches!(error, GithubError::Network { .. }),
+        "a GraphQL query is a POST but reads nothing it changes: {error:?}"
+    );
+}
+
+#[gpui::test]
+async fn a_write_that_got_an_error_answer_is_not_unknown(cx: &mut TestAppContext) {
+    let harness = set_up(
+        TokenSource::GhCli,
+        vec![answer(500, &[], r#"{"message":"Server Error"}"#)],
+        cx,
+    );
+    let error = harness
+        .backend
+        .add_comment(&repository(), 1, "hello".to_string())
+        .await
+        .expect_err("refused");
+    assert!(
+        matches!(error, GithubError::UnexpectedResponse { .. }),
+        "{error:?}"
+    );
+}
+
+fn viewer_body_of_size(size: usize) -> String {
+    let frame = r#"{"login":"octocat","padding":""}"#.len();
+    let body = format!(
+        r#"{{"login":"octocat","padding":"{}"}}"#,
+        "x".repeat(size - frame)
+    );
+    assert_eq!(body.len(), size);
+    body
+}
+
+#[gpui::test]
+async fn an_answer_of_exactly_the_size_cap_is_read(cx: &mut TestAppContext) {
+    let body = viewer_body_of_size(MAX_RESPONSE_BYTES as usize);
+    let harness = set_up(TokenSource::GhCli, vec![answer(200, &[], body)], cx);
+    let viewer = harness.backend.viewer().await.expect("a viewer");
+    assert_eq!(viewer.login, "octocat");
+}
+
+#[gpui::test]
+async fn an_answer_over_the_size_cap_is_refused_rather_than_cut(cx: &mut TestAppContext) {
+    let body = viewer_body_of_size(MAX_RESPONSE_BYTES as usize + 1);
+    let harness = set_up(
+        TokenSource::GhCli,
+        vec![
+            answer(200, &[], body.clone()),
+            answer(201, &[], body.replace("octocat", "octocaz")),
+        ],
+        cx,
+    );
+    let error = harness.backend.viewer().await.expect_err("too large");
+    assert!(
+        matches!(error, GithubError::UnexpectedResponse { ref message } if message.contains("too large")),
+        "{error:?}"
+    );
+    let error = harness
+        .backend
+        .add_comment(&repository(), 1, "hello".to_string())
+        .await
+        .expect_err("too large");
+    assert!(
+        matches!(error, GithubError::OutcomeUnknown { ref message } if message.contains("too large")),
+        "a write that was applied but cannot be read back is unknown: {error:?}"
+    );
+}
+
+#[gpui::test]
+async fn a_graphql_forbidden_with_sso_headers_asks_to_authorize_the_token(cx: &mut TestAppContext) {
+    let forbidden = json!({"data": null, "errors": [{
+        "type": "FORBIDDEN",
+        "message": "Resource protected by organization SAML enforcement."
+    }]})
+    .to_string();
+    let sso = (
+        "x-github-sso",
+        "required; url=https://github.com/orgs/acme/sso?authorization_request=abc",
+    );
+    let harness = set_up(
+        TokenSource::GhCli,
+        vec![
+            answer(200, &[sso], forbidden.clone()),
+            answer(200, &[sso], forbidden.clone()),
+            answer(200, &[], forbidden),
+        ],
+        cx,
+    );
+    let expected = GithubError::SsoRequired {
+        authorize_url: "https://github.com/orgs/acme/sso?authorization_request=abc".to_string(),
+    };
+    let error = harness
+        .backend
+        .list_projects(&repository(), None)
+        .await
+        .expect_err("sso");
+    assert_eq!(error, expected, "a query");
+    cx.executor().advance_clock(MIN_WRITE_INTERVAL);
+    let error = harness
+        .backend
+        .merge_pull_request("PR_1".to_string(), MergeMethod::Squash, "abc".to_string())
+        .await
+        .expect_err("sso");
+    assert_eq!(error, expected, "a mutation");
+    cx.executor().advance_clock(MIN_WRITE_INTERVAL);
+    let error = harness
+        .backend
+        .list_projects(&repository(), None)
+        .await
+        .expect_err("forbidden");
+    assert!(
+        matches!(error, GithubError::Forbidden { .. }),
+        "without the header it stays a plain refusal: {error:?}"
+    );
+}
+
+#[gpui::test]
+async fn search_text_is_cut_to_a_bounded_length(cx: &mut TestAppContext) {
+    let harness = set_up(TokenSource::GhCli, vec![empty_search(), empty_search()], cx);
+    let filter = IssueFilter {
+        state: IssueStateFilter::All,
+        ..IssueFilter::default()
+    };
+    let long_text = "word ".repeat(2000);
+    let exact_text = format!("{} end", "a".repeat(SEARCH_TEXT_MAX_CHARACTERS - 4));
+    for text in [long_text.as_str(), exact_text.as_str()] {
+        harness
+            .backend
+            .search_issues(&repository(), &filter, text, None)
+            .await
+            .expect("a page");
+    }
+    let queries = harness.sent().iter().map(search_query).collect::<Vec<_>>();
+    let group = |query: &str| {
+        query
+            .strip_prefix("repo:octo/repo is:issue (")
+            .and_then(|rest| rest.strip_suffix(')'))
+            .map(str::to_string)
+            .expect("a text group")
+    };
+    let long_group = group(&queries[0]);
+    assert!(long_group.starts_with("word word"));
+    assert!(
+        long_group.chars().count() <= SEARCH_TEXT_MAX_CHARACTERS,
+        "{} characters",
+        long_group.chars().count()
+    );
+    assert_eq!(
+        group(&queries[1]),
+        exact_text,
+        "text of exactly the cap is kept whole"
+    );
+}
+
+#[gpui::test]
+async fn a_label_with_a_comma_cannot_be_listed_by_the_rest_filter(cx: &mut TestAppContext) {
+    let harness = set_up(TokenSource::GhCli, vec![answer(200, &[], "[]")], cx);
+    let filter = IssueFilter {
+        labels: vec!["bug".to_string(), "a,b".to_string()],
+        ..IssueFilter::default()
+    };
+    let error = harness
+        .backend
+        .list_issues(&repository(), &filter, None)
+        .await
+        .expect_err("refused");
+    assert!(
+        matches!(error, GithubError::Rejected { ref message } if message.contains("a,b")),
+        "{error:?}"
+    );
+    assert!(
+        harness.sent().is_empty(),
+        "nothing is sent that GitHub would read as two labels"
+    );
+}
+
+#[gpui::test]
+async fn a_write_that_never_connected_is_a_plain_network_error(cx: &mut TestAppContext) {
+    let kinds = [
+        std::io::ErrorKind::ConnectionRefused,
+        std::io::ErrorKind::HostUnreachable,
+        std::io::ErrorKind::NetworkUnreachable,
+        std::io::ErrorKind::AddrNotAvailable,
+    ];
+    let harness = set_up(
+        TokenSource::GhCli,
+        kinds
+            .iter()
+            .map(|kind| Canned::FailToConnect(*kind))
+            .collect(),
+        cx,
+    );
+    for kind in kinds {
+        cx.executor().advance_clock(MIN_WRITE_INTERVAL);
+        let error = harness
+            .backend
+            .add_comment(&repository(), 1, "hello".to_string())
+            .await
+            .expect_err("unreachable");
+        assert!(
+            matches!(error, GithubError::Network { .. }),
+            "{kind:?}: {error:?}"
+        );
+        assert!(
+            !error.to_string().contains("may already have applied"),
+            "a safe retry must not be discouraged: {error}"
+        );
+    }
+}
+
+#[gpui::test]
+async fn a_write_cut_off_while_reading_the_answer_stays_unknown(cx: &mut TestAppContext) {
+    let harness = set_up(
+        TokenSource::GhCli,
+        vec![Canned::BrokenBody(std::io::ErrorKind::ConnectionRefused)],
+        cx,
+    );
+    let error = harness
+        .backend
+        .add_comment(&repository(), 1, "hello".to_string())
+        .await
+        .expect_err("cut off");
+    assert!(
+        matches!(error, GithubError::OutcomeUnknown { .. }),
+        "the request was sent, so an io kind alone proves nothing: {error:?}"
+    );
+}
+
+#[test]
+fn a_real_refused_connection_is_recognised_as_never_sent() {
+    use http_client::HttpClient as _;
+
+    let address = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .expect("bind a local port");
+    let client = reqwest_client::ReqwestClient::new();
+    let request = http_client::Request::builder()
+        .uri(format!("http://{address}/"))
+        .body(AsyncBody::empty())
+        .expect("request");
+    let error = futures::executor::block_on(client.send(request))
+        .err()
+        .expect("nothing listens");
+    assert!(
+        crate::http_transport::failed_before_the_request_was_sent(&error),
+        "{error:?}"
+    );
 }

@@ -3,11 +3,12 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use devices::{
-    DetachedExit, FakeHost, HostOs, HostSystem as _, ToolFailure, ToolInvocation, ToolOutput,
+    DetachedTool, FakeHost, HostOs, HostSystem as _, ToolFailure, ToolInvocation, ToolOutput,
     ToolRunner,
 };
 use futures::FutureExt as _;
@@ -69,14 +70,19 @@ impl ToolRunner for GatedRunner {
         &self,
         invocation: ToolInvocation,
         log_file: &Path,
-    ) -> anyhow::Result<DetachedExit> {
+    ) -> anyhow::Result<DetachedTool> {
         self.inner.spawn_detached(invocation, log_file)
+    }
+
+    fn terminate_process_group(&self, process_id: u32) -> anyhow::Result<()> {
+        self.inner.terminate_process_group(process_id)
     }
 }
 
 pub(crate) struct Rig {
     pub host: Arc<FakeHost>,
     pub runner: Arc<GatedRunner>,
+    simulator_lists_scripted: AtomicUsize,
 }
 
 impl Rig {
@@ -86,7 +92,11 @@ impl Rig {
             inner: host.clone(),
             gates: Mutex::new(Vec::new()),
         });
-        Self { host, runner }
+        Self {
+            host,
+            runner,
+            simulator_lists_scripted: AtomicUsize::new(0),
+        }
     }
 
     /// A Mac with Xcode, two simulators, and no Android SDK. Each call of
@@ -105,10 +115,13 @@ impl Rig {
             XCRUN,
             ["simctl", "list", "runtimes", "-j"],
             0,
-            r#"{"runtimes":[{"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-18-0","name":"iOS 18.0","supportedDeviceTypes":[]}]}"#,
+            r#"{"runtimes":[{"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-18-0","name":"iOS 18.0","supportedDeviceTypes":[{"identifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-16","productFamily":"iPhone"}]}]}"#,
             "",
         );
-        let json_path = host.temp_file_path("devicectl-devices.json");
+        let json_path = host
+            .create_temp_dir("devicectl")
+            .expect("the fake host makes folders")
+            .join("devicectl-devices.json");
         host.script_output(
             XCRUN,
             [
@@ -148,23 +161,45 @@ impl Rig {
         rig
     }
 
+    /// One more read of the simulators. The first answer is the panel's own
+    /// read of the whole list; every later one is also what following one
+    /// simulator sees, which asks for that simulator alone.
     pub(crate) fn script_simulator_list(&self, state_a: &str, state_b: &str) {
         let entry = |udid: &str, name: &str, state: &str| {
             format!(
                 r#"{{"udid":"{udid}","name":"{name}","state":"{state}","isAvailable":true,"deviceTypeIdentifier":"com.apple.CoreSimulator.SimDeviceType.iPhone-16"}}"#
             )
         };
+        let list = |entries: Vec<String>| {
+            format!(
+                r#"{{"devices":{{"com.apple.CoreSimulator.SimRuntime.iOS-18-0":[{}]}}}}"#,
+                entries.join(",")
+            )
+        };
+        let entry_a = entry(SIMULATOR_A, "iPhone A", state_a);
+        let entry_b = entry(SIMULATOR_B, "iPhone B", state_b);
         self.host.script_output(
             XCRUN,
             ["simctl", "list", "devices", "available", "-j"],
             0,
-            &format!(
-                r#"{{"devices":{{"com.apple.CoreSimulator.SimRuntime.iOS-18-0":[{},{}]}}}}"#,
-                entry(SIMULATOR_A, "iPhone A", state_a),
-                entry(SIMULATOR_B, "iPhone B", state_b)
-            ),
+            &list(vec![entry_a.clone(), entry_b.clone()]),
             "",
         );
+        if self
+            .simulator_lists_scripted
+            .fetch_add(1, Ordering::Relaxed)
+            > 0
+        {
+            for (udid, entry) in [(SIMULATOR_A, entry_a), (SIMULATOR_B, entry_b)] {
+                self.host.script_output(
+                    XCRUN,
+                    ["simctl", "list", "devices", "available", "-j", udid],
+                    0,
+                    &list(vec![entry]),
+                    "",
+                );
+            }
+        }
     }
 
     /// A Linux machine with an Android SDK, two AVDs and one USB phone.

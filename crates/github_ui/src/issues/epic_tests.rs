@@ -1,19 +1,21 @@
 use std::sync::Arc;
 
 use editor::Editor;
+use futures::FutureExt as _;
 use github::{
-    FakeGithubBackend, FakeWrite, GithubBackend, GithubError, Issue, IssueState, IssueType,
-    NewIssue, RepositoryPermission, SubIssuePosition, SubIssuesSummary, fake_issue,
+    FakeGithubBackend, FakeWrite, GithubBackend, GithubError, Issue, IssueState, IssueStateFilter,
+    IssueType, NewIssue, RepositoryPermission, SubIssuePosition, SubIssuesSummary, fake_issue,
 };
 use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext};
 use workspace::Workspace;
 
 use crate::github_view::DetailKey;
 use crate::github_view_session::test_session;
-use crate::issues::epic_tree::{ChildrenLoad, progress_label};
+use crate::issues::epic_tree::{ChildrenLoad, ListEntry, progress_label};
 use crate::issues::issue_editor::CreateIssueDialog;
 use crate::issues::issue_type_picker::type_choices;
 use crate::issues::issues_test_support::{context, init, repository, workspace_window};
+use crate::issues::paged_reads::read_pages;
 use crate::issues::sub_issue_section::{
     MoveDirection, PendingRemoval, PickerPurpose, move_position, sub_issue_write_error,
 };
@@ -563,4 +565,145 @@ async fn a_sub_issue_is_found_by_node_id_not_by_its_number(cx: &mut TestAppConte
         vec![FakeWrite::RemoveSubIssue(repository(), 1, 9003)],
         "the other repository's #3 is the one removed"
     );
+}
+
+/// Adding a sub-issue moves the parent's `updated_at` on GitHub; a
+/// description being edited must not take that for someone else's change.
+#[gpui::test]
+async fn an_own_sub_issue_write_moves_the_edit_base_forward(cx: &mut TestAppContext) {
+    init(cx);
+    let (workspace, cx) = workspace_window(cx).await;
+    let fake = Arc::new(epic_fake());
+    let view = open_detail(&workspace, fake.clone(), 1, cx);
+    view.update_in(cx, |view, window, cx| view.start_editing(window, cx));
+    fake.edit_issue(&repository(), 1, |issue| {
+        issue.updated_at = "2026-11-02T00:00:00Z".to_string();
+    });
+    let found = futures::executor::block_on(fake.issue(&repository(), 4)).expect("exists");
+    view.update(cx, |view, cx| view.add_sub_issue(found, cx));
+    cx.run_until_parked();
+    let title = view
+        .read_with(cx, |view, _| {
+            view.edit.as_ref().map(|edit| edit.title.clone())
+        })
+        .expect("still editing");
+    title.update_in(cx, |editor, window, cx| {
+        editor.set_text("Renamed epic", window, cx)
+    });
+
+    view.update(cx, |view, cx| view.save_edit(cx));
+    cx.run_until_parked();
+
+    view.read_with(cx, |view, _| {
+        assert_eq!(view.edit_error(), None);
+        assert_eq!(
+            view.issue().map(|issue| issue.title.as_str()),
+            Some("Renamed epic")
+        );
+    });
+}
+
+/// A page of `count` numbers under the cursor `next`, as a backend answers.
+fn number_page(count: u64, next: Option<&str>) -> github::GithubFuture<github::Page<u64>> {
+    let page = github::Page {
+        items: (0..count).collect(),
+        next_cursor: next.map(str::to_string),
+    };
+    futures::future::ready(Ok(page)).boxed()
+}
+
+#[test]
+fn paging_reads_every_page_until_the_last() {
+    let mut pages = vec![Some("a"), Some("b"), None].into_iter();
+    let read = futures::executor::block_on(read_pages(10, usize::MAX, |_| {
+        number_page(2, pages.next().flatten())
+    }))
+    .expect("read");
+    assert_eq!(read.items.len(), 6);
+    assert!(!read.cut_short);
+}
+
+#[test]
+fn paging_stops_at_a_cursor_it_has_seen() {
+    let mut asked = 0;
+    let read = futures::executor::block_on(read_pages(10, usize::MAX, |_| {
+        asked += 1;
+        number_page(1, Some("same"))
+    }))
+    .expect("read");
+    assert_eq!(asked, 2, "the second answer repeated the cursor");
+    assert_eq!(read.items.len(), 2);
+    assert!(read.cut_short);
+}
+
+#[test]
+fn paging_stops_at_the_page_limit_even_over_empty_pages() {
+    let mut asked = 0;
+    let read = futures::executor::block_on(read_pages(4, usize::MAX, |cursor| {
+        asked += 1;
+        number_page(0, Some(&format!("{cursor:?}-{asked}")))
+    }))
+    .expect("read");
+    assert_eq!(asked, 4);
+    assert!(read.items.is_empty());
+    assert!(read.cut_short);
+}
+
+#[test]
+fn paging_stops_at_the_item_limit_and_a_failure_ends_it() {
+    let mut count = 0;
+    let read = futures::executor::block_on(read_pages(10, 5, |_| {
+        count += 1;
+        number_page(3, Some(&count.to_string()))
+    }))
+    .expect("read");
+    assert_eq!(read.items.len(), 6, "stops once five are held");
+    let failed = futures::executor::block_on(read_pages::<u64>(10, usize::MAX, |_| {
+        futures::future::ready(Err(GithubError::NotFound)).boxed()
+    }));
+    assert_eq!(failed.err(), Some(GithubError::NotFound));
+}
+
+/// The rows kept between frames are the rows built now, whatever changed
+/// since: opening and closing a parent, its sub-issues arriving, a filter, a
+/// typed word and a reload each leave nothing stale behind.
+#[gpui::test]
+async fn the_kept_rows_always_match_the_rows_built_now(cx: &mut TestAppContext) {
+    init(cx);
+    let (_workspace, cx) = workspace_window(cx).await;
+    let fake = Arc::new(epic_fake());
+    let list = list_over(fake.clone(), cx);
+    let check = |step: &str, cx: &mut VisualTestContext| {
+        list.update(cx, |list, _| {
+            let kept = list.ensure_rows();
+            assert_eq!(*kept, list.build_entries(), "{step}");
+        });
+    };
+    check("loaded", cx);
+
+    list.update(cx, |list, cx| list.toggle_sub_issues(key(1), cx));
+    check("opened, sub-issues on their way", cx);
+    list.update(cx, |list, _| {
+        assert!(
+            list.ensure_rows()
+                .iter()
+                .any(|entry| matches!(entry, ListEntry::Status { .. })),
+            "the loading line is a row of the list"
+        );
+    });
+    cx.run_until_parked();
+    check("sub-issues arrived", cx);
+    list.update(cx, |list, cx| list.set_query("Fourth".to_string(), cx));
+    check("typed", cx);
+    list.update(cx, |list, cx| list.set_query(String::new(), cx));
+    list.update(cx, |list, cx| list.toggle_sub_issues(key(1), cx));
+    check("closed", cx);
+    list.update(cx, |list, cx| list.set_state(IssueStateFilter::Closed, cx));
+    check("a new filter, rows on their way", cx);
+    cx.run_until_parked();
+    check("a new filter, rows arrived", cx);
+    fake.edit_issue(&repository(), 3, |issue| issue.title = "Edited".to_string());
+    list.update(cx, |list, cx| list.reload(cx));
+    cx.run_until_parked();
+    check("reloaded", cx);
 }

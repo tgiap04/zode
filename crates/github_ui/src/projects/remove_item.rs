@@ -58,6 +58,8 @@ impl ProjectsSection {
             return;
         };
         let removed = self.items.remove(index);
+        self.note_removal_sent(&item_id);
+        self.layout_changed();
         if self.selected_card.as_deref() == Some(item_id.as_str()) {
             self.selected_card = None;
         }
@@ -72,18 +74,20 @@ impl ProjectsSection {
         let write = self
             .context
             .backend
-            .delete_project_item(project_id.clone(), item_id);
+            .delete_project_item(project_id.clone(), item_id.clone());
         cx.spawn(async move |this, cx| {
             let result = write.await;
             this.update(cx, |this, cx| {
+                let same_project = this.selected_project.as_deref() == Some(project_id.as_str());
+                if result.is_ok() && same_project {
+                    this.note_removal_landed(&item_id);
+                }
                 if let Err(error) = result {
                     this.note_error(&error, cx);
                     this.note_write_error(&error);
                     let title = item_title(&removed).to_string();
                     // Another project may be shown by now, or the item read
                     // back in with it: only put it back where it is missing.
-                    let same_project =
-                        this.selected_project.as_deref() == Some(project_id.as_str());
                     this.move_message = Some(SharedString::from(if same_project {
                         format!("Could not remove “{title}”: {error}. It is back in the project.")
                     } else {
@@ -93,7 +97,9 @@ impl ProjectsSection {
                     }));
                     if same_project && !this.items.iter().any(|item| item.id == removed.id) {
                         let at = index.min(this.items.len());
+                        this.note_item_added(&removed.id);
                         this.items.insert(at, removed);
+                        this.layout_changed();
                     }
                     cx.notify();
                 }

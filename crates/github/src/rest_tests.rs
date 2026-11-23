@@ -105,6 +105,25 @@ fn the_next_page_number_comes_from_the_link_header() {
 }
 
 #[test]
+fn a_comma_inside_a_link_does_not_split_it() {
+    let link = headers(&[(
+        "link",
+        "<https://api.github.com/repos/o/r/issues?labels=a,b&per_page=50&page=2>; rel=\"next\", \
+         <https://api.github.com/repos/o/r/issues?labels=a,b&per_page=50&page=9>; rel=\"last\"",
+    )]);
+    assert_eq!(next_page(&link).as_deref(), Some("page=2"));
+    let last_first = headers(&[(
+        "link",
+        "<https://api.github.com/x?labels=a,b&page=1>; rel=\"prev\",<https://api.github.com/x?labels=a,b&page=3>;rel=\"next\"",
+    )]);
+    assert_eq!(
+        next_page(&last_first).as_deref(),
+        Some("page=3"),
+        "no space after the comma, no space before rel"
+    );
+}
+
+#[test]
 fn the_next_page_cursor_keeps_only_a_paging_parameter() {
     let cursor = headers(&[(
         "link",

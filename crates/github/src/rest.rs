@@ -98,14 +98,25 @@ fn paging_parameter<'a>(
     })
 }
 
+/// The `(target, parameters)` of each entry of a `Link` header. A target may
+/// hold a comma (`?labels=a,b`), so entries are told apart by the `<` that
+/// opens each one, not by splitting on commas.
+fn link_entries(value: &str) -> impl Iterator<Item = (&str, &str)> {
+    value.split('<').skip(1).filter_map(|entry| {
+        let (target, parameters) = entry.split_once('>')?;
+        Some((target, parameters.trim().trim_end_matches(',')))
+    })
+}
+
 /// The cursor of the next page from the `Link` header: the link's paging
 /// parameter alone, as `name=value`. Everything else in the link is dropped,
 /// so the next request is built here rather than sent where GitHub named.
 pub(crate) fn next_page(headers: &HeaderMap) -> Option<String> {
-    header(headers, "link")?.split(',').find_map(|link| {
-        let mut parts = link.split(';').map(str::trim);
-        let target = parts.next()?.strip_prefix('<')?.strip_suffix('>')?;
-        if !parts.any(|part| part == "rel=\"next\"") {
+    link_entries(header(headers, "link")?).find_map(|(target, parameters)| {
+        if !parameters
+            .split(';')
+            .any(|parameter| parameter.trim() == "rel=\"next\"")
+        {
             return None;
         }
         let url = url::Url::parse(target).ok()?;

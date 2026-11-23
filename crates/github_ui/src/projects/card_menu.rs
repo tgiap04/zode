@@ -119,13 +119,13 @@ impl ProjectsSection {
 
     /// Steps through the cards column by column, top to bottom.
     pub(super) fn select_adjacent_card(&mut self, step: isize, cx: &mut Context<Self>) {
-        let Some(details) = self.details() else {
+        let Some(columns) = self.columns() else {
             return;
         };
-        let order = board_columns(self.view(), details, self.items())
-            .into_iter()
-            .flat_map(|column| column.items)
-            .filter_map(|index| self.items().get(index).map(|item| item.id.clone()))
+        let order = columns
+            .iter()
+            .flat_map(|column| column.items.iter())
+            .filter_map(|index| self.items().get(*index).map(|item| item.id.clone()))
             .collect::<Vec<_>>();
         let Some(last) = order.len().checked_sub(1) else {
             return;
@@ -140,6 +140,7 @@ impl ProjectsSection {
             Some(position) => position.saturating_add_signed(step).min(last),
         };
         if let Some(id) = order.get(next).cloned() {
+            self.reveal_card(&id);
             self.select_card(id, cx);
         }
     }

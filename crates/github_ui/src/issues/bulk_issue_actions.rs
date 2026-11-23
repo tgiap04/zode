@@ -320,14 +320,23 @@ impl BulkIssueDialog {
             BulkPhase::Confirming | BulkPhase::Finished => cx.emit(DismissEvent),
             BulkPhase::Running => {
                 self.run_task = None;
+                let mut interrupted = Vec::new();
                 for item in &mut self.items {
                     item.status = match item.status {
-                        BulkItemStatus::Running => BulkItemStatus::Interrupted,
+                        BulkItemStatus::Running => {
+                            interrupted.push(item.number);
+                            BulkItemStatus::Interrupted
+                        }
                         BulkItemStatus::Waiting => BulkItemStatus::Cancelled,
                         ref settled => settled.clone(),
                     };
                 }
                 self.finish(cx);
+                // The write being sent may have landed: its row would still
+                // show the issue as it was.
+                self.list
+                    .update(cx, |list, cx| list.refresh_rows(interrupted, cx))
+                    .ok();
             }
         }
     }

@@ -2532,6 +2532,155 @@ async fn test_remote_git_fetch_refuses_a_remote_name_that_reads_as_an_option(
     );
 }
 
+/// A peer may fetch a pull request into its own ref and nowhere else: not
+/// over `refs/remotes/<remote>/HEAD` or a branch the host tracks.
+#[gpui::test]
+async fn test_remote_git_fetch_refuses_to_repoint_a_tracking_ref(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(
+        path!("/code"),
+        json!({
+            "project1": {
+                ".git": {},
+                "README.md": "# project 1",
+            },
+        }),
+    )
+    .await;
+    let dot_git = Path::new(path!("/code/project1/.git"));
+    fs.set_remote_for_repo(dot_git, "upstream", "https://github.com/octo/repo.git");
+    fs.with_git_state(dot_git, false, |state| {
+        state
+            .remote_refs
+            .entry("upstream".to_string())
+            .or_default()
+            .insert("refs/pull/7/head".to_string(), "f0rk".to_string());
+    })
+    .unwrap();
+
+    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
+    project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/code/project1"), true, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    let repository = project.update(cx, |project, cx| project.active_repository(cx).unwrap());
+
+    for destination in [
+        "refs/remotes/upstream/HEAD",
+        "refs/remotes/upstream/main",
+        "refs/remotes/upstream/pull/8/head",
+    ] {
+        let fetch_options = git::repository::FetchOptions::Refspec {
+            remote: git::repository::Remote {
+                name: "upstream".into(),
+            },
+            source: "refs/pull/7/head".into(),
+            destination: destination.into(),
+        };
+        let askpass =
+            cx.update(|cx| askpass::AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {}));
+        let result = cx
+            .update(|cx| {
+                repository.update(cx, |repository, cx| {
+                    repository.fetch(fetch_options, askpass, cx)
+                })
+            })
+            .await
+            .unwrap();
+        assert!(result.is_err(), "{destination} must be refused");
+        let written = fs
+            .with_git_state(dot_git, false, |state| state.refs.get(destination).cloned())
+            .unwrap();
+        assert_eq!(written, None, "{destination} was written");
+    }
+}
+
+/// `switch -c` checks the new branch out, and git will not delete a branch
+/// that is checked out: what the pull request checkout's cleanup relies on,
+/// through the same requests a remote project sends.
+#[gpui::test]
+async fn test_remote_git_created_branch_is_checked_out_until_switched_away(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(
+        path!("/code"),
+        json!({
+            "project1": {
+                ".git": {},
+                "README.md": "# project 1",
+            },
+        }),
+    )
+    .await;
+    let dot_git = Path::new(path!("/code/project1/.git"));
+    fs.insert_branches(dot_git, &["main"]);
+    fs.set_branch_name(dot_git, Some("main"));
+
+    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
+    project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/code/project1"), true, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    let repository = project.update(cx, |project, cx| project.active_repository(cx).unwrap());
+    let current = |fs: &FakeFs| {
+        fs.with_git_state(dot_git, false, |state| state.current_branch_name.clone())
+            .unwrap()
+    };
+
+    cx.update(|cx| {
+        repository.update(cx, |repository, _| {
+            repository.create_branch("pr-7".to_string(), None)
+        })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(current(&fs).as_deref(), Some("pr-7"));
+
+    let refused = cx
+        .update(|cx| {
+            repository.update(cx, |repository, _| {
+                repository.delete_branch(false, "pr-7".to_string())
+            })
+        })
+        .await
+        .unwrap();
+    assert!(refused.is_err(), "a checked-out branch is not deleted");
+
+    cx.update(|cx| {
+        repository.update(cx, |repository, _| {
+            repository.change_branch("main".to_string())
+        })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    cx.update(|cx| {
+        repository.update(cx, |repository, _| {
+            repository.delete_branch(false, "pr-7".to_string())
+        })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(current(&fs).as_deref(), Some("main"));
+    let branches = fs
+        .with_git_state(dot_git, false, |state| state.branches.clone())
+        .unwrap();
+    assert!(!branches.contains("pr-7"), "{branches:?}");
+}
+
 #[gpui::test]
 async fn test_remote_git_checkpoints(cx: &mut TestAppContext, server_cx: &mut TestAppContext) {
     let fs = FakeFs::new(server_cx.executor());

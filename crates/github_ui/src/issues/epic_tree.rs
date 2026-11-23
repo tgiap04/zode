@@ -2,6 +2,7 @@
 //! done and opens to show them, read from GitHub only when opened.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use github::{
@@ -12,6 +13,11 @@ use gpui::{Context, Task};
 
 use crate::github_view::DetailKey;
 use crate::issues::issue_list::IssueList;
+use crate::issues::paged_reads::read_pages;
+
+/// Pages read for one parent's sub-issues: GitHub allows 100 of them, so a
+/// longer chain of pages means the cursor is not leading anywhere.
+const MAX_SUB_ISSUE_PAGES: usize = 10;
 
 /// The sub-issues under an opened row.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +33,14 @@ pub struct TreeRow {
     pub depth: usize,
     pub key: DetailKey,
     pub issue: Issue,
+}
+
+/// One line of the list as drawn, all of one height: an issue, or what an
+/// opened row's sub-issues are doing while they are not shown.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ListEntry {
+    Row(TreeRow),
+    Status { depth: usize, text: String },
 }
 
 /// The opened rows. Forgotten when the list is read again, so a reload never
@@ -61,22 +75,20 @@ pub(crate) async fn read_sub_issues(
     repository: RepositoryId,
     number: u64,
 ) -> GithubResult<Vec<Issue>> {
-    let mut sub_issues = Vec::new();
-    let mut cursor = None;
-    loop {
-        let page = backend.list_sub_issues(&repository, number, cursor).await?;
-        sub_issues.extend(page.items);
-        cursor = page.next_cursor;
-        if cursor.is_none() || sub_issues.len() as u64 >= MAX_SUB_ISSUES_PER_PARENT {
-            return Ok(sub_issues);
-        }
-    }
+    let read = read_pages(
+        MAX_SUB_ISSUE_PAGES,
+        MAX_SUB_ISSUES_PER_PARENT as usize,
+        |cursor| backend.list_sub_issues(&repository, number, cursor),
+    )
+    .await?;
+    Ok(read.items)
 }
 
 impl IssueList {
     /// Opens a parent row, reading its sub-issues the first time, or closes
     /// it.
     pub fn toggle_sub_issues(&mut self, key: DetailKey, cx: &mut Context<Self>) {
+        self.rows_changed();
         if self.epic_tree.opened.remove(&key).is_some() {
             self.epic_tree.tasks.remove(&key);
             cx.notify();
@@ -91,6 +103,7 @@ impl IssueList {
             async move |this, cx| {
                 let read = read_sub_issues(backend, key.repository.clone(), key.number).await;
                 this.update(cx, |this, cx| {
+                    this.rows_changed();
                     if let Some(load) = this.epic_tree.opened.get_mut(&key) {
                         *load = match read {
                             Ok(sub_issues) => ChildrenLoad::Loaded(sub_issues),
@@ -112,6 +125,7 @@ impl IssueList {
 
     pub(crate) fn forget_opened_rows(&mut self) {
         self.epic_tree = EpicTree::default();
+        self.rows_changed();
     }
 
     /// The key a row is found and opened by: its own repository, which for a
@@ -125,21 +139,55 @@ impl IssueList {
 
     /// The visible rows with the sub-issues of every opened row under it.
     pub fn tree_rows(&self) -> Vec<TreeRow> {
-        let mut rows = Vec::new();
-        for issue in self.visible_rows() {
-            self.push_tree_row(issue, 0, &mut rows);
-        }
-        rows
+        self.build_entries()
+            .into_iter()
+            .filter_map(|entry| match entry {
+                ListEntry::Row(row) => Some(row),
+                ListEntry::Status { .. } => None,
+            })
+            .collect()
     }
 
-    fn push_tree_row(&self, issue: &Issue, depth: usize, rows: &mut Vec<TreeRow>) {
+    pub(crate) fn build_entries(&self) -> Vec<ListEntry> {
+        let mut entries = Vec::new();
+        for issue in self.visible_rows() {
+            self.push_entries(issue, 0, &mut entries);
+        }
+        entries
+    }
+
+    /// What the list draws, built again only after something it is built
+    /// from changed: drawing happens on every frame, and filtering every row
+    /// and copying it each time is the cost of a long list.
+    pub(crate) fn ensure_rows(&mut self) -> Rc<Vec<ListEntry>> {
+        if let Some(entries) = &self.entries {
+            return entries.clone();
+        }
+        let entries = Rc::new(self.build_entries());
+        #[cfg(test)]
+        {
+            self.rebuilds += 1;
+        }
+        self.entries = Some(entries.clone());
+        entries
+    }
+
+    fn push_entries(&self, issue: &Issue, depth: usize, entries: &mut Vec<ListEntry>) {
         let key = self.row_key(issue);
         let opened = self.epic_tree.opened.get(&key);
-        rows.push(TreeRow {
+        entries.push(ListEntry::Row(TreeRow {
             depth,
             key,
             issue: issue.clone(),
-        });
+        }));
+        let text = match opened {
+            Some(ChildrenLoad::Loading) => Some("Loading sub-issues…".to_string()),
+            Some(ChildrenLoad::Failed(error)) => Some(error.to_string()),
+            Some(ChildrenLoad::Loaded(_)) | None => None,
+        };
+        if let Some(text) = text {
+            entries.push(ListEntry::Status { depth, text });
+        }
         // GitHub stops nesting at this depth; the bound also keeps a cycle
         // in a broken answer from recursing forever.
         if depth + 1 >= MAX_SUB_ISSUE_DEPTH {
@@ -147,7 +195,7 @@ impl IssueList {
         }
         if let Some(ChildrenLoad::Loaded(sub_issues)) = opened {
             for sub_issue in sub_issues {
-                self.push_tree_row(sub_issue, depth + 1, rows);
+                self.push_entries(sub_issue, depth + 1, entries);
             }
         }
     }

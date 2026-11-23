@@ -1,5 +1,6 @@
+use std::collections::HashSet;
 use std::path::Path;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use util::ResultExt as _;
 
@@ -76,6 +77,102 @@ pub fn prune_emulator_logs(host: &dyn HostSystem, log_dir: &Path, avd_name: &str
     for old_log in logs.iter().skip(keep) {
         host.remove_file(&log_dir.join(old_log)).log_err();
     }
+}
+
+/// Logs older than this are deleted whichever AVD wrote them.
+pub const EMULATOR_LOG_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// What the logs of all AVDs together may take at the next start.
+pub const EMULATOR_LOGS_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Makes room at a start: deletes the logs of every AVD that are older than
+/// [`EMULATOR_LOG_MAX_AGE`], then the oldest of the rest until the others fit
+/// [`EMULATOR_LOGS_TOTAL_BYTES`]. A chatty emulator's log grows while it runs
+/// and nothing here can stop that; this only keeps old runs from piling up.
+/// The newest log of each AVD is never cut for size: it may be the log of an
+/// emulator that is still running (or of the one this start is about to
+/// write), and "Open log" must keep working for it.
+pub fn prune_stale_emulator_logs(host: &dyn HostSystem, log_dir: &Path, now: SystemTime) {
+    prune_logs_within(
+        host,
+        log_dir,
+        now,
+        EMULATOR_LOG_MAX_AGE,
+        EMULATOR_LOGS_TOTAL_BYTES,
+    );
+}
+
+pub(crate) fn prune_logs_within(
+    host: &dyn HostSystem,
+    log_dir: &Path,
+    now: SystemTime,
+    max_age: Duration,
+    max_total_bytes: u64,
+) {
+    let Ok(names) = host.read_dir_names(log_dir) else {
+        return;
+    };
+    let oldest_kept = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis())
+        .saturating_sub(max_age.as_millis());
+    let mut logs: Vec<ParsedLog> = names
+        .into_iter()
+        .filter_map(|name| {
+            let (avd_name, started) = parse_log_name(&name)?;
+            Some(ParsedLog {
+                avd_name: avd_name.to_string(),
+                started,
+                name,
+            })
+        })
+        .collect();
+    // Newest first, so the budget goes to the logs most likely to be read.
+    logs.sort_unstable_by(|left, right| {
+        (right.started, &right.name).cmp(&(left.started, &left.name))
+    });
+    let mut seen_avds = HashSet::new();
+    let mut total_bytes = 0u64;
+    let mut budgeted = Vec::new();
+    for log in logs {
+        let path = log_dir.join(&log.name);
+        let newest_of_avd = seen_avds.insert(log.avd_name.clone());
+        if log.started < oldest_kept {
+            host.remove_file(&path).log_err();
+        } else if newest_of_avd {
+            total_bytes = total_bytes.saturating_add(host.file_len(&path).unwrap_or(0));
+        } else {
+            budgeted.push(path);
+        }
+    }
+    // What the spared logs leave is spent on the newer of the others first.
+    for path in budgeted {
+        let size = host.file_len(&path).unwrap_or(0);
+        if total_bytes.saturating_add(size) <= max_total_bytes {
+            total_bytes += size;
+        } else {
+            host.remove_file(&path).log_err();
+        }
+    }
+}
+
+struct ParsedLog {
+    avd_name: String,
+    started: u128,
+    name: String,
+}
+
+/// The AVD and the start time in a name made by [`emulator_log_file_name`]. An
+/// AVD name may hold `-`, so the stamp is whatever follows the last one.
+fn parse_log_name(file_name: &str) -> Option<(&str, u128)> {
+    let (avd_name, stamp) = file_name
+        .strip_prefix("emulator-")?
+        .strip_suffix(".log")?
+        .rsplit_once('-')?;
+    if avd_name.is_empty() || stamp.is_empty() || !stamp.chars().all(|digit| digit.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((avd_name, stamp.parse().ok()?))
 }
 
 pub fn read_emulator_log_tail(host: &dyn HostSystem, log_file: &Path) -> Option<String> {

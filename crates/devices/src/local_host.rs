@@ -7,9 +7,9 @@ use async_trait::async_trait;
 use futures::AsyncWriteExt as _;
 use util::command::Stdio;
 
-use crate::detached_spawn::spawn_detached;
+use crate::detached_spawn::{spawn_detached, terminate_process_group};
 use crate::host::{
-    DetachedExit, HostOs, HostSystem, ToolFailure, ToolInvocation, ToolOutput, ToolRunner,
+    DetachedTool, HostOs, HostSystem, ToolFailure, ToolInvocation, ToolOutput, ToolRunner,
     ensure_absolute_program,
 };
 
@@ -64,12 +64,24 @@ impl ToolRunner for LocalHost {
             if let Some(text) = &invocation.stdin
                 && let Some(mut stdin) = child.stdin.take()
             {
-                stdin.write_all(text.as_bytes()).await?;
-                stdin.close().await?;
+                // A tool that fails on its arguments exits without reading
+                // its input; what it printed then is the real error, so a
+                // closed pipe must not hide it.
+                for result in [stdin.write_all(text.as_bytes()).await, stdin.close().await] {
+                    match result {
+                        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
+                        result => result?,
+                    }
+                }
             }
-            child.output().await
+            let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+            // `status` drops what is left of stdin, so the tool sees the end
+            // of its input.
+            let (stdout, stderr, status) =
+                futures::try_join!(read_capped(stdout), read_capped(stderr), child.status())?;
+            Ok::<_, io::Error>((status, stdout, stderr))
         };
-        let output = race_with_timeout(run, invocation.timeout)
+        let (status, stdout, stderr) = race_with_timeout(run, invocation.timeout)
             .await
             .ok_or_else(|| ToolFailure::TimedOut {
                 program: invocation.program.clone(),
@@ -77,9 +89,9 @@ impl ToolRunner for LocalHost {
             })?
             .map_err(io_failure)?;
         Ok(ToolOutput {
-            exit_code: output.status.code(),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            exit_code: status.code(),
+            stdout: String::from_utf8_lossy(&stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&stderr).into_owned(),
         })
     }
 
@@ -87,10 +99,34 @@ impl ToolRunner for LocalHost {
         &self,
         invocation: ToolInvocation,
         log_file: &Path,
-    ) -> anyhow::Result<DetachedExit> {
+    ) -> anyhow::Result<DetachedTool> {
         ensure_absolute_program(&invocation)?;
         spawn_detached(&invocation, log_file)
     }
+
+    fn terminate_process_group(&self, process_id: u32) -> anyhow::Result<()> {
+        terminate_process_group(process_id)
+    }
+}
+
+/// What one tool run may hand back on each stream.
+pub(crate) const MAX_TOOL_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Keeps the first [`MAX_TOOL_OUTPUT_BYTES`] and reads the rest into the void,
+/// so a tool that talks a lot still finishes instead of blocking on a full pipe.
+async fn read_capped(stream: Option<impl futures::AsyncRead + Unpin>) -> io::Result<Vec<u8>> {
+    use futures::AsyncReadExt as _;
+
+    let Some(mut stream) = stream else {
+        return Ok(Vec::new());
+    };
+    let mut kept = Vec::new();
+    (&mut stream)
+        .take(MAX_TOOL_OUTPUT_BYTES)
+        .read_to_end(&mut kept)
+        .await?;
+    futures::io::copy(&mut stream, &mut futures::io::sink()).await?;
+    Ok(kept)
 }
 
 /// `None` when the timeout won. Dropping the losing future drops the child,
@@ -179,14 +215,31 @@ impl HostSystem for LocalHost {
         Ok(names)
     }
 
+    fn file_len(&self, path: &Path) -> io::Result<u64> {
+        Ok(std::fs::metadata(path)?.len())
+    }
+
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         std::fs::remove_file(path)
     }
 
-    fn temp_file_path(&self, stem: &str) -> PathBuf {
+    fn create_temp_dir(&self, stem: &str) -> io::Result<PathBuf> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("zode-{}-{sequence}-{stem}", std::process::id()))
+        let path =
+            std::env::temp_dir().join(format!("zode-{}-{sequence}-{stem}", std::process::id()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        builder.create(&path)?;
+        Ok(path)
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        std::fs::remove_dir_all(path)
     }
 
     fn available_memory_bytes(&self) -> Option<u64> {

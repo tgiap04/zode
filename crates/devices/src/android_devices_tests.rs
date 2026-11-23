@@ -136,6 +136,57 @@ fn the_avd_name_reply_drops_crlf_and_the_ok_line() {
 }
 
 #[test]
+fn an_avd_name_reply_that_is_no_avd_name_is_dropped() {
+    let too_long = "a".repeat(101);
+    for reply in [
+        "Pixel 7\r\nOK\r\n",
+        "\u{1b}]0;title\u{7}\r\nOK\r\n",
+        "-wipe-data\r\nOK\r\n",
+        "$(reboot)\r\nOK\r\n",
+        &format!("{too_long}\r\nOK\r\n"),
+    ] {
+        assert_eq!(parse_avd_name_reply(reply), None, "{reply:?}");
+    }
+    let longest = "a".repeat(100);
+    assert_eq!(
+        parse_avd_name_reply(&format!("{longest}\r\nOK\r\n")),
+        Some(longest)
+    );
+}
+
+#[test]
+fn a_hostile_listener_on_an_emulator_port_cannot_name_a_row() {
+    let host = FakeHost::new(HostOs::MacOs);
+    let flood = "x".repeat(10_000);
+    host.script_output(
+        ADB,
+        ["-s", "emulator-5554", "emu", "avd", "name"],
+        0,
+        &format!("{flood}\r\nOK\r\n"),
+        "",
+    );
+    host.script_output(
+        ADB,
+        [
+            "-s",
+            "emulator-5554",
+            "shell",
+            "getprop",
+            "ro.boot.qemu.avd_name",
+        ],
+        0,
+        "evil name\u{1b}[2J\n",
+        "",
+    );
+    let names = smol::block_on(emulator_avd_names(
+        &host,
+        Path::new(ADB),
+        &["emulator-5554".to_string()],
+    ));
+    assert_eq!(names, HashMap::new());
+}
+
+#[test]
 fn a_running_emulator_shares_one_row_with_its_avd() {
     let avds = vec!["Medium_Phone".to_string(), "Tablet".to_string()];
     let entries = parse_adb_devices(&tool_output("adb-devices-l-emulator-online.txt"));

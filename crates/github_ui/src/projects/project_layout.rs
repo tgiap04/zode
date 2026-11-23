@@ -65,7 +65,17 @@ pub fn board_columns(
     details: &ProjectDetails,
     items: &[ProjectV2Item],
 ) -> Vec<BoardColumn> {
-    let ordered = sorted_items(view, details, items);
+    board_columns_in_order(view, details, items, sorted_items(view, details, items))
+}
+
+/// [`board_columns`] for items already put in the view's order, which the
+/// section keeps instead of sorting again.
+pub fn board_columns_in_order(
+    view: Option<&ProjectView>,
+    details: &ProjectDetails,
+    items: &[ProjectV2Item],
+    ordered: Vec<usize>,
+) -> Vec<BoardColumn> {
     let Some(field) = column_field(view, details) else {
         return vec![BoardColumn {
             key: ColumnKey::NoValue,

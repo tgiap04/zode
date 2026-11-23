@@ -128,6 +128,70 @@ fn link_text_showing_another_host_is_caught() {
 }
 
 #[test]
+fn link_text_with_spaces_still_names_the_host() {
+    let evil = Url::parse("https://evil.example/login").expect("valid");
+    for shown in [
+        "https://github.com/login/device verify your account",
+        "verify your account at github.com/login/device",
+        "github.com/login/device\u{a0}verify",
+        "github.com/login/device\u{3000}verify",
+        "see (https://github.com/octo/repo), then sign in",
+        "visit \"github.com\".",
+        "go to\u{200B} https://github.com/octo/repo now",
+        "https://github.com/a and https://evil.example/b",
+        "https://evil.example/b and https://github.com/a",
+        "8.8.8.8 verify",
+        "git\u{200B}hub.com is down",
+        "github.com.evil.com",
+        "www.paypal.com",
+        "www.example.rs",
+        "main.rs/login",
+        "files.sh:8080",
+    ] {
+        assert!(
+            shown_host_mismatch(shown, &evil).is_some(),
+            "{shown:?} shows another host"
+        );
+    }
+}
+
+#[test]
+fn spaced_link_text_is_left_alone_unless_it_shows_another_host() {
+    let evil = Url::parse("https://evil.example/login").expect("valid");
+    for shown in [
+        "click here",
+        "See #12 and octo/other#3",
+        "read the docs, e.g. now.",
+        "version 1.2 notes",
+        "Download for Windows (x64)",
+        "visit evil.example/login for details",
+        "https://evil.example/a and https://evil.example/b",
+        "evil.example\u{a0}login",
+        "main.rs",
+        "Node.js",
+        "README.md",
+        "open main.rs, then Cargo.toml and package.json (Node.js)",
+        "see Cargo.lock.",
+        "",
+        "   ",
+    ] {
+        assert_eq!(
+            shown_host_mismatch(shown, &evil),
+            None,
+            "{shown:?} says nothing false"
+        );
+    }
+}
+
+#[test]
+fn a_line_break_in_link_text_separates_words() {
+    assert_eq!(
+        link_texts("[go to\ngithub.com](https://x.example/)").get("https://x.example/"),
+        Some(&vec!["go to github.com".to_string()])
+    );
+}
+
+#[test]
 fn github_markdown_draws_no_html_and_decodes_no_images() {
     let options = github_markdown_options();
     assert!(!options.parse_html);
@@ -188,6 +252,113 @@ async fn a_link_whose_text_shows_another_host_asks_first(cx: &mut TestAppContext
     cx.run_until_parked();
     assert!(!cx.has_pending_prompt(), "honest link text asks nothing");
     assert_eq!(cx.opened_url().as_deref(), Some("https://docs.rs/gpui"));
+}
+
+#[gpui::test]
+async fn a_link_with_spaced_text_showing_another_host_asks_first(cx: &mut TestAppContext) {
+    init(cx);
+    let (_workspace, cx) = workspace_window(cx).await;
+    let body = cx.new(|cx| {
+        GithubMarkdown::new(
+            "[https://github.com/login/device verify your account](https://evil.example)",
+            &repository(),
+            Arc::new(FakeGithubBackend::new()),
+            test_session(),
+            cx,
+        )
+    });
+    body.update_in(cx, |body, window, cx| {
+        body.open_link("https://evil.example", window, cx)
+    });
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt(), "asked before opening");
+    assert_eq!(cx.opened_url(), None);
+}
+
+#[gpui::test]
+async fn an_issue_link_whose_text_shows_another_host_asks_first(cx: &mut TestAppContext) {
+    init(cx);
+    let (workspace, cx) = workspace_window(cx).await;
+    let body = cx.new(|cx| {
+        GithubMarkdown::new(
+            "[docs.rs/gpui](https://github.com/octo/repo/issues/4) \
+             [Fix on https://crates.io now](https://github.com/octo/repo/pull/5)",
+            &repository(),
+            Arc::new(FakeGithubBackend::new()),
+            test_session(),
+            cx,
+        )
+    });
+    for link in [
+        "https://github.com/octo/repo/issues/4",
+        "https://github.com/octo/repo/pull/5",
+    ] {
+        body.update_in(cx, |body, window, cx| body.open_link(link, window, cx));
+        cx.run_until_parked();
+        assert!(cx.has_pending_prompt(), "{link} asks before opening");
+        let (message, _) = cx.pending_prompt().unwrap_or_default();
+        assert!(message.contains("github.com"), "{message}");
+        assert!(
+            detail_tabs(&workspace, cx).is_empty(),
+            "no tab before the answer"
+        );
+        cx.simulate_prompt_answer("Cancel");
+        cx.run_until_parked();
+        assert!(detail_tabs(&workspace, cx).is_empty());
+        assert_eq!(cx.opened_url(), None);
+    }
+}
+
+#[gpui::test]
+async fn a_refused_link_says_why(cx: &mut TestAppContext) {
+    init(cx);
+    let (workspace, cx) = workspace_window(cx).await;
+    let body = cx.new(|cx| {
+        GithubMarkdown::new(
+            "[x](javascript:alert(1))",
+            &repository(),
+            Arc::new(FakeGithubBackend::new()),
+            test_session(),
+            cx,
+        )
+    });
+    assert!(workspace.read_with(cx, |workspace, _| workspace.notification_ids().is_empty()));
+    body.update_in(cx, |body, window, cx| {
+        body.open_link("javascript:alert(1)", window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        workspace.read_with(cx, |workspace, _| workspace.notification_ids().len()),
+        1,
+        "the click is answered with a notice"
+    );
+    assert_eq!(cx.opened_url(), None);
+}
+
+#[gpui::test]
+async fn a_plain_http_link_asks_before_opening(cx: &mut TestAppContext) {
+    init(cx);
+    let (_workspace, cx) = workspace_window(cx).await;
+    let body = cx.new(|cx| {
+        GithubMarkdown::new(
+            "[docs](http://docs.example/page)",
+            &repository(),
+            Arc::new(FakeGithubBackend::new()),
+            test_session(),
+            cx,
+        )
+    });
+    body.update_in(cx, |body, window, cx| {
+        body.open_link("http://docs.example/page", window, cx)
+    });
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt(), "asked before opening");
+    let (_, detail) = cx.pending_prompt().unwrap_or_default();
+    assert!(detail.contains("http://docs.example/page"), "{detail}");
+    assert_eq!(cx.opened_url(), None);
+    cx.simulate_prompt_answer("Open");
+    cx.run_until_parked();
+    assert_eq!(cx.opened_url().as_deref(), Some("http://docs.example/page"));
 }
 
 #[gpui::test]

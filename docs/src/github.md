@@ -30,7 +30,7 @@ Sign in with GitHub asks for three scopes:
 
 The token stays on this machine. Zode keeps it in the system keychain and sends it only to `api.github.com`; it never reaches zodekit's server, and your Zode account does not need to be a GitHub one. Development builds keep it in memory only, so you sign in again after each restart.
 
-**Disconnect** (next to your login, or **GitHub Account** on the Panels page of Settings) forgets the token Zode signed in with and opens GitHub's page for revoking Zode's access. Zode cannot revoke a token by itself, so revoke the access there to end it for good. A token from the GitHub CLI is left alone; sign out of it with `gh auth logout`. The same page in Settings shows whether you are signed in, and **Sign in with GitHub** there opens the tab and starts signing in.
+**Disconnect** (next to your login, or **GitHub Account** on the Panels page of Settings) forgets the token Zode signed in with, signs out every window using that account, and opens GitHub's page for revoking Zode's access. Zode cannot revoke a token by itself, so revoke the access there to end it for good. A token from the GitHub CLI is left alone; sign out of it with `gh auth logout`. The same page in Settings shows whether you are signed in, and **Sign in with GitHub** there opens the tab and starts signing in.
 
 If GitHub stops accepting the token, the tab says so and waits for you. It never falls back to another token by itself, since that could quietly act as a different account.
 
@@ -135,7 +135,7 @@ A pull request from a **fork** is fetched from `refs/pull/<number>/head`. Before
 Issue and pull request text is written by other people, so Zode draws it with care:
 
 - Markdown is shown without HTML, and images are never downloaded; their alt text is shown instead. The only pictures the tab loads are profile pictures from `https://avatars.githubusercontent.com/`; for any other address, or a picture that fails to load, it shows the person's initials.
-- Only `http` and `https` links work. A link whose text shows one address but leads to another names the real host and asks before opening. A link opens inside Zode only when it is exactly a `github.com` issue or pull request.
+- Only `http` and `https` links work. A link whose text shows one address but leads to another names the real host and asks before opening, even when the text has spaces around the address. A plain `http://` link asks first too, and a link Zode refuses to open (such as `javascript:` or `file:`) says so. A link opens inside Zode only when it is exactly a `github.com` issue or pull request.
 - Hidden characters, such as right-to-left overrides and zero-width spaces, are shown as `<U+…>` in titles, labels, names and branch names.
 
 Every write comes from a button you press, and merging, bulk changes and removals ask first. Writes go out one at a time.

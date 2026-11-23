@@ -4,12 +4,14 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context as _, anyhow, bail};
 
 use crate::android_sdk::AndroidSdk;
-use crate::host::{DetachedExit, HostSystem, ToolInvocation, ToolOutput, ToolRunner};
+use crate::host::{DetachedExit, HostOs, HostSystem, ToolInvocation, ToolOutput, ToolRunner};
 use crate::input_validation::{
     PairingCode, WirelessAddress, validate_avd_name, validate_serial, validate_udid,
 };
 use crate::ios_simulators::{XCRUN, run_simctl};
-use crate::resources::{EMULATOR_LOGS_KEPT, emulator_log_file_name, prune_emulator_logs};
+use crate::resources::{
+    EMULATOR_LOGS_KEPT, emulator_log_file_name, prune_emulator_logs, prune_stale_emulator_logs,
+};
 
 const OPEN: &str = "/usr/bin/open";
 /// The first boot after an Xcode or runtime update migrates data, and a cold
@@ -75,6 +77,8 @@ pub struct StartedEmulator {
     pub log_file: PathBuf,
     /// Settles when the emulator process exits.
     pub exit: DetachedExit,
+    /// For [`stop_detached_emulator`], while `exit` has not settled.
+    pub process_id: u32,
 }
 
 /// Starts the emulator detached so it outlives Zode, logging to a new file in
@@ -91,12 +95,56 @@ pub fn start_emulator(
     let emulator = sdk.emulator.as_ref().context(
         "the Android Emulator is not installed; install \"Android Emulator\" from the SDK Manager",
     )?;
+    prune_stale_emulator_logs(host, log_dir, started_at);
     // One slot is left for the log this start creates.
     prune_emulator_logs(host, log_dir, avd_name, EMULATOR_LOGS_KEPT - 1);
     let log_file = log_dir.join(emulator_log_file_name(avd_name, started_at));
-    let exit =
+    let started =
         runner.spawn_detached(ToolInvocation::new(emulator, ["-avd", avd_name]), &log_file)?;
-    Ok(StartedEmulator { log_file, exit })
+    Ok(StartedEmulator {
+        log_file,
+        exit: started.exit,
+        process_id: started.process_id,
+    })
+}
+
+/// Ends an emulator that never showed up in adb, so there is no serial to
+/// send `emu kill` to, together with the processes it started. `exit` is the
+/// emulator's own exit signal, read right before the kill: once the process
+/// has ended its id may belong to another process, so nothing is signalled
+/// and the emulator counts as stopped.
+pub async fn stop_detached_emulator(
+    host: &dyn HostSystem,
+    runner: &dyn ToolRunner,
+    process_id: u32,
+    exit: &mut DetachedExit,
+) -> anyhow::Result<()> {
+    if !matches!(exit.try_recv(), Ok(None)) {
+        return Ok(());
+    }
+    match host.os() {
+        // The emulator leads its own process group, whose id is its own.
+        HostOs::MacOs | HostOs::Linux => runner.terminate_process_group(process_id),
+        HostOs::Windows => {
+            let system_root = host
+                .environment_variable("SystemRoot")
+                .unwrap_or_else(|| "C:\\Windows".to_string());
+            let output = runner
+                .run(ToolInvocation::new(
+                    PathBuf::from(system_root)
+                        .join("System32")
+                        .join("taskkill.exe"),
+                    [
+                        "/PID".to_string(),
+                        process_id.to_string(),
+                        "/T".to_string(),
+                        "/F".to_string(),
+                    ],
+                ))
+                .await?;
+            ensure_success(&output, "could not stop the emulator process")
+        }
+    }
 }
 
 pub async fn stop_emulator(
@@ -110,6 +158,8 @@ pub async fn stop_emulator(
         .await?;
     ensure_success(&output, "could not stop the emulator")
 }
+
+const PAIRING_PROMPT: &str = "Enter pairing code:";
 
 /// The code goes in on stdin, which adb reads when it is not an argument, so
 /// it never shows in a process list. adb exits 0 on some failures, so the
@@ -126,8 +176,17 @@ pub async fn adb_pair(
                 .with_stdin(format!("{}\n", code.as_str())),
         )
         .await?;
-    let text = output.combined().to_lowercase();
-    if output.success() && !text.contains("fail") && !text.contains("error") {
+    // The prompt has no newline, so the first line starts with it. Matching
+    // the success line rather than hunting for failure words keeps a device
+    // whose guid or serial says "fail" from reading as a failed pairing.
+    let paired = output.stdout.lines().any(|line| {
+        let line = line.trim_start();
+        line.strip_prefix(PAIRING_PROMPT)
+            .unwrap_or(line)
+            .trim_start()
+            .starts_with("Successfully paired")
+    });
+    if output.success() && paired {
         return Ok(());
     }
     let message = output.failure_message().replace(code.as_str(), "******");

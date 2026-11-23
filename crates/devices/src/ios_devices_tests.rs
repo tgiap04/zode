@@ -3,13 +3,22 @@ use std::time::Duration;
 
 use crate::fake_host::FakeHost;
 use crate::host::{HostOs, HostSystem};
-use crate::ios_devices::{parse_devicectl_devices, read_physical_iphones};
+use crate::ios_devices::{
+    MAX_DEVICECTL_JSON_BYTES, parse_devicectl_devices, read_physical_iphones,
+};
 use crate::ios_simulators::XCRUN;
 use crate::test_fixtures::tool_output;
 use crate::{DeviceKey, DeviceKind, DeviceState, SectionState};
 
 const HARDWARE_UDID: &str = "00008120-0000000000000001";
 const COREDEVICE_IDENTIFIER: &str = "00000000-0000-4000-8000-0000000000a1";
+
+/// Where devicectl is told to write, in the folder made for this one run.
+fn json_path(host: &FakeHost) -> std::path::PathBuf {
+    host.create_temp_dir("devicectl")
+        .expect("the fake host makes folders")
+        .join("devicectl-devices.json")
+}
 
 fn recorded() -> String {
     tool_output("devicectl-list-devices-paired-unreachable.json")
@@ -80,7 +89,7 @@ fn an_outcome_other_than_success_is_an_error() {
 #[test]
 fn devicectl_writes_json_to_a_temporary_file_that_is_removed_after_reading() {
     let host = FakeHost::new(HostOs::MacOs);
-    let output_path = host.temp_file_path("devicectl-devices.json");
+    let output_path = json_path(&host);
     host.add_file(&output_path, recorded());
     let path_argument = output_path.to_string_lossy().into_owned();
     host.script_output(
@@ -108,10 +117,7 @@ fn devicectl_writes_json_to_a_temporary_file_that_is_removed_after_reading() {
 #[test]
 fn an_xcode_without_devicectl_is_reported_as_missing_the_tool() {
     let host = FakeHost::new(HostOs::MacOs);
-    let path_argument = host
-        .temp_file_path("devicectl-devices.json")
-        .to_string_lossy()
-        .into_owned();
+    let path_argument = json_path(&host).to_string_lossy().into_owned();
     host.script_output(
         XCRUN,
         [
@@ -148,7 +154,7 @@ fn the_temporary_file_is_removed_when_devicectl_fails() {
         }),
     ] {
         let host = FakeHost::new(HostOs::MacOs);
-        let output_path = host.temp_file_path("devicectl-devices.json");
+        let output_path = json_path(&host);
         // devicectl may write the file before it fails or is stopped.
         host.add_file(&output_path, recorded());
         let path_argument = output_path.to_string_lossy().into_owned();
@@ -168,5 +174,64 @@ fn the_temporary_file_is_removed_when_devicectl_fails() {
         let state = smol::block_on(read_physical_iphones(&host, &host));
         assert!(matches!(state, SectionState::Failed { .. }), "{state:?}");
         assert!(!host.has_file(&output_path), "{answer:?}");
+    }
+}
+
+fn script_devicectl(host: &FakeHost, output_path: &Path) {
+    let path_argument = output_path.to_string_lossy().into_owned();
+    host.script_output(
+        XCRUN,
+        [
+            "devicectl",
+            "list",
+            "devices",
+            "--json-output",
+            path_argument.as_str(),
+            "-q",
+        ],
+        0,
+        "",
+        "",
+    );
+}
+
+#[test]
+fn the_run_gets_its_own_folder_which_is_removed_whole() {
+    let host = FakeHost::new(HostOs::MacOs);
+    let output_path = json_path(&host);
+    host.add_file(&output_path, recorded());
+    // Something else devicectl left in the folder goes with it.
+    let folder = output_path.parent().expect("a folder").to_path_buf();
+    host.add_file(folder.join("leftover"), "x");
+    script_devicectl(&host, &output_path);
+
+    let state = smol::block_on(read_physical_iphones(&host, &host));
+    assert_eq!(state.devices().len(), 1, "{state:?}");
+    assert!(!host.has_file(&output_path));
+    assert!(!host.has_file(&folder.join("leftover")));
+}
+
+#[test]
+fn a_device_list_over_the_limit_is_refused_not_read_whole() {
+    let limit = MAX_DEVICECTL_JSON_BYTES as usize;
+    for (length, accepted) in [(limit, true), (limit + 1, false)] {
+        let host = FakeHost::new(HostOs::MacOs);
+        let output_path = json_path(&host);
+        // Valid JSON padded with spaces to the length under test.
+        let mut json = recorded();
+        json.push_str(&" ".repeat(length - json.len()));
+        host.add_file(&output_path, json);
+        script_devicectl(&host, &output_path);
+
+        let state = smol::block_on(read_physical_iphones(&host, &host));
+        assert_eq!(
+            matches!(state, SectionState::Ready(_)),
+            accepted,
+            "{length} bytes: {state:?}"
+        );
+        if let SectionState::Failed { message } = &state {
+            assert!(message.contains("larger than"), "{message}");
+        }
+        assert!(!host.has_file(&output_path));
     }
 }

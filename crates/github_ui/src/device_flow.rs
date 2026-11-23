@@ -26,6 +26,12 @@ const MIN_INTERVAL: Duration = Duration::from_secs(5);
 /// of the flow.
 const SLOW_DOWN_INCREMENT: Duration = Duration::from_secs(5);
 const MAX_INTERVAL: Duration = Duration::from_secs(60);
+/// GitHub's codes live fifteen minutes; a server asking for more is not
+/// believed, so a hostile answer cannot keep the sign-in waiting for days.
+const MAX_LIFETIME: Duration = Duration::from_secs(30 * 60);
+/// Answers in a row that were not a readable 2xx answer before the wait is
+/// given up: a proxy's HTML page or a persistent 401 never turns into a token.
+const MAX_UNREADABLE_ANSWERS: u32 = 3;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Both answers are a few hundred bytes; anything past this is not GitHub.
 const MAX_ANSWER_BYTES: u64 = 64 * 1024;
@@ -103,7 +109,13 @@ struct TokenAnswer {
 enum PollOutcome {
     Token(String),
     KeepWaiting,
-    SlowDown { interval: Option<Duration> },
+    SlowDown {
+        interval: Option<Duration>,
+    },
+    /// Not a 2xx answer, or one that holds neither a token nor an error.
+    Unreadable {
+        status: u16,
+    },
     Failed(DeviceFlowError),
 }
 
@@ -135,7 +147,7 @@ pub async fn request_device_code(
         device_code: answer.device_code,
         user_code: answer.user_code,
         verification_uri: answer.verification_uri,
-        expires_in: Duration::from_secs(answer.expires_in),
+        expires_in: Duration::from_secs(answer.expires_in).min(MAX_LIFETIME),
         interval: clamp_interval(answer.interval.map(Duration::from_secs)),
     })
 }
@@ -143,8 +155,9 @@ pub async fn request_device_code(
 /// Waits an interval, polls, and repeats until the user decides or the code
 /// expires. Returns the token's secret. Dropping the future cancels the flow.
 ///
-/// The deadline is counted in intervals waited rather than read off a clock,
-/// so a test executor that advances time by hand still ends the loop.
+/// The deadline is read off the executor's clock, so the time requests take
+/// and a laptop's sleep count; a test executor that advances time by hand
+/// moves it too.
 pub async fn poll_for_token(
     http_client: &Arc<dyn HttpClient>,
     client_id: &str,
@@ -152,22 +165,49 @@ pub async fn poll_for_token(
     executor: &BackgroundExecutor,
 ) -> Result<String, DeviceFlowError> {
     let mut interval = code.interval;
-    let mut waited = Duration::ZERO;
+    let started = executor.now();
+    let mut unreadable_answers = 0;
     loop {
-        if waited >= code.expires_in {
+        if executor.now().saturating_duration_since(started) >= code.expires_in {
             return Err(DeviceFlowError::Expired);
         }
         executor.timer(interval).await;
-        waited += interval;
-        match poll_once(http_client, client_id, &code.device_code, executor).await {
+        let outcome = poll_once(http_client, client_id, &code.device_code, executor).await;
+        if let PollOutcome::Unreadable { status } = outcome {
+            unreadable_answers += 1;
+            if unreadable_answers >= MAX_UNREADABLE_ANSWERS {
+                return Err(unreadable_error(status));
+            }
+            if status == 429 || status >= 500 {
+                interval = widened(interval);
+            }
+            continue;
+        }
+        unreadable_answers = 0;
+        match outcome {
             PollOutcome::Token(token) => return Ok(token),
             PollOutcome::Failed(error) => return Err(error),
-            PollOutcome::KeepWaiting => {}
+            PollOutcome::KeepWaiting | PollOutcome::Unreadable { .. } => {}
             PollOutcome::SlowDown { interval: asked } => {
-                let widened = (interval + SLOW_DOWN_INCREMENT).min(MAX_INTERVAL);
-                interval = asked.map_or(widened, |asked| clamp_interval(Some(asked)).max(widened));
+                interval = asked.map_or(widened(interval), |asked| {
+                    clamp_interval(Some(asked)).max(widened(interval))
+                });
             }
         }
+    }
+}
+
+fn widened(interval: Duration) -> Duration {
+    (interval + SLOW_DOWN_INCREMENT).min(MAX_INTERVAL)
+}
+
+fn unreadable_error(status: u16) -> DeviceFlowError {
+    match status {
+        400..=499 if status != 429 => {
+            DeviceFlowError::Rejected(format!("GitHub answered HTTP {status}"))
+        }
+        200..=299 => DeviceFlowError::Unreachable("GitHub's answer could not be read".to_string()),
+        _ => DeviceFlowError::Unreachable(format!("GitHub answered HTTP {status}")),
     }
 }
 
@@ -182,17 +222,20 @@ async fn poll_once(
         ("device_code", device_code),
         ("grant_type", DEVICE_GRANT_TYPE),
     ]);
-    let answer = match post_form(http_client, ACCESS_TOKEN_URL, body, executor).await {
-        Ok((_status, answer)) => answer,
+    let (status, answer) = match post_form(http_client, ACCESS_TOKEN_URL, body, executor).await {
+        Ok(answer) => answer,
         // A dropped connection mid-wait is no reason to abandon a sign-in the
         // user may already have approved; the deadline still ends the loop.
         Err(DeviceFlowError::Unreachable(_)) => return PollOutcome::KeepWaiting,
         Err(error) => return PollOutcome::Failed(error),
     };
     let Ok(answer) = serde_json::from_str::<TokenAnswer>(&answer) else {
-        return PollOutcome::KeepWaiting;
+        return PollOutcome::Unreadable { status };
     };
-    if let Some(token) = answer.access_token.filter(|token| !token.trim().is_empty()) {
+    // A token is believed only from a 2xx answer.
+    if (200..300).contains(&status)
+        && let Some(token) = answer.access_token.filter(|token| !token.trim().is_empty())
+    {
         return PollOutcome::Token(token);
     }
     match answer.error.as_deref() {
@@ -203,7 +246,7 @@ async fn poll_once(
         Some(error) => PollOutcome::Failed(
             classify_error(error).unwrap_or_else(|| DeviceFlowError::Rejected(error.to_string())),
         ),
-        None => PollOutcome::KeepWaiting,
+        None => PollOutcome::Unreadable { status },
     }
 }
 
@@ -238,7 +281,11 @@ fn form(pairs: &[(&str, &str)]) -> String {
 /// `github.com.example` does not pass.
 pub fn is_github_page(url: &str) -> bool {
     Url::parse(url).is_ok_and(|url| {
-        url.scheme() == "https" && url.host_str() == Some("github.com") && url.port().is_none()
+        url.scheme() == "https"
+            && url.host_str() == Some("github.com")
+            && url.port().is_none()
+            && url.username().is_empty()
+            && url.password().is_none()
     })
 }
 

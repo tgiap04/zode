@@ -141,3 +141,9 @@ fn pairing_codes_are_exactly_six_digits_and_never_echoed() {
     let code = parse_pairing_code("654321").expect("valid code");
     assert!(!format!("{code:?}").contains("654321"));
 }
+
+#[test]
+fn an_avd_name_has_a_length_limit() {
+    assert!(validate_avd_name(&"a".repeat(100)).is_ok());
+    assert!(validate_avd_name(&"a".repeat(101)).is_err());
+}

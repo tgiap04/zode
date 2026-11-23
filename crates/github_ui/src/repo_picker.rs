@@ -4,6 +4,7 @@ use github::{
 };
 use gpui::{App, Context};
 use project::Project;
+use project::git_store::{GitStoreEvent, RepositoryEvent};
 use ui::{Chip, prelude::*};
 
 use crate::github_view::GithubView;
@@ -34,6 +35,28 @@ pub fn project_repositories(project: &Project, cx: &App) -> Vec<DetectedReposito
         .map(|(_, remotes)| remotes)
         .collect::<Vec<_>>();
     detect_repositories(&remotes)
+}
+
+/// Whether `event` can change which repositories the project has or what
+/// their remotes are. Statuses, stashes, conflicts and the like arrive by the
+/// hundred while files change, and none of them touches either.
+pub(crate) fn can_change_repositories(event: &GitStoreEvent) -> bool {
+    match event {
+        GitStoreEvent::RepositoryAdded
+        | GitStoreEvent::RepositoryRemoved(_)
+        // Remotes are read again by a reload, which announces a change to
+        // them only by the job it ran in ending.
+        | GitStoreEvent::JobsUpdated => true,
+        GitStoreEvent::RepositoryUpdated(_, event, _) => matches!(
+            event,
+            RepositoryEvent::HeadChanged
+                | RepositoryEvent::BranchListChanged
+                | RepositoryEvent::GitWorktreeListChanged
+        ),
+        GitStoreEvent::ActiveRepositoryChanged(_)
+        | GitStoreEvent::IndexWriteError(_)
+        | GitStoreEvent::ConflictsUpdated => false,
+    }
 }
 
 /// Keeps the user's pick while it is still offered, else the first one.

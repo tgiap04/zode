@@ -59,7 +59,9 @@ impl HttpBackend {
     }
 
     /// Like [`Self::run`] for a write: its place in the token's queue is
-    /// taken now, so writes run in the order they were asked for.
+    /// taken now, so writes run in the order they were asked for. The place
+    /// is held until the future finishes or is dropped, so one that is kept
+    /// alive but never polled holds back every later write of the token.
     fn run_write<T, Work>(
         &self,
         work: impl FnOnce(Arc<Transport>, WriteTicket) -> Work,
@@ -135,11 +137,25 @@ fn checked_login(login: &str) -> GithubResult<&str> {
     }
 }
 
+/// The most of the typed words a search sends. GitHub ignores a query past
+/// 256 characters, so a longer one would only be a bigger request.
+pub(crate) const SEARCH_TEXT_MAX_CHARACTERS: usize = 256;
+
 /// The words typed, as one group that cannot reach past this repository:
 /// scope qualifiers are dropped wherever they stand, and parentheses and an
 /// unpaired quote are removed so the group cannot be closed early.
 fn search_text_group(text: &str) -> Option<String> {
-    let text = text.replace(['(', ')'], " ");
+    let text = text
+        .chars()
+        .take(SEARCH_TEXT_MAX_CHARACTERS)
+        .map(|character| {
+            if matches!(character, '(' | ')') {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
     let mut words = text
         .split_whitespace()
         .filter(|word| {
@@ -287,6 +303,16 @@ impl GithubBackend for HttpBackend {
                 IssueStateFilter::All => "all",
             };
             query.push(("state", state.to_string()));
+            if let Some(label) = filter.labels.iter().find(|label| label.contains(',')) {
+                // `labels=` is a comma-separated list with no way to escape
+                // a comma, so GitHub would read this label as two.
+                return Err(GithubError::Rejected {
+                    message: format!(
+                        "The label `{}` has a comma in its name, which the issue list cannot filter by.",
+                        shorten_message(label)
+                    ),
+                });
+            }
             if !filter.labels.is_empty() {
                 query.push(("labels", filter.labels.join(",")));
             }

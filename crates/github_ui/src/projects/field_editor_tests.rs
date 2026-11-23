@@ -470,6 +470,7 @@ async fn saving_an_edit_whose_item_is_gone_says_so_and_sends_nothing(cx: &mut Te
         }
         // Read again meanwhile, without it: someone removed it on GitHub.
         section.items.retain(|item| item.id != "PVTI_7");
+        section.layout_changed();
         section.save_field_edit(cx);
     });
     cx.run_until_parked();

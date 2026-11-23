@@ -30,7 +30,7 @@ Sign in with GitHub xin ba quyền (scope):
 
 Token chỉ nằm trên máy này. Zode giữ nó trong keychain của hệ thống và chỉ gửi nó tới `api.github.com`; token không bao giờ tới server của zodekit, và tài khoản Zode của bạn không cần là tài khoản GitHub. Bản build dev chỉ giữ token trong bộ nhớ, nên mỗi lần khởi động lại phải đăng nhập lại.
 
-**Disconnect** (cạnh tên đăng nhập, hoặc mục **GitHub Account** ở trang Panels của Settings) xoá token mà Zode đã đăng nhập và mở trang của GitHub để thu hồi quyền của Zode. Zode không tự thu hồi token được, nên hãy thu hồi ở trang đó để chấm dứt hẳn. Token của GitHub CLI thì giữ nguyên; muốn đăng xuất nó, chạy `gh auth logout`. Cũng trang đó trong Settings cho biết bạn đã đăng nhập chưa, và nút **Sign in with GitHub** ở đó mở tab rồi bắt đầu đăng nhập.
+**Disconnect** (cạnh tên đăng nhập, hoặc mục **GitHub Account** ở trang Panels của Settings) xoá token mà Zode đã đăng nhập, đăng xuất mọi cửa sổ đang dùng tài khoản đó, và mở trang của GitHub để thu hồi quyền của Zode. Zode không tự thu hồi token được, nên hãy thu hồi ở trang đó để chấm dứt hẳn. Token của GitHub CLI thì giữ nguyên; muốn đăng xuất nó, chạy `gh auth logout`. Cũng trang đó trong Settings cho biết bạn đã đăng nhập chưa, và nút **Sign in with GitHub** ở đó mở tab rồi bắt đầu đăng nhập.
 
 Nếu GitHub không nhận token nữa, tab báo như vậy và chờ bạn quyết. Tab không bao giờ tự chuyển sang token khác, vì làm vậy có thể âm thầm thao tác bằng một tài khoản khác.
 
@@ -135,7 +135,7 @@ Pull request từ **fork** được lấy từ `refs/pull/<number>/head`. Trư�
 Nội dung issue và pull request do người khác viết, nên Zode hiển thị cẩn thận:
 
 - Markdown hiện không kèm HTML, và ảnh không bao giờ được tải về; chỉ hiện chữ alt của ảnh. Ảnh duy nhất tab tải về là ảnh đại diện từ `https://avatars.githubusercontent.com/`; địa chỉ khác, hoặc ảnh không tải được, thì hiện chữ cái đầu tên người đó.
-- Chỉ link `http` và `https` hoạt động. Link có chữ hiển thị một địa chỉ nhưng dẫn tới địa chỉ khác sẽ nêu host thật và hỏi trước khi mở. Link chỉ mở bên trong Zode khi nó đúng là issue hoặc pull request trên `github.com`.
+- Chỉ link `http` và `https` hoạt động. Link có chữ hiển thị một địa chỉ nhưng dẫn tới địa chỉ khác sẽ nêu host thật và hỏi trước khi mở, kể cả khi chữ có khoảng trắng quanh địa chỉ. Link `http://` thường cũng được hỏi trước, và link Zode từ chối mở (như `javascript:` hay `file:`) sẽ có thông báo. Link chỉ mở bên trong Zode khi nó đúng là issue hoặc pull request trên `github.com`.
 - Ký tự ẩn, như ký tự đảo chiều phải-sang-trái hay khoảng trắng độ rộng 0, hiện thành `<U+…>` trong tiêu đề, label, tên người và tên nhánh.
 
 Mọi lần ghi đều đến từ một nút bạn bấm, còn merge, thao tác hàng loạt và gỡ bỏ đều hỏi trước. Các lần ghi được gửi lần lượt từng cái một.

@@ -69,8 +69,9 @@ pub struct PullRequestDetailView {
     pub(crate) checkout: crate::pull_requests::pr_detail_checkout::CheckoutState,
     pub(crate) branch_editor: Option<Entity<Editor>>,
     pub(crate) checkout_task: Option<Task<()>>,
-    /// The fork warning was accepted for the checkout under way.
-    pub(crate) fork_warning_accepted: bool,
+    /// The head commit shown when the fork warning was accepted: the code the
+    /// user agreed to run, whatever a reload shows afterwards.
+    pub(crate) accepted_fork_head: Option<String>,
     /// Where git's password prompt is shown during a checkout's fetch.
     pub(crate) workspace: WeakEntity<Workspace>,
 }
@@ -193,7 +194,7 @@ impl PullRequestDetailView {
             checkout: Default::default(),
             branch_editor: None,
             checkout_task: None,
-            fork_warning_accepted: false,
+            accepted_fork_head: None,
             workspace: WeakEntity::new_invalid(),
         }
     }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use github::{
     GithubError, OAuthScopes, ProjectDetails, ProjectItemContent, ProjectV2, ProjectV2Item,
-    ProjectView, RepositoryId,
+    ProjectValue, ProjectView, RepositoryId,
 };
 use std::collections::HashMap;
 
@@ -18,7 +18,9 @@ use crate::issues::open_issue_detail;
 use crate::projects::add_item::AddItemPicker;
 use crate::projects::card_menu::CardMenu;
 use crate::projects::field_editor::{FieldEdit, FieldMenu};
+use crate::projects::layout_cache::LayoutCache;
 use crate::projects::move_item::{FieldWriteKey, PendingFieldWrites};
+use crate::projects::project_reads::MembershipChanges;
 
 /// Items read on their own before the section stops and offers more. GitHub
 /// neither pages a board by column nor applies a view's filter, so every
@@ -59,6 +61,7 @@ pub struct ProjectsSection {
     pub(super) details: Option<ProjectDetails>,
     pub(super) selected_view: Option<u64>,
     pub(super) items: Vec<ProjectV2Item>,
+    pub(super) layout: LayoutCache,
     pub(super) items_cursor: Option<String>,
     pub(super) item_cap: usize,
     pub(super) load: ProjectsLoad,
@@ -72,7 +75,19 @@ pub struct ProjectsSection {
     pub(super) selected_card: Option<String>,
     pub(super) card_menu: Option<CardMenu>,
     pub(super) field_writes: HashMap<FieldWriteKey, PendingFieldWrites>,
+    /// What the latest write of a field ended up showing, kept until the
+    /// next full read starts: a read that began before the write landed can
+    /// still answer with the value from before it.
+    pub(super) recent_writes: HashMap<FieldWriteKey, Option<ProjectValue>>,
+    pub(super) membership_changes: MembershipChanges,
     pub(super) next_write: u64,
+    /// The project `items` and `details` were read for. They are dropped the
+    /// moment another is picked, so a card of one project can never be
+    /// written under the id of another.
+    pub(super) items_project: Option<String>,
+    /// Counts the project switches, so a write that comes back after one is
+    /// not applied to the new project's items.
+    pub(super) project_epoch: u64,
     /// Why the last move did not stick.
     pub(super) move_message: Option<SharedString>,
     /// A move was asked for while the token can only read projects.
@@ -106,6 +121,7 @@ impl ProjectsSection {
             details: None,
             selected_view: None,
             items: Vec::new(),
+            layout: LayoutCache::default(),
             items_cursor: None,
             item_cap: PROJECT_ITEM_CAP,
             load: ProjectsLoad::Idle,
@@ -115,7 +131,11 @@ impl ProjectsSection {
             selected_card: None,
             card_menu: None,
             field_writes: HashMap::new(),
+            recent_writes: HashMap::new(),
+            membership_changes: MembershipChanges::default(),
             next_write: 0,
+            items_project: None,
+            project_epoch: 0,
             move_message: None,
             write_scope_missing: false,
             field_edit: None,
@@ -184,6 +204,7 @@ impl ProjectsSection {
     /// Items are the project's, not the view's, so nothing is read.
     pub fn select_view(&mut self, number: u64, cx: &mut Context<Self>) {
         self.selected_view = Some(number);
+        self.layout_changed();
         cx.notify();
     }
 

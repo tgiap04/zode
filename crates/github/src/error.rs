@@ -44,6 +44,13 @@ pub enum GithubError {
     Rejected { message: String },
     #[error("Could not reach GitHub: {message}")]
     Network { message: String },
+    /// A write whose answer never arrived whole: it may have reached GitHub
+    /// and been applied. Unlike [`GithubError::Network`], sending it again
+    /// can duplicate it.
+    #[error(
+        "GitHub may already have applied this change ({message}). Reload and check before trying again."
+    )]
+    OutcomeUnknown { message: String },
     #[error("GitHub sent an answer Zode could not read: {message}")]
     UnexpectedResponse { message: String },
     #[error("The GitHub CLI failed: {message}")]

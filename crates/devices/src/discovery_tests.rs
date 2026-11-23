@@ -43,7 +43,10 @@ fn script_xcode_without_simulator_list(host: &FakeHost) {
         &tool_output("simctl-list-runtimes.json"),
         "",
     );
-    let output_path = host.temp_file_path("devicectl-devices.json");
+    let output_path = host
+        .create_temp_dir("devicectl")
+        .expect("the fake host makes folders")
+        .join("devicectl-devices.json");
     host.add_file(
         &output_path,
         tool_output("devicectl-list-devices-paired-unreachable.json"),

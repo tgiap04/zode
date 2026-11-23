@@ -34,6 +34,9 @@ pub struct PendingFieldWrites {
     pub latest: u64,
     pub in_flight: usize,
     pub confirmed: Option<ProjectValue>,
+    /// What the latest write shows: a read that answers meanwhile does not
+    /// have it yet.
+    pub shown: Option<ProjectValue>,
 }
 
 /// The column a value puts an item in.
@@ -94,7 +97,7 @@ pub(super) fn value_for(
     }
 }
 
-fn show_value(item: &mut ProjectV2Item, field_id: &str, value: Option<ProjectValue>) {
+pub(super) fn show_value(item: &mut ProjectV2Item, field_id: &str, value: Option<ProjectValue>) {
     item.field_values.retain(|value| value.field_id != field_id);
     if let Some(value) = value {
         item.field_values.push(ProjectFieldValue {
@@ -136,9 +139,9 @@ impl ProjectsSection {
 
     /// The board column the item is drawn in now.
     pub(super) fn current_column(&self, item_id: &str) -> Option<ColumnKey> {
-        let details = self.details()?;
-        board_columns(self.view(), details, self.items())
-            .into_iter()
+        let columns = self.columns()?;
+        columns
+            .iter()
             .find(|column| {
                 column.items.iter().any(|index| {
                     self.items
@@ -146,7 +149,7 @@ impl ProjectsSection {
                         .is_some_and(|item| item.id == item_id)
                 })
             })
-            .map(|column| column.key)
+            .map(|column| column.key.clone())
     }
 
     /// Sets the item's value in the board's column field to `target`'s
@@ -175,10 +178,14 @@ impl ProjectsSection {
         cx: &mut Context<Self>,
     ) -> Option<u64> {
         let project_id = self.selected_project.clone()?;
+        if self.items_project.as_deref() != Some(project_id.as_str()) {
+            return None;
+        }
         let item = self.items.iter_mut().find(|item| item.id == item_id)?;
         let (input, shown) = write.unzip();
         let shown_before = value_of(item, field_id).cloned();
         show_value(item, field_id, shown.clone());
+        self.layout_changed();
         self.move_message = None;
         let key = FieldWriteKey {
             item_id: item_id.to_string(),
@@ -193,9 +200,12 @@ impl ProjectsSection {
                 latest: write_id,
                 in_flight: 0,
                 confirmed: shown_before,
+                shown: shown.clone(),
             });
         pending.latest = write_id;
+        pending.shown = shown.clone();
         pending.in_flight += 1;
+        let epoch = self.project_epoch;
         // Asked for now, so its place in the write queue is taken now.
         let write = self.context.backend.set_project_item_field(
             project_id,
@@ -206,7 +216,9 @@ impl ProjectsSection {
         cx.spawn(async move |this, cx| {
             let result = write.await;
             this.update(cx, |this, cx| {
-                this.finish_field_write(key, write_id, shown, origin, result, cx)
+                if this.project_epoch == epoch {
+                    this.finish_field_write(key, write_id, shown, origin, result, cx)
+                }
             })
             .ok();
         })
@@ -229,6 +241,9 @@ impl ProjectsSection {
         };
         pending.in_flight = pending.in_flight.saturating_sub(1);
         let is_latest = pending.latest == write_id;
+        // A request that may have reached GitHub tells nothing about the
+        // value: the rolled back one is a guess a read must not be held to.
+        let outcome_unknown = matches!(result, Err(GithubError::OutcomeUnknown { .. }));
         let shown = match result {
             Ok(()) => {
                 pending.confirmed = written.clone();
@@ -258,8 +273,16 @@ impl ProjectsSection {
         {
             self.field_writes.remove(&key);
         }
-        if is_latest && let Some(item) = self.items.iter_mut().find(|item| item.id == key.item_id) {
-            show_value(item, &key.field_id, shown);
+        if is_latest {
+            if let Some(item) = self.items.iter_mut().find(|item| item.id == key.item_id) {
+                show_value(item, &key.field_id, shown.clone());
+            }
+            self.layout_changed();
+            if outcome_unknown {
+                self.recent_writes.remove(&key);
+            } else {
+                self.recent_writes.insert(key, shown);
+            }
         }
         cx.notify();
     }

@@ -126,3 +126,71 @@ fn a_selection_that_is_not_in_the_text_changes_nothing() {
     );
     assert_eq!(format_edit("é", 1..1, MarkdownFormat::Bold), None);
 }
+
+#[test]
+fn a_marker_belonging_to_a_neighbouring_span_is_not_taken_off() {
+    // " and " sits between two bold words: the `**` on each side close one
+    // span and open the next, they do not wrap the selection.
+    assert_eq!(
+        apply("**a** and **b**", 5..10, MarkdownFormat::Bold),
+        "**a****[ and ]****b**"
+    );
+    assert_eq!(
+        apply("**a** and **b**", 2..3, MarkdownFormat::Bold),
+        "[a] and **b**"
+    );
+    assert_eq!(
+        apply("**a** and **b**", 12..13, MarkdownFormat::Bold),
+        "**a** and [b]"
+    );
+    // The whole line starts and ends with `**` but is two spans, not one.
+    assert_eq!(
+        apply("**a** and **b**", 0..15, MarkdownFormat::Bold),
+        "[**a** and **b**]"
+            .replacen('[', "**[", 1)
+            .replacen(']', "]**", 1)
+    );
+}
+
+#[test]
+fn italic_ignores_underscores_inside_a_word() {
+    assert_eq!(
+        apply("a _word_ here", 3..7, MarkdownFormat::Italic),
+        "a [word] here"
+    );
+    assert_eq!(
+        apply("snake_case_word", 6..10, MarkdownFormat::Italic),
+        "snake__[case]__word",
+        "the underscores of an identifier are not italics"
+    );
+}
+
+#[test]
+fn a_heading_prefix_of_any_level_is_replaced_not_stacked() {
+    assert_eq!(
+        apply("## title", 5..5, MarkdownFormat::Heading),
+        "### ti|tle"
+    );
+    assert_eq!(
+        apply("# title", 3..3, MarkdownFormat::Heading),
+        "### t|itle"
+    );
+    assert_eq!(
+        apply("###### title", 8..8, MarkdownFormat::Heading),
+        "### t|itle"
+    );
+    assert_eq!(
+        apply("## a\n### b", 0..10, MarkdownFormat::Heading),
+        "[### a\n### b]"
+    );
+    assert_eq!(
+        apply("#hashtag", 0..0, MarkdownFormat::Heading),
+        "### |#hashtag",
+        "no space after the hashes: not a heading"
+    );
+    assert_eq!(
+        apply("####### seven", 0..0, MarkdownFormat::Heading),
+        "### |####### seven",
+        "seven hashes is not a heading either"
+    );
+}

@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
@@ -7,6 +8,8 @@ use crate::host::{HostSystem, ToolInvocation, ToolRunner};
 use crate::ios_simulators::XCRUN;
 use crate::{Device, DeviceKey, DeviceKind, DeviceState, SectionState};
 
+/// A device list is a few KB; this only stops a runaway file.
+pub(crate) const MAX_DEVICECTL_JSON_BYTES: u64 = 4 * 1024 * 1024;
 const DEVICECTL_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// devicectl's JSON has no published schema. Only `identifier`, the hardware
@@ -68,7 +71,32 @@ pub(crate) async fn read_physical_iphones(
     host: &dyn HostSystem,
     runner: &dyn ToolRunner,
 ) -> SectionState {
-    let output_path = host.temp_file_path("devicectl-devices.json");
+    // A folder of its own, open to this user only, so no other process can
+    // plant the list devicectl is about to be read back from.
+    let folder = match host.create_temp_dir("devicectl") {
+        Ok(folder) => folder,
+        Err(error) => {
+            return SectionState::Failed {
+                message: format!("could not make a folder for devicectl's output: {error}"),
+            };
+        }
+    };
+    let state = list_in_folder(host, runner, &folder.join("devicectl-devices.json")).await;
+    // devicectl may have written the file before it failed or was stopped;
+    // it holds device names and ids, so it never stays behind.
+    if let Err(error) = host.remove_dir_all(&folder)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("could not remove {}: {error}", folder.display());
+    }
+    state
+}
+
+async fn list_in_folder(
+    host: &dyn HostSystem,
+    runner: &dyn ToolRunner,
+    output_path: &Path,
+) -> SectionState {
     let invocation = ToolInvocation::new(
         XCRUN,
         [
@@ -82,14 +110,7 @@ pub(crate) async fn read_physical_iphones(
     )
     .with_timeout(DEVICECTL_TIMEOUT);
     let result = runner.run(invocation).await;
-    // devicectl may have written the file before it failed or was stopped;
-    // it holds device names and ids, so it never stays behind.
-    let json = host.read_to_string(&output_path);
-    if let Err(error) = host.remove_file(&output_path)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        log::warn!("could not remove {}: {error}", output_path.display());
-    }
+    let json = host.read_to_string_at_most(output_path, MAX_DEVICECTL_JSON_BYTES);
     let output = match result {
         Ok(output) => output,
         Err(failure) => {

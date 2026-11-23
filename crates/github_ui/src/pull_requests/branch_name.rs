@@ -3,6 +3,8 @@
 //! so both are checked before git sees them: `git switch -c` is run without
 //! `--`, and a hidden character would make the confirmation read wrong.
 
+use git::repository::ref_name_problem;
+
 use crate::untrusted_text::is_hidden_character;
 
 /// Why a name was refused, worded for the user.
@@ -20,45 +22,21 @@ pub fn default_branch_name(number: u64, head_ref_name: &str) -> String {
     }
 }
 
-/// `git check-ref-format --branch`'s rules, plus no control, bidirectional or
-/// invisible characters.
+/// `git check-ref-format --branch`'s rules (shared with the checks on a
+/// fetch's remote name, in the git crate), plus no bidirectional or invisible
+/// characters.
 pub fn validate_branch_name(name: &str) -> Result<(), BranchNameError> {
-    let refuse = |reason: &str| Err(BranchNameError(reason.to_string()));
-    if name.is_empty() {
-        return refuse("The branch name is empty.");
-    }
-    if name.starts_with('-') {
-        return refuse("A branch name cannot start with “-”.");
-    }
-    if name == "HEAD" || name == "@" {
-        return refuse("“HEAD” and “@” are not branch names.");
-    }
     if let Some(character) = name
         .chars()
         .find(|character| character.is_control() || is_hidden_character(*character))
     {
-        return refuse(&format!(
+        return Err(BranchNameError(format!(
             "The name holds a hidden or control character (U+{:04X}).",
             u32::from(character)
-        ));
+        )));
     }
-    if let Some(character) = name
-        .chars()
-        .find(|character| character.is_whitespace() || "~^:?*[\\".contains(*character))
-    {
-        return refuse(&format!("A branch name cannot contain “{character}”."));
+    match ref_name_problem(name) {
+        Some(problem) => Err(BranchNameError(problem.to_string())),
+        None => Ok(()),
     }
-    if name.contains("..") || name.contains("@{") || name.contains("//") {
-        return refuse("A branch name cannot contain “..”, “@{” or “//”.");
-    }
-    if name.starts_with('/') || name.ends_with('/') || name.ends_with('.') {
-        return refuse("A branch name cannot start with “/” or end with “/” or “.”.");
-    }
-    let bad_component = name
-        .split('/')
-        .any(|component| component.starts_with('.') || component.ends_with(".lock"));
-    if bad_component {
-        return refuse("No part of a branch name can start with “.” or end with “.lock”.");
-    }
-    Ok(())
 }

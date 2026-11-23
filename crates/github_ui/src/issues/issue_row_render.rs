@@ -9,7 +9,7 @@ use time::OffsetDateTime;
 use ui::{Disclosure, Tooltip, prelude::*};
 
 use crate::avatar::render_people;
-use crate::issues::epic_tree::{ChildrenLoad, TreeRow, progress_label};
+use crate::issues::epic_tree::{TreeRow, progress_label};
 use crate::issues::issue_filters::label_color;
 use crate::issues::issue_list::IssueList;
 use crate::issues::issue_list_render::updated_label;
@@ -87,6 +87,22 @@ pub(crate) fn render_assignee_faces(
     render_people(id, &people, px(180.), cx)
 }
 
+/// What an opened row's sub-issues are doing while they are not shown, in
+/// a line as tall as a row so the list can be drawn by range.
+pub(crate) fn render_status_entry(depth: usize, text: &str) -> AnyElement {
+    h_flex()
+        .h(px(ROW_HEIGHT))
+        .flex_none()
+        .pl(px(INDENT * (depth as f32 + 3.)))
+        .child(
+            Label::new(text.to_string())
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+                .single_line(),
+        )
+        .into_any_element()
+}
+
 impl IssueList {
     /// The chevron that opens a parent row, or the same width of nothing so
     /// titles line up.
@@ -108,22 +124,6 @@ impl IssueList {
             }) as Arc<dyn Fn(&gpui::ClickEvent, &mut Window, &mut App)>,
         )
         .into_any_element()
-    }
-
-    /// What an opened row's sub-issues are doing while they are not shown.
-    pub(crate) fn render_children_status(&self, row: &TreeRow) -> Option<AnyElement> {
-        let text = match self.sub_issues_of(&row.key)? {
-            ChildrenLoad::Loading => "Loading sub-issues…".to_string(),
-            ChildrenLoad::Failed(error) => error.to_string(),
-            ChildrenLoad::Loaded(_) => return None,
-        };
-        Some(
-            h_flex()
-                .h(px(28.))
-                .pl(px(INDENT * (row.depth as f32 + 3.)))
-                .child(Label::new(text).size(LabelSize::Small).color(Color::Muted))
-                .into_any_element(),
-        )
     }
 
     fn render_row_meta(
@@ -194,6 +194,7 @@ impl IssueList {
         let hidden_labels = issue.labels.len().saturating_sub(SHOWN_LABELS);
         h_flex()
             .id(("github-issue-row", index))
+            .debug_selector(|| format!("github-issue-row-{index}"))
             .w_full()
             .h(px(ROW_HEIGHT))
             .flex_none()

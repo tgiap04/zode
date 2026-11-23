@@ -4,8 +4,10 @@
 //! change someone made meanwhile is kept. After each write the issue is read
 //! back and whatever GitHub silently ignored is said.
 
+use std::collections::HashSet;
+
 use editor::Editor;
-use github::{GithubFuture, GithubUser, Issue, IssueState, IssueUpdate, StateReason};
+use github::{Comment, GithubFuture, GithubUser, Issue, IssueState, IssueUpdate, StateReason};
 use gpui::{App, AppContext as _, Context, Entity, Window};
 
 use crate::github_view_session::session_ended_message;
@@ -13,11 +15,15 @@ use crate::issues::IssueDetailView;
 use crate::issues::assignee_picker::{AssigneePicker, AssigneePickerEvent, AssigneeSource};
 use crate::issues::issue_detail_view::{IssueComment, IssueEdit};
 use crate::issues::issue_editor::{markdown_editor, single_line_editor};
+use crate::issues::paged_reads::{MAX_OPTION_PAGES, options_note, read_pages};
 use crate::markdown_composer::{MarkdownComposer, PreviewSource};
 use crate::untrusted_text::reveal_hidden_characters;
 
 pub(crate) const EDIT_CONFLICT: &str = "Someone changed this issue on GitHub after you started editing. \
      It has been reloaded; your text is still here. Save again to replace their version.";
+
+const SENT_COMMENT_AFTER_OLDER: &str = "Your comment was sent. It shows after the older comments, once \
+     “Load more comments” has read them.";
 
 impl IssueDetailView {
     pub(crate) fn show_issue(&mut self, issue: Issue, cx: &mut Context<Self>) {
@@ -26,6 +32,25 @@ impl IssueDetailView {
         self.issue = Some(issue);
         self.issue_error = None;
         cx.notify();
+    }
+
+    /// The edit left open takes the issue's `updated_at` as its base, since
+    /// this tab's own change moved it.
+    pub(crate) fn rebase_edit(&mut self, issue: &Issue) {
+        if let Some(edit) = &mut self.edit
+            && !edit.saving
+        {
+            edit.base_updated_at = issue.updated_at.clone();
+        }
+    }
+
+    /// What the label and milestone menus lack, when GitHub has more than
+    /// were read.
+    pub fn options_note(&self) -> Option<String> {
+        options_note(
+            self.labels_cut_short.then_some(self.labels.len()),
+            self.milestones_cut_short.then_some(self.milestones.len()),
+        )
     }
 
     pub fn write_error(&self) -> Option<&str> {
@@ -64,8 +89,14 @@ impl IssueDetailView {
         let backend = self.backend.clone();
         let repository = self.key.repository.clone();
         self.options_task = Some(cx.spawn(async move |this, cx| {
-            let labels = backend.list_labels(&repository, None).await;
-            let milestones = backend.list_milestones(&repository, None).await;
+            let labels = read_pages(MAX_OPTION_PAGES, usize::MAX, |cursor| {
+                backend.list_labels(&repository, cursor)
+            })
+            .await;
+            let milestones = read_pages(MAX_OPTION_PAGES, usize::MAX, |cursor| {
+                backend.list_milestones(&repository, cursor)
+            })
+            .await;
             let viewer = backend.viewer().await;
             let permission = backend.repository_permission(&repository).await;
             let issue_types = backend.list_issue_types(&repository).await;
@@ -97,11 +128,17 @@ impl IssueDetailView {
                     Err(error) => log::info!("could not read the signed-in account: {error}"),
                 }
                 match labels {
-                    Ok(page) => this.labels = page.items,
+                    Ok(read) => {
+                        this.labels = read.items;
+                        this.labels_cut_short = read.cut_short;
+                    }
                     Err(error) => log::info!("could not read the repository's labels: {error}"),
                 }
                 match milestones {
-                    Ok(page) => this.milestones = page.items,
+                    Ok(read) => {
+                        this.milestones = read.items;
+                        this.milestones_cut_short = read.cut_short;
+                    }
                     Err(error) => log::info!("could not read the repository's milestones: {error}"),
                 }
                 cx.notify();
@@ -167,12 +204,13 @@ impl IssueDetailView {
         edit.error = None;
         let backend = self.backend.clone();
         let key = self.key.clone();
+        let mark = self.supersede_issue_reads();
         self.edit_task = Some(cx.spawn(async move |this, cx| {
             let current = backend.issue(&key.repository, key.number).await;
             match current {
                 Ok(current) if current.updated_at == base => {}
                 other => {
-                    this.update(cx, |this, cx| this.edit_stopped(other, cx))
+                    this.update(cx, |this, cx| this.edit_stopped(other, mark, cx))
                         .ok();
                     return;
                 }
@@ -203,6 +241,9 @@ impl IssueDetailView {
             this.update(cx, |this, cx| match saved {
                 Ok(issue) => {
                     this.edit = None;
+                    // What the save answered is newer than any Reload asked
+                    // for before it landed.
+                    this.supersede_issue_reads();
                     this.show_issue(issue, cx);
                 }
                 Err(error) => {
@@ -221,11 +262,19 @@ impl IssueDetailView {
 
     /// The edit could not go ahead: the check failed, or found the issue
     /// changed. The text being edited stays.
-    fn edit_stopped(&mut self, current: github::GithubResult<Issue>, cx: &mut Context<Self>) {
+    fn edit_stopped(
+        &mut self,
+        current: github::GithubResult<Issue>,
+        mark: u64,
+        cx: &mut Context<Self>,
+    ) {
         let message = match current {
             Ok(current) => {
                 let updated_at = current.updated_at.clone();
-                self.show_issue(current, cx);
+                // A Reload asked for since the check is the newer answer.
+                if self.is_latest_issue_read(mark) {
+                    self.show_issue(current, cx);
+                }
                 if let Some(edit) = &mut self.edit {
                     edit.base_updated_at = updated_at;
                 }
@@ -407,7 +456,13 @@ impl IssueDetailView {
         self.write_task = Some(cx.spawn_in(window, async move |this, cx| {
             let written = write.await;
             let read_back = match &written {
-                Ok(_) => Some(backend.issue(&key.repository, key.number).await),
+                // Any Reload still on its way was asked for before the
+                // change landed; it is dropped, and one asked for from here
+                // on is newer than the read-back.
+                Ok(_) => match this.update(cx, |this, _| this.supersede_issue_reads()) {
+                    Ok(mark) => Some((mark, backend.issue(&key.repository, key.number).await)),
+                    Err(_) => None,
+                },
                 Err(_) => None,
             };
             this.update_in(cx, |this, window, cx| {
@@ -417,28 +472,28 @@ impl IssueDetailView {
                         this.note_error(&error, cx);
                         this.write_error = Some(error.to_string());
                     }
-                    (Ok(_), Some(Ok(issue))) => {
+                    (Ok(_), Some((mark, Ok(issue)))) => {
+                        // A refusal shown while this write was on its way is
+                        // over.
+                        this.write_error = None;
                         if let Some(field) = field {
                             field.update(cx, |field, cx| field.clear(window, cx));
                         }
                         this.write_notice = not_applied(&issue).map(|what| this.not_applied(&what));
                         // This tab's own change moved `updated_at`; an edit
                         // left open must not take it for someone else's.
-                        if let Some(edit) = &mut this.edit
-                            && !edit.saving
-                        {
-                            edit.base_updated_at = issue.updated_at.clone();
+                        this.rebase_edit(&issue);
+                        if this.is_latest_issue_read(mark) {
+                            this.show_issue(issue, cx);
                         }
-                        this.show_issue(issue, cx);
                     }
                     (Ok(_), read_back) => {
-                        let reason =
-                            read_back
-                                .and_then(Result::err)
-                                .map_or_else(String::new, |error| {
-                                    this.note_error(&error, cx);
-                                    format!(": {error}")
-                                });
+                        let reason = read_back
+                            .and_then(|(_, read_back)| read_back.err())
+                            .map_or_else(String::new, |error| {
+                                this.note_error(&error, cx);
+                                format!(": {error}")
+                            });
                         this.write_error =
                             Some(format!("Saved, but could not read the issue back{reason}"));
                     }
@@ -455,7 +510,13 @@ impl IssueDetailView {
     /// on its own task, so neither cancels the other; the controls still
     /// wait for it (see [`Self::is_busy`]).
     pub(crate) fn ready_to_write(&mut self, cx: &mut Context<Self>) -> bool {
-        if self.writing || !self.check_session(cx) {
+        if !self.check_session(cx) {
+            return false;
+        }
+        if self.writing {
+            self.write_error =
+                Some("A change is still being saved. Try again once it finishes.".into());
+            cx.notify();
             return false;
         }
         // The save reads the issue back over whatever this would change.
@@ -549,20 +610,24 @@ impl IssueDetailView {
         let backend = self.backend.clone();
         let key = self.key.clone();
         self.comment_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let sent = backend.add_comment(&key.repository, key.number, text).await;
+            let sent = backend
+                .add_comment(&key.repository, key.number, text.clone())
+                .await;
             this.update_in(cx, |this, window, cx| {
                 this.sending_comment = false;
                 match sent {
                     Ok(comment) => {
-                        editor.update(cx, |editor, cx| editor.clear(window, cx));
-                        if let Some(composer) = &this.comment_composer {
-                            composer.update(cx, |composer, cx| composer.back_to_write(cx));
+                        // Typing went on while the comment was on its way:
+                        // that text is not the comment just sent.
+                        if editor.read(cx).text(cx) == text {
+                            editor.update(cx, |editor, cx| editor.clear(window, cx));
+                            if let Some(composer) = &this.comment_composer {
+                                composer.update(cx, |composer, cx| composer.back_to_write(cx));
+                            }
                         }
-                        let body = this.markdown(&comment.body, cx);
-                        this.comments.push(IssueComment { comment, body });
-                        if let Some(issue) = &mut this.issue {
-                            issue.comment_count += 1;
-                        }
+                        this.show_sent_comment(comment, cx);
+                        // Commenting moved the issue's `updated_at`.
+                        this.refresh_issue_after_own_write(cx);
                     }
                     Err(error) => {
                         this.note_error(&error, cx);
@@ -574,5 +639,52 @@ impl IssueDetailView {
             .ok();
         }));
         cx.notify();
+    }
+
+    /// Puts a comment GitHub has just accepted where it belongs, last.
+    fn show_sent_comment(&mut self, comment: Comment, cx: &mut Context<Self>) {
+        if let Some(issue) = &mut self.issue {
+            issue.comment_count += 1;
+        }
+        if self.loading_comments && self.loading_more_comments {
+            // Reading the first page again would drop the pages read since;
+            // the page on its way is let finish, and the comment placed after.
+            self.sent_during_load_more.push(comment);
+        } else if self.loading_comments {
+            // The read on its way may have been made before the comment
+            // existed; reading the first page again has it.
+            self.fetch_comments(None, cx);
+        } else if self.next_comment_cursor.is_some() {
+            // Older comments are still unread: shown now, it would sit before
+            // them. Load more reaches it in its place.
+            self.write_notice = Some(SENT_COMMENT_AFTER_OLDER.to_string());
+        } else {
+            let body = self.markdown(&comment.body, cx);
+            self.comments.push(IssueComment { comment, body });
+        }
+    }
+
+    /// A "Load more" that was on its way when comments were sent has landed:
+    /// on the last page they come last, else they show once Load more
+    /// reaches them.
+    pub(crate) fn place_comments_sent_during_load_more(
+        &mut self,
+        known: &mut HashSet<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sent_during_load_more.is_empty() {
+            return;
+        }
+        if self.next_comment_cursor.is_some() {
+            self.sent_during_load_more.clear();
+            self.write_notice = Some(SENT_COMMENT_AFTER_OLDER.to_string());
+            return;
+        }
+        for comment in std::mem::take(&mut self.sent_during_load_more) {
+            if known.insert(comment.id) {
+                let body = self.markdown(&comment.body, cx);
+                self.comments.push(IssueComment { comment, body });
+            }
+        }
     }
 }

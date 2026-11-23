@@ -187,6 +187,7 @@ async fn a_bulk_label_github_ignores_is_reported_per_issue(cx: &mut TestAppConte
 /// A PATCH that reached the fake server, and when.
 struct Sent {
     path: String,
+    method: String,
     at: Instant,
 }
 
@@ -227,41 +228,59 @@ fn http_backend(
             async move {
                 let path = request.uri().path().to_string();
                 let method = request.method().as_str().to_string();
-                let (status, body) = if method == "PATCH" {
-                    sent.lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .push(Sent {
-                            path: path.clone(),
-                            at: executor.now(),
-                        });
-                    let number = path
-                        .rsplit('/')
-                        .next()
-                        .and_then(|number| number.parse::<u64>().ok())
-                        .unwrap_or_default();
-                    if failing.contains(&number) {
-                        (404, json!({"message": "Not Found"}))
-                    } else {
+                let (status, body) =
+                    if method == "GET" && path.starts_with("/repos/octo/repo/issues/") {
+                        // A single issue read again: shown as closed, as it
+                        // is once an interrupted write has landed.
+                        sent.lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push(Sent {
+                                path: path.clone(),
+                                method,
+                                at: executor.now(),
+                            });
+                        let number = path
+                            .rsplit('/')
+                            .next()
+                            .and_then(|number| number.parse::<u64>().ok())
+                            .unwrap_or_default();
                         (200, issue_json(number, "closed"))
-                    }
-                } else if path == "/repos/octo/repo" {
-                    (
-                        200,
-                        json!({"private": true, "visibility": "private",
+                    } else if method == "PATCH" {
+                        sent.lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .push(Sent {
+                                path: path.clone(),
+                                method,
+                                at: executor.now(),
+                            });
+                        let number = path
+                            .rsplit('/')
+                            .next()
+                            .and_then(|number| number.parse::<u64>().ok())
+                            .unwrap_or_default();
+                        if failing.contains(&number) {
+                            (404, json!({"message": "Not Found"}))
+                        } else {
+                            (200, issue_json(number, "closed"))
+                        }
+                    } else if path == "/repos/octo/repo" {
+                        (
+                            200,
+                            json!({"private": true, "visibility": "private",
                                "permissions": {"admin": false, "push": true, "triage": true}}),
-                    )
-                } else if path == "/repos/octo/repo/issues" {
-                    (
-                        200,
-                        json!([
-                            issue_json(1, "open"),
-                            issue_json(2, "open"),
-                            issue_json(3, "open")
-                        ]),
-                    )
-                } else {
-                    (200, json!([]))
-                };
+                        )
+                    } else if path == "/repos/octo/repo/issues" {
+                        (
+                            200,
+                            json!([
+                                issue_json(1, "open"),
+                                issue_json(2, "open"),
+                                issue_json(3, "open")
+                            ]),
+                        )
+                    } else {
+                        (200, json!([]))
+                    };
                 Ok(Response::builder()
                     .status(status)
                     .body(AsyncBody::from(body.to_string()))?)
@@ -274,12 +293,17 @@ fn http_backend(
     (Arc::new(backend), sent)
 }
 
-fn patched(sent: &Arc<Mutex<Vec<Sent>>>) -> Vec<String> {
+fn requested(sent: &Arc<Mutex<Vec<Sent>>>, method: &str) -> Vec<String> {
     sent.lock()
         .unwrap_or_else(PoisonError::into_inner)
         .iter()
+        .filter(|sent| sent.method == method)
         .map(|sent| sent.path.clone())
         .collect()
+}
+
+fn patched(sent: &Arc<Mutex<Vec<Sent>>>) -> Vec<String> {
+    requested(sent, "PATCH")
 }
 
 #[gpui::test]
@@ -459,4 +483,51 @@ async fn signing_out_during_a_run_stops_it_before_the_next_write(cx: &mut TestAp
             "1 done, 1 cancelled, 1 not sent: signed out"
         );
     });
+}
+
+/// Stopping leaves the item being written as "interrupted": its write may
+/// have landed, so its row is read again instead of keeping the old state.
+#[gpui::test]
+async fn stopping_reads_the_interrupted_issue_again(cx: &mut TestAppContext) {
+    init(cx);
+    let (backend, sent) = http_backend(&[], cx);
+    let (workspace, cx) = workspace_window(cx).await;
+    let list = list_over(backend, cx);
+    let dialog = start(
+        &workspace,
+        &list,
+        &[1, 2, 3],
+        BulkIssueAction::Close(StateReason::Completed),
+        cx,
+    );
+    dialog.update(cx, |dialog, cx| dialog.confirm(cx));
+    cx.run_until_parked();
+    cx.executor().advance_clock(MIN_WRITE_INTERVAL);
+    cx.run_until_parked();
+    assert_eq!(
+        statuses(&dialog, cx),
+        vec![
+            (1, BulkItemStatus::Done),
+            (2, BulkItemStatus::Done),
+            (3, BulkItemStatus::Running)
+        ]
+    );
+
+    dialog.update(cx, |dialog, cx| dialog.cancel(cx));
+    cx.run_until_parked();
+
+    assert_eq!(
+        requested(&sent, "GET"),
+        vec!["/repos/octo/repo/issues/3".to_string()],
+        "only the interrupted issue is read again"
+    );
+    let state_of = |number: u64, cx: &mut VisualTestContext| {
+        list.read_with(cx, |list, _| {
+            list.rows()
+                .iter()
+                .find(|issue| issue.number == number)
+                .map(|issue| issue.state)
+        })
+    };
+    assert_eq!(state_of(3, cx), Some(IssueState::Closed));
 }

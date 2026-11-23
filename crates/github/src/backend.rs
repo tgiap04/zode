@@ -16,7 +16,10 @@ pub type GithubFuture<T> = BoxFuture<'static, GithubResult<T>>;
 ///
 /// Lists take an opaque cursor from the previous page (`None` for the first).
 /// Writes are spaced out by the token's [`crate::WriteQueue`], so a caller can
-/// fire them without counting.
+/// fire them without counting. A write's place in the queue is taken when it
+/// is asked for and kept until its future finishes or is dropped: poll it, or
+/// drop it, because one kept alive but never polled holds back every later
+/// write of the token.
 pub trait GithubBackend: Send + Sync {
     /// The account behind the token, and its scopes when GitHub tells them.
     fn viewer(&self) -> GithubFuture<Viewer>;

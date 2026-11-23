@@ -3709,6 +3709,7 @@ dependencies = [
  "async-trait",
  "devices",
  "futures 0.3.32",
+ "libc",
  "log",
  "parking_lot",
  "serde",
@@ -5951,6 +5952,7 @@ dependencies = [
  "http_client",
  "log",
  "parking_lot",
+ "reqwest_client",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -5958,6 +5960,7 @@ dependencies = [
  "url",
  "util",
  "which 6.0.3",
+ "zed-reqwest",
 ]
 
 [[package]]

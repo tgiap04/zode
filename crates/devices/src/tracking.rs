@@ -9,14 +9,15 @@ use crate::android_devices::{
 };
 use crate::android_sdk::locate_android_sdk;
 use crate::host::{HostSystem, ToolInvocation, ToolRunner};
-use crate::ios_simulators::{XCRUN, read_simulators};
-use crate::{Device, DeviceKey, DeviceState, SectionState};
+use crate::ios_simulators::{XCRUN, read_simulator};
+use crate::{Device, DeviceState};
 
 const SIMULATOR_TIME_LIMIT: Duration = Duration::from_secs(120);
 const EMULATOR_TIME_LIMIT: Duration = Duration::from_secs(180);
 /// A cold boot spent about 9 s in `bootstatus` after simctl already said
 /// Booted; the margin covers slower machines without stalling one probe.
 const BOOTSTATUS_TIMEOUT: Duration = Duration::from_secs(30);
+const MIN_BOOTSTATUS_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TrackTarget {
@@ -82,10 +83,11 @@ pub async fn probe(
     host: &dyn HostSystem,
     runner: &dyn ToolRunner,
     target: &TrackTarget,
+    time_left: Duration,
 ) -> ProbeResult {
     match target {
-        TrackTarget::SimulatorBoot { udid } => probe_simulator(runner, udid, true).await,
-        TrackTarget::SimulatorShutdown { udid } => probe_simulator(runner, udid, false).await,
+        TrackTarget::SimulatorBoot { udid } => probe_simulator(runner, udid, Some(time_left)).await,
+        TrackTarget::SimulatorShutdown { udid } => probe_simulator(runner, udid, None).await,
         TrackTarget::EmulatorStart {
             avd_name,
             serials_before,
@@ -103,29 +105,36 @@ fn probe_error(message: impl Into<String>) -> ProbeResult {
     }
 }
 
-async fn probe_simulator(runner: &dyn ToolRunner, udid: &str, wait_for_boot: bool) -> ProbeResult {
-    let devices = match read_simulators(runner).await {
-        SectionState::Ready(devices) => devices,
-        SectionState::ToolMissing { tool, hint } => return probe_error(format!("{tool}: {hint}")),
-        SectionState::Unsupported { reason } => return probe_error(reason),
-        SectionState::Failed { message } => return probe_error(message),
+/// `wait_for_boot` is the time left to the operation when a boot is followed.
+async fn probe_simulator(
+    runner: &dyn ToolRunner,
+    udid: &str,
+    wait_for_boot: Option<Duration>,
+) -> ProbeResult {
+    let device = match read_simulator(runner, udid).await {
+        Ok(device) => device,
+        Err(message) => return probe_error(message),
     };
-    let device = devices
-        .into_iter()
-        .find(|device| device.key == DeviceKey::Simulator(udid.to_string()));
     // Only a simulator that is already Booted is asked, since `-b` would boot
     // one that the user shut down in the meantime.
-    let ready = wait_for_boot
-        && device
-            .as_ref()
-            .is_some_and(|device| device.state == DeviceState::Running)
-        && runner
-            .run(
-                ToolInvocation::new(XCRUN, ["simctl", "bootstatus", udid, "-b"])
-                    .with_timeout(BOOTSTATUS_TIMEOUT),
-            )
-            .await
-            .is_ok_and(|output| output.success());
+    let booted = device
+        .as_ref()
+        .is_some_and(|device| device.state == DeviceState::Running);
+    let ready = match wait_for_boot {
+        Some(time_left) if booted => {
+            // Never past the deadline of the whole operation, but long enough
+            // to hear an answer that is just about to come.
+            let timeout = time_left.clamp(MIN_BOOTSTATUS_TIMEOUT, BOOTSTATUS_TIMEOUT);
+            runner
+                .run(
+                    ToolInvocation::new(XCRUN, ["simctl", "bootstatus", udid, "-b"])
+                        .with_timeout(timeout),
+                )
+                .await
+                .is_ok_and(|output| output.success())
+        }
+        _ => false,
+    };
     ProbeResult {
         device,
         ready,

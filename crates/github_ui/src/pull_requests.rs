@@ -3,6 +3,7 @@
 //! only after a warning), and a merge that only runs from its confirmation dialog.
 
 mod branch_name;
+mod check_link;
 mod fork_checkout;
 mod merge_modal;
 mod merge_modal_render;

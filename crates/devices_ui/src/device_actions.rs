@@ -13,10 +13,8 @@ use gpui::{AppContext as _, Context, Task, Window};
 use util::ResultExt as _;
 use workspace::OpenOptions;
 
-use crate::device_follow::{OperationContext, execute};
-use crate::device_operations::{
-    DeviceError, OperationKind, OperationOutcome, Settled, plan_for, shorten_home,
-};
+use crate::device_follow::{Executed, OperationContext, execute};
+use crate::device_operations::{DeviceError, OperationKind, Settled, plan_for, shorten_home};
 use crate::devices_panel::{DevicesPanel, Operation};
 
 /// Whether a row offers this action at all. Physical devices never do: Zode
@@ -90,6 +88,11 @@ impl DevicesPanel {
         if !self.is_supported(cx) || self.operations.contains_key(key) {
             return;
         }
+        if kind == OperationKind::Boot && self.has_running_stray(key) {
+            self.refuse_start_while_stray_runs(key);
+            cx.notify();
+            return;
+        }
         let Some(device) = self.find_device(key).filter(|device| offers(&kind, device)) else {
             return;
         };
@@ -113,11 +116,9 @@ impl DevicesPanel {
             let key = key.clone();
             let kind = kind.clone();
             async move |this, cx| {
-                let (outcome, available_bytes) = cx.background_spawn(execute(context, plan)).await;
-                this.update(cx, |this, cx| {
-                    this.finish(&key, &kind, outcome, available_bytes, cx)
-                })
-                .log_err();
+                let executed = cx.background_spawn(execute(context, plan)).await;
+                this.update(cx, |this, cx| this.finish(&key, &kind, executed, cx))
+                    .log_err();
             }
         });
         let operation = Operation {
@@ -139,19 +140,26 @@ impl DevicesPanel {
         &mut self,
         key: &DeviceKey,
         kind: &OperationKind,
-        outcome: OperationOutcome,
-        available_bytes: Option<u64>,
+        executed: Executed,
         cx: &mut Context<Self>,
     ) {
+        let Executed {
+            outcome,
+            available_bytes,
+            stray,
+        } = executed;
         let Some(operation) = self.operations.remove(key) else {
             return;
         };
+        self.remember_stray(key, stray);
         if *kind != OperationKind::ShowWindow {
             match outcome.settled {
                 // An emulator stopped by its serial comes back under its
                 // serial's name, not under the row's key.
+                // A simulator is followed without its runtimes, so a replaced
+                // row would lose its family and version.
                 Settled::Done(Some(device)) | Settled::Failed(Some(device))
-                    if device.key != *key =>
+                    if device.key != *key || matches!(key, DeviceKey::Simulator(_)) =>
                 {
                     self.set_device_state(key, device.state)
                 }

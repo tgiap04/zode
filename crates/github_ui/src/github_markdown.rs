@@ -17,14 +17,15 @@ use markdown::{
     DataImages, Markdown, MarkdownElement, MarkdownFont, MarkdownOptions, MarkdownStyle,
 };
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
-use url::Url;
-use workspace::Workspace;
+use url::{Host, Url};
+use workspace::notifications::NotificationId;
+use workspace::{Toast, Workspace};
 
 use crate::github_view::DetailKey;
 use crate::github_view_session::{SessionStamp, is_live_session};
 use crate::issues::open_issue_detail;
 use crate::pull_requests::open_pull_request_detail;
-use crate::untrusted_text::reveal_hidden_characters;
+use crate::untrusted_text::{is_hidden_character, reveal_hidden_characters};
 
 /// No HTML, no diagrams, no `data:` images: a body is drawn from its text
 /// alone. With no image resolver either, every image shows its alt text.
@@ -88,24 +89,100 @@ fn github_item(url: &Url) -> Option<LinkTarget> {
 }
 
 /// The host `target` really leads to, when `shown` (a link's text) reads as
-/// an address on another host.
+/// an address on another host anywhere in it: one address among words is
+/// as misleading as one alone.
 pub fn shown_host_mismatch(shown: &str, target: &Url) -> Option<String> {
-    let shown = shown.trim();
-    if shown.is_empty() || shown.contains(char::is_whitespace) {
-        return None;
-    }
-    let candidate = if shown.contains("://") {
-        shown.to_string()
-    } else {
-        format!("https://{shown}")
-    };
-    let shown_url = Url::parse(&candidate).ok()?;
-    let shown_host = shown_url.host_str()?;
-    if !shown_host.contains('.') {
-        return None;
-    }
     let target_host = target.host_str()?;
-    (shown_host != target_host).then(|| target_host.to_string())
+    // Invisible characters are dropped, as the address parser drops them, so
+    // `github\u{200B}.com` reads as the host it will be taken for.
+    let visible = shown
+        .chars()
+        .filter(|character| !is_hidden_character(*character))
+        .collect::<String>();
+    visible
+        .split_whitespace()
+        .filter_map(shown_host)
+        .any(|host| host != target_host)
+        .then(|| target_host.to_string())
+}
+
+/// The host a word of link text reads as, when it reads as an address.
+fn shown_host(word: &str) -> Option<String> {
+    let word = word.trim_matches(is_surrounding_punctuation);
+    if word.is_empty() {
+        return None;
+    }
+    let candidate = if word.contains("://") {
+        word.to_string()
+    } else {
+        format!("https://{word}")
+    };
+    let url = Url::parse(&candidate).ok()?;
+    let looks_like_a_host = match url.host()? {
+        Host::Domain(domain) => domain.rsplit_once('.').is_some_and(|(_, top_level)| {
+            let well_formed = top_level.starts_with("xn--")
+                || (top_level.len() >= 2 && top_level.chars().all(|c| c.is_ascii_alphabetic()));
+            well_formed
+                && (is_written_as_an_address(word)
+                    || !FILE_EXTENSIONS.contains(&top_level.to_ascii_lowercase().as_str()))
+        }),
+        // `1.2` parses as an address too; only four written parts is one.
+        Host::Ipv4(_) => written_host(word).matches('.').count() == 3,
+        Host::Ipv6(_) => false,
+    };
+    looks_like_a_host.then(|| url.host_str().map(str::to_string))?
+}
+
+/// Endings of file names that are also top-level domains: `main.rs` and
+/// `README.md` in ordinary prose are files, not addresses, unless something
+/// else about the word says address.
+const FILE_EXTENSIONS: &[&str] = &[
+    "rs", "js", "ts", "md", "py", "json", "toml", "yaml", "yml", "txt", "lock", "go", "java", "kt",
+    "swift", "c", "h", "cpp", "sh", "html", "css",
+];
+
+/// A scheme, `www.`, or a path, port, query or user name after the host.
+fn is_written_as_an_address(word: &str) -> bool {
+    word.contains("://")
+        || word
+            .get(..4)
+            .is_some_and(|start| start.eq_ignore_ascii_case("www."))
+        || word.contains(['/', '?', '#', ':', '@'])
+}
+
+fn is_surrounding_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        '(' | ')'
+            | '['
+            | ']'
+            | '{'
+            | '}'
+            | '<'
+            | '>'
+            | '"'
+            | '\''
+            | '`'
+            | '“'
+            | '”'
+            | '‘'
+            | '’'
+            | ','
+            | ';'
+            | ':'
+            | '!'
+            | '?'
+            | '.'
+            | '*'
+    )
+}
+
+/// The part of `word` between its scheme and the first path, query or port.
+fn written_host(word: &str) -> &str {
+    let rest = word.split_once("://").map_or(word, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    host.split(':').next().unwrap_or(host)
 }
 
 /// Every link's text, by the address it leads to.
@@ -120,6 +197,11 @@ pub fn link_texts(source: &str) -> HashMap<String, Vec<String>> {
             Event::Text(text) | Event::Code(text) => {
                 if let Some((_, shown)) = open.as_mut() {
                     shown.push_str(&text);
+                }
+            }
+            Event::SoftBreak | Event::HardBreak => {
+                if let Some((_, shown)) = open.as_mut() {
+                    shown.push(' ');
                 }
             }
             Event::End(TagEnd::Link) => {
@@ -281,14 +363,26 @@ struct LinkOpener {
     session: SessionStamp,
 }
 
+/// What makes a link worth asking about before it opens.
+enum Doubt {
+    /// Its text shows an address on this other host.
+    TextShowsAnotherHost { shown: String, host: String },
+    /// Plain `http`: what is read or typed on the page crosses the network
+    /// in the clear.
+    NotEncrypted,
+}
+
+struct RefusedLink;
+
 impl LinkOpener {
     fn open(&self, destination: &str, window: &mut Window, cx: &mut App) {
         let in_app = is_live_session(&self.session, cx);
         match classify_link(destination) {
-            LinkTarget::Refused => {
-                log::warn!("not opening a GitHub link that is not http(s)");
-            }
+            LinkTarget::Refused => self.explain_refusal(window, cx),
             LinkTarget::Issue(key) => {
+                if self.asked_first(destination, window, cx) {
+                    return;
+                }
                 let workspace = Workspace::for_window(window, cx).filter(|_| in_app);
                 let Some(workspace) = workspace else {
                     cx.open_url(&issue_page(&key));
@@ -305,6 +399,9 @@ impl LinkOpener {
                 });
             }
             LinkTarget::PullRequest(key) => {
+                if self.asked_first(destination, window, cx) {
+                    return;
+                }
                 let workspace = Workspace::for_window(window, cx).filter(|_| in_app);
                 let Some(workspace) = workspace else {
                     cx.open_url(&format!(
@@ -321,25 +418,71 @@ impl LinkOpener {
                     });
                 });
             }
-            LinkTarget::Web(url) => self.open_on_the_web(destination, url, window, cx),
+            LinkTarget::Web(url) => {
+                if !self.asked_first(destination, window, cx) {
+                    cx.open_url(url.as_str());
+                }
+            }
         }
     }
 
-    fn open_on_the_web(&self, destination: &str, url: Url, window: &mut Window, cx: &mut App) {
-        let shown = self
+    /// A refused link does nothing, and the click says so.
+    fn explain_refusal(&self, window: &mut Window, cx: &mut App) {
+        log::warn!("not opening a GitHub link that is not http(s)");
+        let Some(workspace) = Workspace::for_window(window, cx) else {
+            return;
+        };
+        window.defer(cx, move |_, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.show_toast(
+                    Toast::new(
+                        NotificationId::unique::<RefusedLink>(),
+                        "Zode only opens http and https links, so this one was not opened.",
+                    )
+                    .autohide(),
+                    cx,
+                );
+            });
+        });
+    }
+
+    fn doubt_about(&self, destination: &str, url: &Url) -> Option<Doubt> {
+        let mismatch = self
             .link_texts
             .get(destination)
             .into_iter()
             .flatten()
-            .find_map(|shown| shown_host_mismatch(shown, &url).map(|host| (shown.clone(), host)));
-        let Some((shown, host)) = shown else {
-            cx.open_url(url.as_str());
-            return;
+            .find_map(|shown| shown_host_mismatch(shown, url).map(|host| (shown.clone(), host)));
+        if let Some((shown, host)) = mismatch {
+            return Some(Doubt::TextShowsAnotherHost { shown, host });
+        }
+        (url.scheme() == "http").then_some(Doubt::NotEncrypted)
+    }
+
+    /// Asks the user whether to open `destination` on the web, when there is
+    /// reason to doubt it. Returns whether it asked: what happens next is
+    /// then up to the answer.
+    fn asked_first(&self, destination: &str, window: &mut Window, cx: &mut App) -> bool {
+        let Ok(url) = Url::parse(destination.trim()) else {
+            return false;
+        };
+        let Some(doubt) = self.doubt_about(destination, &url) else {
+            return false;
+        };
+        let (message, detail) = match &doubt {
+            Doubt::TextShowsAnotherHost { shown, host } => (
+                format!("This link leads to {host}"),
+                host_mismatch_prompt(shown, &url),
+            ),
+            Doubt::NotEncrypted => (
+                "This link is not encrypted".to_string(),
+                format!("It opens {url} over plain http. Open it anyway?"),
+            ),
         };
         let answer = window.prompt(
             PromptLevel::Warning,
-            &format!("This link leads to {host}"),
-            Some(&host_mismatch_prompt(&shown, &url)),
+            &message,
+            Some(&detail),
             &["Open", "Cancel"],
             cx,
         );
@@ -349,6 +492,7 @@ impl LinkOpener {
             }
         })
         .detach();
+        true
     }
 }
 

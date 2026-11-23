@@ -6,6 +6,15 @@ use crate::issues::issue_detail_write_render::callout;
 use crate::issues::issue_list::IssueList;
 use crate::untrusted_text::reveal_hidden_characters;
 
+/// `3 selected`, and how many of them the filter keeps out of view.
+fn selection_text(selected: usize, hidden: usize) -> String {
+    if hidden == 0 {
+        format!("{selected} selected")
+    } else {
+        format!("{selected} selected ({hidden} hidden by filter)")
+    }
+}
+
 impl IssueList {
     pub(crate) fn render_row_checkbox(&self, number: u64, cx: &mut Context<Self>) -> AnyElement {
         let this = cx.entity().downgrade();
@@ -36,6 +45,7 @@ impl IssueList {
     /// through a confirmation that lists them.
     pub(crate) fn render_selection_bar(
         &self,
+        hidden: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
@@ -59,6 +69,7 @@ impl IssueList {
             }
         });
         let labels = self.labels.clone();
+        let note = self.options_note();
         let label_menu = ContextMenu::build(window, cx, move |mut menu, _, _| {
             for label in labels {
                 let this = this.clone();
@@ -69,7 +80,10 @@ impl IssueList {
                         .ok();
                 });
             }
-            menu
+            match note {
+                Some(note) => menu.separator().label(note),
+                None => menu,
+            }
         });
         let offers = self.offers_bulk_actions();
         Some(
@@ -81,7 +95,7 @@ impl IssueList {
                 .border_b_1()
                 .border_color(cx.theme().colors().border_variant)
                 .child(
-                    Label::new(format!("{} selected", self.selected.len())).size(LabelSize::Small),
+                    Label::new(selection_text(self.selected.len(), hidden)).size(LabelSize::Small),
                 )
                 .when(offers, |row| {
                     row.child(DropdownMenu::new(

@@ -41,6 +41,24 @@ pub enum CheckoutState {
     Failed(String),
 }
 
+fn state_after(outcome: CheckoutOutcome) -> CheckoutState {
+    match outcome {
+        CheckoutOutcome::CheckedOut { branch } => {
+            CheckoutState::Finished(format!("Checked out {branch}."))
+        }
+        CheckoutOutcome::SwitchedToExisting { branch } => CheckoutState::Finished(format!(
+            "Switched to the existing {branch}; it was not updated."
+        )),
+        CheckoutOutcome::BranchExists { branch } => CheckoutState::BranchExists { branch },
+        CheckoutOutcome::PullRequestChanged { fetched } => {
+            CheckoutState::PullRequestChanged(fetched)
+        }
+        CheckoutOutcome::Refused(reason) | CheckoutOutcome::Failed(reason) => {
+            CheckoutState::Failed(reason)
+        }
+    }
+}
+
 impl PullRequestDetailView {
     pub fn checkout_state(&self) -> &CheckoutState {
         &self.checkout
@@ -85,7 +103,7 @@ impl PullRequestDetailView {
         if !idle || self.checkout_blocker(cx).is_some() {
             return;
         }
-        self.fork_warning_accepted = false;
+        self.accepted_fork_head = None;
         let worktree = self.checkout_worktree_path(cx);
         let warning = self
             .details
@@ -109,8 +127,14 @@ impl PullRequestDetailView {
             let accepted = matches!(answer.await, Ok(0));
             this.update(cx, |this, cx| {
                 if this.checkout == CheckoutState::ForkWarning {
-                    this.fork_warning_accepted = accepted;
-                    this.checkout = if accepted {
+                    this.accepted_fork_head = accepted
+                        .then(|| {
+                            this.details
+                                .as_ref()
+                                .map(|details| details.pull_request.head_ref_oid.clone())
+                        })
+                        .flatten();
+                    this.checkout = if this.accepted_fork_head.is_some() {
                         CheckoutState::Naming { error: None }
                     } else {
                         CheckoutState::Idle
@@ -126,7 +150,7 @@ impl PullRequestDetailView {
     pub fn cancel_checkout(&mut self, cx: &mut Context<Self>) {
         if self.checkout != CheckoutState::Running {
             self.checkout = CheckoutState::Idle;
-            self.fork_warning_accepted = false;
+            self.accepted_fork_head = None;
             cx.notify();
         }
     }
@@ -161,24 +185,30 @@ impl PullRequestDetailView {
         else {
             return;
         };
-        let source = if details.pull_request.is_cross_repository {
-            if !self.fork_warning_accepted {
+        let (source, expected_head) = if details.pull_request.is_cross_repository {
+            let Some(accepted) = self.accepted_fork_head.clone() else {
                 return;
-            }
-            CheckoutSource::Fork {
-                number: details.pull_request.number,
-            }
+            };
+            (
+                CheckoutSource::Fork {
+                    number: details.pull_request.number,
+                },
+                accepted,
+            )
         } else {
-            CheckoutSource::SameRepository {
-                head_ref_name: details.pull_request.head_ref_name.clone(),
-            }
+            (
+                CheckoutSource::SameRepository {
+                    head_ref_name: details.pull_request.head_ref_name.clone(),
+                },
+                details.pull_request.head_ref_oid.clone(),
+            )
         };
         let request = CheckoutRequest {
             remote: remote.to_string(),
             source,
             branch_name,
             reuse_existing,
-            expected_head: details.pull_request.head_ref_oid.clone(),
+            expected_head,
         };
         let workspace = self.workspace.clone();
         let window_handle = window.window_handle();
@@ -189,30 +219,23 @@ impl PullRequestDetailView {
             }),
         });
         self.checkout = CheckoutState::Running;
-        self.checkout_task = Some(cx.spawn(async move |this, cx| {
+        // Not kept in `checkout_task`: closing the tab drops that, and a
+        // checkout dropped between the fetch and the switch leaves a ref or
+        // a branch behind that nothing reports. The view is only told if it
+        // is still there.
+        cx.spawn(async move |this, cx| {
             let outcome = run_checkout(git, request, cx).await;
-            this.update(cx, |this, cx| {
-                this.checkout = match outcome {
-                    CheckoutOutcome::CheckedOut { branch } => {
-                        CheckoutState::Finished(format!("Checked out {branch}."))
-                    }
-                    CheckoutOutcome::SwitchedToExisting { branch } => CheckoutState::Finished(
-                        format!("Switched to the existing {branch}; it was not updated."),
-                    ),
-                    CheckoutOutcome::BranchExists { branch } => {
-                        CheckoutState::BranchExists { branch }
-                    }
-                    CheckoutOutcome::PullRequestChanged { fetched } => {
-                        CheckoutState::PullRequestChanged(fetched)
-                    }
-                    CheckoutOutcome::Refused(reason) | CheckoutOutcome::Failed(reason) => {
-                        CheckoutState::Failed(reason)
-                    }
-                };
+            let state = state_after(outcome);
+            let shown = state.clone();
+            let told = this.update(cx, move |this, cx| {
+                this.checkout = shown;
                 cx.notify();
-            })
-            .ok();
-        }));
+            });
+            if told.is_err() {
+                log::info!("a pull request checkout finished after its tab closed: {state:?}");
+            }
+        })
+        .detach();
         cx.notify();
     }
 

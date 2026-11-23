@@ -2,7 +2,9 @@ use github::{
     DetectedRepository, RemoteName, RepositoryId, RepositoryRemotes, detect_repositories,
 };
 
-use crate::repo_picker::choose_active;
+use project::git_store::{GitStoreEvent, RepositoryEvent, RepositoryId as GitRepositoryId};
+
+use crate::repo_picker::{can_change_repositories, choose_active};
 
 fn repository(owner: &str, name: &str) -> RepositoryId {
     RepositoryId::new(owner, name).expect("a valid repository")
@@ -53,4 +55,31 @@ fn worktrees_of_one_repository_are_offered_once_and_aliases_not_at_all() {
         upstream_url: None,
     };
     assert!(detect_repositories(&[alias]).is_empty());
+}
+
+#[test]
+fn only_events_that_can_change_the_repositories_rebuild_the_list() {
+    let id = GitRepositoryId(1);
+    let rebuilds = [
+        GitStoreEvent::RepositoryAdded,
+        GitStoreEvent::RepositoryRemoved(id),
+        GitStoreEvent::RepositoryUpdated(id, RepositoryEvent::HeadChanged, true),
+        GitStoreEvent::RepositoryUpdated(id, RepositoryEvent::BranchListChanged, false),
+        GitStoreEvent::RepositoryUpdated(id, RepositoryEvent::GitWorktreeListChanged, false),
+        // A reload that only moved a remote ends in a finished job.
+        GitStoreEvent::JobsUpdated,
+    ];
+    for event in rebuilds {
+        assert!(can_change_repositories(&event), "{event:?}");
+    }
+    let ignored = [
+        GitStoreEvent::ActiveRepositoryChanged(None),
+        GitStoreEvent::ConflictsUpdated,
+        GitStoreEvent::IndexWriteError(anyhow::anyhow!("locked")),
+        GitStoreEvent::RepositoryUpdated(id, RepositoryEvent::StatusesChanged, true),
+        GitStoreEvent::RepositoryUpdated(id, RepositoryEvent::StashEntriesChanged, true),
+    ];
+    for event in ignored {
+        assert!(!can_change_repositories(&event), "{event:?}");
+    }
 }

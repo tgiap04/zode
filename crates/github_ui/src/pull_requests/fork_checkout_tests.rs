@@ -77,6 +77,16 @@ fn open_fork_shown_at(
     workspace: &Entity<Workspace>,
     cx: &mut VisualTestContext,
 ) -> Entity<PullRequestDetailView> {
+    open_fork_on_backend(shown_head, workspace, cx).0
+}
+
+/// As [`open_fork_shown_at`], with the backend, so a test can push to the
+/// pull request after the tab was opened.
+fn open_fork_on_backend(
+    shown_head: &str,
+    workspace: &Entity<Workspace>,
+    cx: &mut VisualTestContext,
+) -> (Entity<PullRequestDetailView>, Arc<FakeGithubBackend>) {
     let mut details = fork_details();
     details.pull_request.head_ref_oid = shown_head.to_string();
     let backend =
@@ -86,10 +96,10 @@ fn open_fork_shown_at(
         number: 7,
     };
     let view = workspace.update_in(cx, |workspace, window, cx| {
-        open_pull_request_detail(workspace, backend, test_session(), key, window, cx)
+        open_pull_request_detail(workspace, backend.clone(), test_session(), key, window, cx)
     });
     cx.run_until_parked();
-    view
+    (view, backend)
 }
 
 fn fetched_pull_ref(fs: &FakeFs) -> Option<String> {
@@ -204,6 +214,120 @@ async fn a_fork_pushed_after_its_warning_was_accepted_is_not_checked_out(cx: &mu
         .expect("the fake repository exists");
     assert!(!branches.contains("pr-7-main"), "{branches:?}");
     assert_eq!(current.as_deref(), Some("main"));
+}
+
+/// A host that makes the branch from HEAD whatever base it is sent: `switch
+/// -c` has already moved onto it, so the user is put back before it is
+/// deleted, and ends where they began.
+#[gpui::test]
+async fn a_branch_made_at_the_wrong_commit_leaves_the_user_where_they_were(
+    cx: &mut TestAppContext,
+) {
+    init(cx);
+    let (fs, workspace, cx) = project_window(cx).await;
+    fs.with_git_state(dot_git(), false, |state| {
+        state.simulated_create_branch_drops_base = true;
+        state.branches.insert("main".to_string());
+    })
+    .expect("the fake repository exists");
+    let view = open_fork(&workspace, cx);
+    view.update_in(cx, |view, window, cx| view.start_checkout(window, cx));
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Check out anyway");
+    cx.run_until_parked();
+    view.update_in(cx, |view, window, cx| {
+        view.branch_editor(window, cx);
+        view.confirm_checkout(false, window, cx);
+    });
+    cx.run_until_parked();
+    let CheckoutState::Failed(reason) = view.read_with(cx, |view, _| view.checkout_state().clone())
+    else {
+        panic!("a branch at the wrong commit is a failure");
+    };
+    assert!(reason.contains("was deleted"), "{reason}");
+    assert!(reason.contains("back on main"), "{reason}");
+    let (branches, current) = fs
+        .with_git_state(dot_git(), false, |state| {
+            (state.branches.clone(), state.current_branch_name.clone())
+        })
+        .expect("the fake repository exists");
+    assert!(!branches.contains("pr-7-main"), "{branches:?}");
+    assert_eq!(current.as_deref(), Some("main"));
+}
+
+/// The warning was accepted for the head shown then. A push that a reload
+/// shows afterwards is code nobody accepted, even though it is the head the
+/// fetch brings in.
+#[gpui::test]
+async fn a_fork_head_reloaded_after_the_warning_was_accepted_is_not_checked_out(
+    cx: &mut TestAppContext,
+) {
+    init(cx);
+    let (fs, workspace, cx) = project_window(cx).await;
+    let (view, backend) = open_fork_on_backend("0ld0000", &workspace, cx);
+    view.update_in(cx, |view, window, cx| view.start_checkout(window, cx));
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Check out anyway");
+    cx.run_until_parked();
+    backend.edit_pull_request_details(&repository(), 7, |details| {
+        details.pull_request.head_ref_oid = FORK_HEAD.to_string();
+    });
+    view.update(cx, |view, cx| view.reload(cx));
+    cx.run_until_parked();
+    view.update_in(cx, |view, window, cx| {
+        view.branch_editor(window, cx);
+        view.confirm_checkout(false, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |view, _| view.checkout_state().clone()),
+        CheckoutState::PullRequestChanged(FORK_HEAD.to_string()),
+        "the head accepted was the old one"
+    );
+    let branches = fs
+        .with_git_state(dot_git(), false, |state| state.branches.clone())
+        .expect("the fake repository exists");
+    assert!(!branches.contains("pr-7-main"), "{branches:?}");
+}
+
+/// Closing the tab does not stop a checkout halfway: it would leave a
+/// fetched ref, or a new branch, that nothing reports.
+#[gpui::test]
+async fn closing_the_tab_mid_checkout_lets_the_checkout_finish(cx: &mut TestAppContext) {
+    init(cx);
+    let (fs, workspace, cx) = project_window(cx).await;
+    let view = open_fork(&workspace, cx);
+    view.update_in(cx, |view, window, cx| view.start_checkout(window, cx));
+    cx.run_until_parked();
+    cx.simulate_prompt_answer("Check out anyway");
+    cx.run_until_parked();
+    view.update_in(cx, |view, window, cx| {
+        view.branch_editor(window, cx);
+        view.confirm_checkout(false, window, cx);
+    });
+    assert_eq!(
+        view.read_with(cx, |view, _| view.checkout_state().clone()),
+        CheckoutState::Running
+    );
+    // The test's own handle would keep the tab alive.
+    drop(view);
+    let closing = workspace.update_in(cx, |workspace, window, cx| {
+        workspace.active_pane().update(cx, |pane, cx| {
+            pane.close_active_item(&workspace::CloseActiveItem::default(), window, cx)
+        })
+    });
+    closing.await.expect("the tab closes");
+    cx.run_until_parked();
+    let (branch_head, current) = fs
+        .with_git_state(dot_git(), false, |state| {
+            (
+                state.refs.get("refs/heads/pr-7-main").cloned(),
+                state.current_branch_name.clone(),
+            )
+        })
+        .expect("the fake repository exists");
+    assert_eq!(branch_head.as_deref(), Some(FORK_HEAD));
+    assert_eq!(current.as_deref(), Some("pr-7-main"));
 }
 
 #[gpui::test]

@@ -10,6 +10,7 @@ use crate::{Device, DeviceKey, DeviceKind, DeviceState};
 const UDID: &str = "00000000-0000-4000-8000-000000000005";
 const ADB: &str = "/sdk/platform-tools/adb";
 const AVD: &str = "Medium_Phone";
+const TIME_LEFT: Duration = Duration::from_secs(100);
 
 fn android_host() -> FakeHost {
     let host = FakeHost::new(HostOs::MacOs);
@@ -216,7 +217,7 @@ fn the_recorded_emulator_boot_finishes_only_when_boot_completed_is_one() {
             "",
         );
         let target = emulator_start(&[]);
-        let result = smol::block_on(probe(&host, &host, &target));
+        let result = smol::block_on(probe(&host, &host, &target, TIME_LEFT));
         let now = Instant::now();
         verdicts.push(tracking_verdict(
             &target,
@@ -273,7 +274,12 @@ fn script_unnamed_emulators(host: &FakeHost, serials: &[&str]) {
 fn an_unnamed_emulator_is_ours_only_when_it_is_the_single_new_one() {
     let host = android_host();
     script_unnamed_emulators(&host, &["emulator-5554", "emulator-5556"]);
-    let result = smol::block_on(probe(&host, &host, &emulator_start(&["emulator-5554"])));
+    let result = smol::block_on(probe(
+        &host,
+        &host,
+        &emulator_start(&["emulator-5554"]),
+        TIME_LEFT,
+    ));
     let device = result
         .device
         .expect("the single new serial is the pending AVD");
@@ -283,7 +289,7 @@ fn an_unnamed_emulator_is_ours_only_when_it_is_the_single_new_one() {
 
     let host = android_host();
     script_unnamed_emulators(&host, &["emulator-5554", "emulator-5556"]);
-    let result = smol::block_on(probe(&host, &host, &emulator_start(&[])));
+    let result = smol::block_on(probe(&host, &host, &emulator_start(&[]), TIME_LEFT));
     assert_eq!(result.device, None, "two new serials are ambiguous");
 }
 
@@ -304,7 +310,7 @@ fn an_emulator_named_for_another_avd_is_never_taken() {
         "Tablet\r\nOK\r\n",
         "",
     );
-    let result = smol::block_on(probe(&host, &host, &emulator_start(&[])));
+    let result = smol::block_on(probe(&host, &host, &emulator_start(&[]), TIME_LEFT));
     assert_eq!(result.device, None);
 }
 
@@ -322,26 +328,20 @@ fn a_stopped_emulator_is_its_avd_shut_down() {
         avd_name: AVD.to_string(),
         serial: "emulator-5554".to_string(),
     };
-    let result = smol::block_on(probe(&host, &host, &target));
+    let result = smol::block_on(probe(&host, &host, &target, TIME_LEFT));
     let device = result.device.expect("the AVD row is reported");
     assert_eq!(device.key, DeviceKey::Avd(AVD.to_string()));
     assert_eq!(device.state, DeviceState::Shutdown);
     assert_eq!(device.serial, None);
 }
 
+/// A probe asks for the one simulator it follows, and nothing about runtimes.
 fn script_simulator_list(host: &FakeHost, devices_fixture: &str) {
     host.script_output(
         XCRUN,
-        ["simctl", "list", "devices", "available", "-j"],
+        ["simctl", "list", "devices", "available", "-j", UDID],
         0,
         &tool_output(devices_fixture),
-        "",
-    );
-    host.script_output(
-        XCRUN,
-        ["simctl", "list", "runtimes", "-j"],
-        0,
-        &tool_output("simctl-list-runtimes.json"),
         "",
     );
 }
@@ -357,7 +357,7 @@ fn a_booted_simulator_waits_for_bootstatus_and_a_booting_one_does_not_ask() {
         "Device already booted, nothing to do.",
         "",
     );
-    let result = smol::block_on(probe(&host, &host, &boot()));
+    let result = smol::block_on(probe(&host, &host, &boot(), TIME_LEFT));
     assert_eq!(
         result.device.map(|device| device.state),
         Some(DeviceState::Running)
@@ -374,13 +374,13 @@ fn a_booted_simulator_waits_for_bootstatus_and_a_booting_one_does_not_ask() {
             timeout: Duration::from_secs(30),
         }),
     );
-    let result = smol::block_on(probe(&host, &host, &boot()));
+    let result = smol::block_on(probe(&host, &host, &boot(), TIME_LEFT));
     assert!(!result.ready);
     assert_eq!(result.error, None, "a slow boot is not an error");
 
     let host = FakeHost::new(HostOs::MacOs);
     script_simulator_list(&host, "simctl-list-devices-one-booting.json");
-    let result = smol::block_on(probe(&host, &host, &boot()));
+    let result = smol::block_on(probe(&host, &host, &boot(), TIME_LEFT));
     assert_eq!(
         result.device.map(|device| device.state),
         Some(DeviceState::Starting)
@@ -397,7 +397,7 @@ fn a_booted_simulator_waits_for_bootstatus_and_a_booting_one_does_not_ask() {
 fn a_probe_that_cannot_run_its_tool_reports_the_error_and_keeps_waiting() {
     let host = FakeHost::new(HostOs::MacOs);
     let target = emulator_start(&[]);
-    let result = smol::block_on(probe(&host, &host, &target));
+    let result = smol::block_on(probe(&host, &host, &target, TIME_LEFT));
     assert!(result.error.is_some(), "no SDK must be reported");
     let now = Instant::now();
     assert_eq!(
@@ -415,5 +415,72 @@ fn a_probe_that_cannot_run_its_tool_reports_the_error_and_keeps_waiting() {
     assert!(
         reason.contains(result.error.as_deref().unwrap_or_default()),
         "{reason}"
+    );
+}
+
+#[test]
+fn following_a_simulator_asks_for_that_one_device_and_never_for_runtimes() {
+    let host = FakeHost::new(HostOs::MacOs);
+    script_simulator_list(&host, "simctl-list-devices-one-booted.json");
+    host.script_output(
+        XCRUN,
+        ["simctl", "bootstatus", UDID, "-b"],
+        0,
+        "Device already booted, nothing to do.",
+        "",
+    );
+    let result = smol::block_on(probe(&host, &host, &boot(), TIME_LEFT));
+    assert!(result.ready, "{result:?}");
+    let listings: Vec<Vec<String>> = host
+        .invocations()
+        .into_iter()
+        .map(|invocation| invocation.args)
+        .filter(|args| args.iter().any(|arg| arg == "list"))
+        .collect();
+    assert_eq!(
+        listings,
+        [["simctl", "list", "devices", "available", "-j", UDID]],
+        "one listing, of this device only"
+    );
+
+    let host = FakeHost::new(HostOs::MacOs);
+    script_simulator_list(&host, "simctl-list-devices-one-booted.json");
+    let result = smol::block_on(probe(
+        &host,
+        &host,
+        &TrackTarget::SimulatorShutdown {
+            udid: UDID.to_string(),
+        },
+        TIME_LEFT,
+    ));
+    assert_eq!(result.error, None);
+    assert_eq!(host.invocations().len(), 1, "a shutdown asks nothing more");
+}
+
+#[test]
+fn bootstatus_never_waits_past_the_time_left_of_the_operation() {
+    let bootstatus_timeout = |time_left: Duration| {
+        let host = FakeHost::new(HostOs::MacOs);
+        script_simulator_list(&host, "simctl-list-devices-one-booted.json");
+        host.script_output(XCRUN, ["simctl", "bootstatus", UDID, "-b"], 0, "", "");
+        smol::block_on(probe(&host, &host, &boot(), time_left));
+        host.invocations()
+            .into_iter()
+            .find(|invocation| invocation.args.iter().any(|arg| arg == "bootstatus"))
+            .map(|invocation| invocation.timeout)
+    };
+    assert_eq!(
+        bootstatus_timeout(Duration::from_secs(100)),
+        Some(Duration::from_secs(30)),
+        "plenty of time left: the usual wait"
+    );
+    assert_eq!(
+        bootstatus_timeout(Duration::from_secs(7)),
+        Some(Duration::from_secs(7))
+    );
+    let at_the_deadline = bootstatus_timeout(Duration::ZERO).expect("still asked once");
+    assert!(
+        at_the_deadline > Duration::ZERO && at_the_deadline <= Duration::from_secs(2),
+        "{at_the_deadline:?}"
     );
 }

@@ -22,6 +22,7 @@ use crate::github_view_session::{end_test_session, session_ended_message, test_s
 use crate::issues::issues_test_support::{
     context, init, repository, signed_in_github_tab, workspace_window,
 };
+use crate::pull_requests::check_link::{CheckLink, check_link, check_link_host};
 use crate::pull_requests::fork_checkout::ForkWarning;
 use crate::pull_requests::pr_checkout::CheckoutSource;
 use crate::pull_requests::{
@@ -245,7 +246,12 @@ struct FakeGit {
     /// A host older than the base field: it drops the base and makes the
     /// branch from HEAD.
     ignores_base: bool,
+    /// Switching to the branch the user was on fails.
+    switch_back_fails: bool,
     refs: RefCell<HashMap<String, String>>,
+    /// The branch checked out: `switch -c` moves it to the new branch, and
+    /// git will not delete a branch while it is checked out.
+    current: RefCell<Option<String>>,
     commands: RefCell<Vec<String>>,
 }
 
@@ -270,12 +276,18 @@ impl FakeGit {
                 ),
             ]),
             ignores_base: false,
+            switch_back_fails: false,
             refs: RefCell::new(HashMap::from_iter([(
                 "HEAD".to_string(),
                 "h3ad".to_string(),
             )])),
+            current: RefCell::new(Some("main".to_string())),
             commands: RefCell::new(Vec::new()),
         }
+    }
+
+    fn current(&self) -> Option<String> {
+        self.current.borrow().clone()
     }
 
     fn run(&self, command: String) -> LocalBoxFuture<'static, Result<()>> {
@@ -297,6 +309,10 @@ impl CheckoutGit for FakeGit {
         futures::future::ready(Ok(self.branches.clone())).boxed_local()
     }
 
+    fn current_branch(&self, _cx: &App) -> Option<String> {
+        self.current()
+    }
+
     fn fetch(&self, options: FetchOptions, _cx: &mut App) -> LocalBoxFuture<'static, Result<()>> {
         self.refs.borrow_mut().extend(self.remote.clone());
         self.run(format!("fetch {options}"))
@@ -315,10 +331,17 @@ impl CheckoutGit for FakeGit {
                 .borrow_mut()
                 .insert(format!("refs/heads/{name}"), commit);
         }
+        *self.current.borrow_mut() = Some(name.clone());
         self.run(format!("create {name} {base}"))
     }
 
     fn change_branch(&self, name: String, _cx: &mut App) -> LocalBoxFuture<'static, Result<()>> {
+        if self.switch_back_fails && name == "main" {
+            self.commands.borrow_mut().push(format!("switch {name}"));
+            return futures::future::ready(Err(anyhow::anyhow!("local changes would be lost")))
+                .boxed_local();
+        }
+        *self.current.borrow_mut() = Some(name.clone());
         self.run(format!("switch {name}"))
     }
 
@@ -341,6 +364,15 @@ impl CheckoutGit for FakeGit {
         name: String,
         _cx: &'a mut AsyncApp,
     ) -> LocalBoxFuture<'a, Result<()>> {
+        if self.current().as_deref() == Some(name.as_str()) {
+            self.commands
+                .borrow_mut()
+                .push(format!("force-delete {name}"));
+            return futures::future::ready(Err(anyhow::anyhow!(
+                "cannot delete branch '{name}' used by worktree"
+            )))
+            .boxed_local();
+        }
         self.refs.borrow_mut().remove(&format!("refs/heads/{name}"));
         self.run(format!("force-delete {name}"))
     }
@@ -425,9 +457,13 @@ async fn a_fork_is_fetched_from_the_base_repository_pull_ref(cx: &mut TestAppCon
 }
 
 /// A host older than `GitCreateBranch.base_branch` drops the base and
-/// makes the branch from HEAD, and still answers success.
+/// makes the branch from HEAD, and still answers success. `switch -c` has
+/// already moved HEAD onto it, and git will not delete a checked-out branch,
+/// so the user is put back first.
 #[gpui::test]
-async fn a_branch_not_at_the_fetched_head_is_deleted_and_not_switched_to(cx: &mut TestAppContext) {
+async fn a_branch_not_at_the_fetched_head_is_deleted_and_the_user_put_back(
+    cx: &mut TestAppContext,
+) {
     for request in [request("pr-7-fix", false), fork_request("pr-7-fix")] {
         let git = Rc::new(FakeGit {
             ignores_base: true,
@@ -439,19 +475,54 @@ async fn a_branch_not_at_the_fetched_head_is_deleted_and_not_switched_to(cx: &mu
             panic!("expected a failure, got {outcome:?}");
         };
         assert!(reason.contains("was deleted"), "{reason}");
+        assert!(reason.contains("back on main"), "{reason}");
+        assert!(!reason.contains("could not be deleted"), "{reason}");
         let commands = git.commands.borrow().clone();
         assert_eq!(
-            commands.last().map(String::as_str),
-            Some("force-delete pr-7-fix")
-        );
-        assert!(
-            commands
-                .iter()
-                .all(|command| !command.starts_with("switch")),
+            commands.iter().rev().take(2).rev().collect::<Vec<_>>(),
+            ["switch main", "force-delete pr-7-fix"],
             "{commands:?}"
         );
         assert!(commands.contains(&format!("create pr-7-fix {base}")));
         assert!(!git.has_ref("refs/heads/pr-7-fix"));
+        assert_eq!(git.current().as_deref(), Some("main"));
+    }
+}
+
+/// When the way back fails, the new branch is still checked out and cannot be
+/// deleted; the message says so rather than claiming nothing was switched.
+#[gpui::test]
+async fn a_failed_way_back_is_told_as_it_is(cx: &mut TestAppContext) {
+    for detached in [false, true] {
+        let git = Rc::new(FakeGit {
+            ignores_base: true,
+            switch_back_fails: !detached,
+            ..FakeGit::default()
+        });
+        if detached {
+            *git.current.borrow_mut() = None;
+        }
+        let outcome = checkout(&git, request("pr-7-fix", false), cx).await;
+        let CheckoutOutcome::Failed(reason) = &outcome else {
+            panic!("expected a failure, got {outcome:?}");
+        };
+        assert!(
+            reason.contains("pr-7-fix is checked out"),
+            "{detached}: {reason}"
+        );
+        assert!(
+            !reason.contains("Nothing was switched"),
+            "{detached}: {reason}"
+        );
+        assert!(!reason.contains("was deleted"), "{detached}: {reason}");
+        assert_eq!(git.current().as_deref(), Some("pr-7-fix"));
+        let commands = git.commands.borrow().clone();
+        assert!(
+            commands
+                .iter()
+                .all(|command| !command.starts_with("force-delete")),
+            "a checked-out branch is not deleted: {commands:?}"
+        );
     }
 }
 
@@ -576,6 +647,106 @@ fn ask_to_merge(
     view.update_in(cx, |view, window, cx| view.request_merge(window, cx));
     cx.run_until_parked();
     merge_dialog(workspace, cx)
+}
+
+#[test]
+fn a_checks_link_opens_unasked_only_on_github_over_https() {
+    for address in [
+        "https://github.com/octo/repo/runs/1",
+        "https://api.github.com/x",
+    ] {
+        assert!(
+            matches!(check_link(address), CheckLink::Open(_)),
+            "{address}"
+        );
+    }
+    for address in [
+        "https://ci.example.com/build/1",
+        "https://github.com.evil.example/x",
+        "https://evilgithub.com/x",
+        "https://github.com:8443/x",
+        "https://user@github.com/x",
+    ] {
+        assert!(
+            matches!(check_link(address), CheckLink::Confirm { .. }),
+            "{address}"
+        );
+    }
+    for address in [
+        "http://github.com/octo/repo",
+        "http://ci.example.com/build/1",
+        "javascript:alert(1)",
+        "file:///etc/passwd",
+        "not a url",
+    ] {
+        assert_eq!(check_link(address), CheckLink::Refused, "{address}");
+    }
+    assert_eq!(
+        check_link_host("https://ci.example.com/b"),
+        "ci.example.com"
+    );
+}
+
+fn details_with_check_at(url: &str) -> PullRequestDetails {
+    let mut with_check = details(7);
+    with_check.checks = vec![github::PullRequestCheck {
+        name: "build".to_string(),
+        state: github::CheckState::Passed,
+        url: Some(url.to_string()),
+    }];
+    with_check
+}
+
+/// A check's address comes from CI, not from GitHub: elsewhere than
+/// github.com it is shown before it is opened, and plain http is not opened.
+#[gpui::test]
+async fn a_checks_details_link_to_another_host_is_asked_about_first(cx: &mut TestAppContext) {
+    init(cx);
+    let (workspace, cx) = workspace_window(cx).await;
+    for (address, opens) in [
+        (
+            "https://github.com/octo/repo/runs/1",
+            Some("https://github.com/octo/repo/runs/1"),
+        ),
+        ("https://ci.example.com/build/1", None),
+        ("http://github.com/octo/repo/runs/1", None),
+    ] {
+        let fake = Arc::new(
+            FakeGithubBackend::new()
+                .with_pull_request_details(&repository(), details_with_check_at(address)),
+        );
+        let view = open(&workspace, fake, 7, cx);
+        // The platform remembers the last address opened.
+        let opened_before = cx.opened_url();
+        view.update_in(cx, |view, window, cx| {
+            view.open_check_details(address, window, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            cx.opened_url(),
+            opens.map(str::to_string).or(opened_before.clone()),
+            "{address}"
+        );
+        assert_eq!(cx.has_pending_prompt(), opens.is_none(), "{address}");
+        if opens.is_none() {
+            let (title, detail) = cx.pending_prompt().unwrap_or_default();
+            assert!(
+                title.contains("ci.example.com") || title.contains("not opened"),
+                "{title}"
+            );
+            assert!(
+                detail.contains(address.trim_start_matches("http")),
+                "{detail}"
+            );
+            cx.simulate_prompt_answer(if address.starts_with("https") {
+                "Cancel"
+            } else {
+                "Ok"
+            });
+            cx.run_until_parked();
+            assert_eq!(cx.opened_url(), opened_before, "{address}: nothing opens");
+        }
+    }
 }
 
 #[gpui::test]

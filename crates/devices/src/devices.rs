@@ -53,7 +53,7 @@ mod tracking_tests;
 
 pub use actions::{
     StartedEmulator, adb_connect, adb_disconnect, adb_pair, boot_simulator, open_simulator_window,
-    shutdown_simulator, start_emulator, stop_emulator,
+    shutdown_simulator, start_emulator, stop_detached_emulator, stop_emulator,
 };
 pub use android_devices::{
     AdbEntry, AdbState, NO_PERMISSIONS_REASON, OFFLINE_REASON, UNAUTHORIZED_REASON,
@@ -61,10 +61,10 @@ pub use android_devices::{
 };
 pub use android_sdk::{AndroidSdk, locate_android_sdk};
 #[cfg(any(test, feature = "test-support"))]
-pub use fake_host::FakeHost;
+pub use fake_host::{FIRST_PROCESS_ID, FakeHost};
 pub use host::{
-    DEFAULT_TOOL_TIMEOUT, DetachedExit, HostOs, HostSystem, ToolFailure, ToolInvocation,
-    ToolOutput, ToolRunner,
+    DEFAULT_TOOL_TIMEOUT, DetachedExit, DetachedTool, HostOs, HostSystem, ToolFailure,
+    ToolInvocation, ToolOutput, ToolRunner,
 };
 pub use input_validation::{
     InvalidInput, PairingCode, WirelessAddress, parse_pairing_code, parse_wireless_address,
@@ -73,8 +73,9 @@ pub use input_validation::{
 };
 pub use local_host::LocalHost;
 pub use resources::{
-    EMULATOR_LOGS_KEPT, LOW_MEMORY_THRESHOLD_BYTES, explain_emulator_failure, memory_status,
-    prune_emulator_logs, read_emulator_log_tail,
+    EMULATOR_LOG_MAX_AGE, EMULATOR_LOGS_KEPT, EMULATOR_LOGS_TOTAL_BYTES,
+    LOW_MEMORY_THRESHOLD_BYTES, explain_emulator_failure, memory_status, prune_emulator_logs,
+    prune_stale_emulator_logs, read_emulator_log_tail,
 };
 pub use run_app::{
     AppProject, Framework, NativeProject, OpenInstalledAndroidApp, PackageVersion, PlannedRun,

@@ -207,7 +207,7 @@ impl IssueDetailView {
                     this.note_error(error, cx);
                     this.epic.error = Some(sub_issue_write_error(error));
                 }
-                this.reload_issue(cx);
+                this.refresh_issue_after_own_write(cx);
                 this.load_epic(cx);
                 cx.notify();
             })
@@ -398,7 +398,7 @@ impl IssueDetailView {
             )
         });
         self.write_notice = notice;
-        self.reload_issue(cx);
+        self.refresh_issue_after_own_write(cx);
         self.load_epic(cx);
         cx.notify();
     }

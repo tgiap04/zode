@@ -10,7 +10,9 @@ use crate::run_app::{
     AppProject, Framework, NativeProject, OpenInstalledAndroidApp, PlannedRun, RunPlan, RunRefusal,
     RunStep, TargetPlatform, XcodeContainer, plan_run, ready_device, run_label,
 };
-use crate::run_app_detect::{SKIPPED_DIRECTORIES, display_name, is_excluded, read_project_file};
+use crate::run_app_detect::{
+    SKIPPED_DIRECTORIES, display_name, is_link_or_excluded, read_project_file,
+};
 use crate::run_app_xcode::plan_xcode;
 use crate::{Device, DeviceSnapshot};
 
@@ -182,7 +184,7 @@ fn gradle_app_module(
     let modules: Vec<&String> = names
         .iter()
         .filter(|name| !name.starts_with('.') && !SKIPPED_DIRECTORIES.contains(&name.as_str()))
-        .filter(|name| !is_excluded(&directory.join(name.as_str()), excluded))
+        .filter(|name| !is_link_or_excluded(host, &directory.join(name.as_str()), excluded))
         .filter(|name| is_application(name))
         .collect();
     modules

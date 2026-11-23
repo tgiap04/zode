@@ -16,6 +16,7 @@ use project::Project;
 use util::ResultExt as _;
 use workspace::Workspace;
 
+use crate::device_follow::StrayEmulator;
 use crate::device_operations::{DeviceError, OperationKind};
 use crate::device_snapshot::{SectionId, merge_snapshot};
 use crate::run_app::{ActiveRun, AppChoice, RunKey, StartingRun};
@@ -59,6 +60,8 @@ pub struct DevicesPanel {
     pub(crate) loaded_once: bool,
     pub(crate) operations: HashMap<DeviceKey, Operation>,
     pub(crate) device_errors: HashMap<DeviceKey, DeviceError>,
+    /// Emulators whose start timed out without adb ever listing them.
+    pub(crate) stray_emulators: HashMap<DeviceKey, StrayEmulator>,
     /// Apps found in the trusted folders at the last read.
     pub(crate) detected_apps: Vec<AppProject>,
     pub(crate) app_choice: Option<AppChoice>,
@@ -114,6 +117,7 @@ impl DevicesPanel {
             loaded_once: false,
             operations: HashMap::new(),
             device_errors: HashMap::new(),
+            stray_emulators: HashMap::new(),
             detected_apps: Vec::new(),
             app_choice: None,
             starting_runs: HashMap::new(),
@@ -207,11 +211,30 @@ impl DevicesPanel {
         for (key, state) in transient {
             self.set_device_state(&key, state);
         }
+        // Once adb lists it, adb can stop it. A refresh that does not list the
+        // AVD at all (section missing, failed or reloading) proves nothing:
+        // the process may still run, and this is the only way to stop it.
+        let strays: Vec<DeviceKey> = self.stray_emulators.keys().cloned().collect();
+        for key in strays {
+            let listed_in_adb = self
+                .find_device(&key)
+                .is_some_and(|device| device.serial.is_some());
+            if listed_in_adb {
+                self.stray_emulators.remove(&key);
+            } else {
+                // Forgets it when its process has ended.
+                self.has_running_stray(&key);
+            }
+        }
+        // The stop button lives in the error line, so a stray keeps its
+        // message while its row is missing from a read.
         let live: Vec<DeviceKey> = self
             .all_devices()
             .map(|device| device.key.clone())
             .collect();
-        self.device_errors.retain(|key, _| live.contains(key));
+        let strays = &self.stray_emulators;
+        self.device_errors
+            .retain(|key, _| live.contains(key) || strays.contains_key(key));
         self.recount_running(None);
     }
 }

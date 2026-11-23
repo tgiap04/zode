@@ -44,7 +44,7 @@ pub fn format_edit(
         MarkdownFormat::Code if text[selection.clone()].contains('\n') => fence(text, selection),
         MarkdownFormat::Code => wrap(text, selection, "`"),
         MarkdownFormat::Link => link(text, selection),
-        MarkdownFormat::Heading => prefix_lines(text, selection, LinePrefix::Fixed("### ")),
+        MarkdownFormat::Heading => prefix_lines(text, selection, LinePrefix::Heading),
         MarkdownFormat::Quote => prefix_lines(text, selection, LinePrefix::Fixed("> ")),
         MarkdownFormat::BulletList => prefix_lines(text, selection, LinePrefix::Fixed("- ")),
         MarkdownFormat::TaskList => prefix_lines(text, selection, LinePrefix::Fixed("- [ ] ")),
@@ -58,7 +58,7 @@ fn wrap(text: &str, selection: Range<usize>, marker: &str) -> FormatEdit {
     let Range { start, end } = selection;
     let selected = &text[start..end];
     let length = marker.len();
-    if text[..start].ends_with(marker) && text[end..].starts_with(marker) {
+    if wrapped_outside(text, start, end, marker) {
         return FormatEdit {
             replaced: start - length..end + length,
             text: selected.to_string(),
@@ -67,17 +67,63 @@ fn wrap(text: &str, selection: Range<usize>, marker: &str) -> FormatEdit {
     }
     if selected.len() >= 2 * length && selected.starts_with(marker) && selected.ends_with(marker) {
         let inner = &selected[length..selected.len() - length];
-        return FormatEdit {
-            replaced: start..end,
-            text: inner.to_string(),
-            selection: start..start + inner.len(),
-        };
+        if marker_positions(inner, marker).is_empty() {
+            return FormatEdit {
+                replaced: start..end,
+                text: inner.to_string(),
+                selection: start..start + inner.len(),
+            };
+        }
     }
     FormatEdit {
         replaced: start..end,
         text: format!("{marker}{selected}{marker}"),
         selection: start + length..end + length,
     }
+}
+
+/// Whether the markers right before and after the selection are one span's
+/// own: not part of a longer run or a word, and the one before opens a span
+/// (an even number of markers stand earlier on its line) rather than closing
+/// the span before, as in `**a** and **b**` around ` and `.
+fn wrapped_outside(text: &str, start: usize, end: usize, marker: &str) -> bool {
+    let Some(opening) = start.checked_sub(marker.len()) else {
+        return false;
+    };
+    if !text[..start].ends_with(marker)
+        || !text[end..].starts_with(marker)
+        || !is_marker_at(text, opening, marker)
+        || !is_marker_at(text, end, marker)
+        || !marker_positions(&text[start..end], marker).is_empty()
+    {
+        return false;
+    }
+    let line_start = text[..opening].rfind('\n').map_or(0, |index| index + 1);
+    marker_positions(&text[line_start..opening], marker)
+        .len()
+        .is_multiple_of(2)
+}
+
+/// Where `marker` stands in `text` as a marker would: see [`is_marker_at`].
+fn marker_positions(text: &str, marker: &str) -> Vec<usize> {
+    text.match_indices(marker)
+        .map(|(index, _)| index)
+        .filter(|index| is_marker_at(text, *index, marker))
+        .collect()
+}
+
+/// Whether the `marker` at `index` is one, rather than part of a longer run
+/// of the same character (`***`) or, for `_`, the middle of a word
+/// (`snake_case`).
+fn is_marker_at(text: &str, index: usize, marker: &str) -> bool {
+    let before = text[..index].chars().next_back();
+    let after = text[index + marker.len()..].chars().next();
+    if before == marker.chars().next_back() || after == marker.chars().next() {
+        return false;
+    }
+    let inside_word =
+        before.is_some_and(char::is_alphanumeric) && after.is_some_and(char::is_alphanumeric);
+    !(marker == "_" && inside_word)
 }
 
 /// The whole lines the selection touches; a selection ending at the start
@@ -148,6 +194,8 @@ fn link(text: &str, selection: Range<usize>) -> FormatEdit {
 #[derive(Clone, Copy)]
 enum LinePrefix {
     Fixed(&'static str),
+    /// `### `, standing in for a heading of any level, which it replaces.
+    Heading,
     /// `1. `, `2. `, … counting the lines that get one.
     Numbered,
 }
@@ -156,6 +204,7 @@ impl LinePrefix {
     fn nth(self, number: usize) -> String {
         match self {
             Self::Fixed(prefix) => prefix.to_string(),
+            Self::Heading => HEADING.to_string(),
             Self::Numbered => format!("{number}. "),
         }
     }
@@ -164,7 +213,25 @@ impl LinePrefix {
     fn present(self, line: &str) -> Option<usize> {
         match self {
             Self::Fixed(prefix) => line.starts_with(prefix).then_some(prefix.len()),
+            Self::Heading => heading_prefix_length(line),
             Self::Numbered => numbered_prefix_length(line),
+        }
+    }
+
+    /// Whether `line` has this very prefix, which applying it again takes
+    /// off. A heading of another level is changed to this one instead.
+    fn is_exactly_on(self, line: &str) -> bool {
+        match self {
+            Self::Heading => line.starts_with(HEADING),
+            _ => self.present(line).is_some(),
+        }
+    }
+
+    /// How much of `line` a prefix being added takes the place of.
+    fn replaced_by_adding(self, line: &str) -> usize {
+        match self {
+            Self::Heading => self.present(line).unwrap_or(0),
+            _ => 0,
         }
     }
 }
@@ -178,7 +245,7 @@ fn prefix_lines(text: &str, selection: Range<usize>, prefix: LinePrefix) -> Form
     let skipped = |line: &str| several && line.trim().is_empty();
     let removing = lines
         .iter()
-        .all(|line| skipped(line) || prefix.present(line).is_some());
+        .all(|line| skipped(line) || prefix.is_exactly_on(line));
     let mut number = 0;
     let mut first_line_shift: isize = 0;
     let replaced_lines = lines
@@ -193,8 +260,9 @@ fn prefix_lines(text: &str, selection: Range<usize>, prefix: LinePrefix) -> Form
                 Some(length) => (line[length..].to_string(), -(length as isize)),
                 None => {
                     let added = prefix.nth(number);
-                    let shift = added.len() as isize;
-                    (format!("{added}{line}"), shift)
+                    let replaced = prefix.replaced_by_adding(line);
+                    let shift = added.len() as isize - replaced as isize;
+                    (format!("{added}{}", &line[replaced..]), shift)
                 }
             };
             if index == 0 {
@@ -222,4 +290,13 @@ fn prefix_lines(text: &str, selection: Range<usize>, prefix: LinePrefix) -> Form
 fn numbered_prefix_length(line: &str) -> Option<usize> {
     let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
     (digits > 0 && line[digits..].starts_with(". ")).then_some(digits + 2)
+}
+
+const HEADING: &str = "### ";
+
+/// The length of a `## ` at the start of `line`: one to six hashes and a
+/// space.
+fn heading_prefix_length(line: &str) -> Option<usize> {
+    let hashes = line.len() - line.trim_start_matches('#').len();
+    ((1..=6).contains(&hashes) && line[hashes..].starts_with(' ')).then_some(hashes + 1)
 }

@@ -422,6 +422,178 @@ async fn cancelling_the_sign_in_stops_polling(cx: &mut TestAppContext) {
     assert_eq!(harness.http.sent().len(), 2);
 }
 
+/// A device-flow sign-in the user approved, its keychain write still in
+/// flight: `decide` lets the write land (`true`) or fail (`false`).
+async fn approved_with_the_save_held(
+    cx: &mut TestAppContext,
+) -> (
+    Harness,
+    Entity<GithubView>,
+    futures::channel::oneshot::Sender<bool>,
+    &mut VisualTestContext,
+) {
+    let harness = install(Setup::default(), cx);
+    harness
+        .http
+        .answer(DEVICE_CODE_URL, 200, device_code_answer());
+    harness.http.answer(ACCESS_TOKEN_URL, 200, token_answer());
+    let decide = harness.keychain.hold_next_write();
+    let (view, cx) = opened_tab(cx).await;
+    view.update(cx, |view, cx| view.sign_in_with_github(cx));
+    cx.run_until_parked();
+    advance(5, cx);
+    assert!(
+        matches!(
+            auth_step(&view, cx),
+            Some(DeviceFlowStep::WaitingForUser { .. })
+        ),
+        "approved, and the token is being saved"
+    );
+    (harness, view, decide, cx)
+}
+
+fn assert_no_token_anywhere(harness: &Harness, cx: &mut VisualTestContext) {
+    assert_eq!(
+        harness.keychain.github_token(),
+        None,
+        "nothing in the keychain"
+    );
+    cx.update(|_, cx| assert!(session_token(cx).is_none(), "nothing kept in memory"));
+    assert!(harness.built().is_empty(), "no backend was made");
+}
+
+#[gpui::test]
+async fn cancelling_after_approval_leaves_no_token_in_the_keychain(cx: &mut TestAppContext) {
+    let (harness, view, decide, cx) = approved_with_the_save_held(cx).await;
+    view.update(cx, |view, cx| view.cancel_sign_in(cx));
+    decide.send(true).ok();
+    cx.run_until_parked();
+
+    assert!(matches!(
+        auth(&view, cx),
+        AuthState::SignedOut { notice: None }
+    ));
+    assert_no_token_anywhere(&harness, cx);
+}
+
+#[gpui::test]
+async fn disconnecting_while_the_token_is_being_saved_leaves_none_behind(cx: &mut TestAppContext) {
+    let (harness, view, decide, cx) = approved_with_the_save_held(cx).await;
+    view.update(cx, |view, cx| view.disconnect(cx));
+    decide.send(true).ok();
+    cx.run_until_parked();
+
+    assert!(matches!(auth(&view, cx), AuthState::SignedOut { .. }));
+    assert_no_token_anywhere(&harness, cx);
+}
+
+#[gpui::test]
+async fn a_save_that_fails_after_cancel_or_disconnect_keeps_no_token_in_memory(
+    cx: &mut TestAppContext,
+) {
+    let (harness, view, decide, cx) = approved_with_the_save_held(cx).await;
+    view.update(cx, |view, cx| view.cancel_sign_in(cx));
+    decide.send(false).ok();
+    cx.run_until_parked();
+    assert_no_token_anywhere(&harness, cx);
+    assert!(matches!(
+        auth(&view, cx),
+        AuthState::SignedOut { notice: None }
+    ));
+}
+
+#[gpui::test]
+async fn cancelling_in_another_window_leaves_this_windows_saved_token_alone(
+    cx: &mut TestAppContext,
+) {
+    let (harness, view, decide, cx) = approved_with_the_save_held(cx).await;
+    let project = view.read_with(cx, |view, _| view.project.clone());
+    let other = cx.new(|cx| GithubView::new(project, cx));
+    other.update(cx, |other, cx| other.sign_in_with_github(cx));
+    cx.run_until_parked();
+    other.update(cx, |other, cx| other.cancel_sign_in(cx));
+    decide.send(true).ok();
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness.keychain.github_token().as_deref(),
+        Some(DEVICE_TOKEN),
+        "the token approved here is kept"
+    );
+    assert!(matches!(auth(&view, cx), AuthState::SignedIn(_)));
+}
+
+#[gpui::test]
+async fn disconnecting_in_another_window_ends_a_sign_in_still_being_saved(cx: &mut TestAppContext) {
+    let (harness, view, decide, cx) = approved_with_the_save_held(cx).await;
+    let project = view.read_with(cx, |view, _| view.project.clone());
+    let other = cx.new(|cx| GithubView::new(project, cx));
+    other.update(cx, |other, cx| other.disconnect(cx));
+    decide.send(true).ok();
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness.keychain.github_token(),
+        None,
+        "nothing is left stored"
+    );
+    assert!(
+        !matches!(auth(&view, cx), AuthState::SignedIn(_)),
+        "a window whose saved token was just disconnected does not stay signed in with it"
+    );
+}
+
+#[gpui::test]
+async fn a_cancelled_save_landing_late_does_not_replace_a_newer_sign_ins_token(
+    cx: &mut TestAppContext,
+) {
+    let harness = install(Setup::default(), cx);
+    harness
+        .http
+        .answer(DEVICE_CODE_URL, 200, device_code_answer());
+    for secret in ["gho_first_attempt", "gho_second_attempt"] {
+        harness.http.answer(
+            ACCESS_TOKEN_URL,
+            200,
+            json!({ "access_token": secret, "token_type": "bearer" }).to_string(),
+        );
+    }
+    let first_save = harness.keychain.hold_next_write();
+    let (view, cx) = opened_tab(cx).await;
+
+    view.update(cx, |view, cx| view.sign_in_with_github(cx));
+    cx.run_until_parked();
+    advance(5, cx);
+    view.update(cx, |view, cx| view.cancel_sign_in(cx));
+    view.update(cx, |view, cx| view.sign_in_with_github(cx));
+    cx.run_until_parked();
+    advance(5, cx);
+    first_save.send(true).ok();
+    cx.run_until_parked();
+
+    assert_eq!(
+        harness.keychain.github_token().as_deref(),
+        Some("gho_second_attempt"),
+        "the newest approved token ends up stored"
+    );
+    assert!(matches!(auth(&view, cx), AuthState::SignedIn(_)));
+}
+
+#[gpui::test]
+async fn a_save_that_fails_while_waiting_keeps_the_token_for_this_run(cx: &mut TestAppContext) {
+    let (harness, view, decide, cx) = approved_with_the_save_held(cx).await;
+    decide.send(false).ok();
+    cx.run_until_parked();
+
+    assert_eq!(harness.keychain.github_token(), None);
+    cx.update(|_, cx| assert!(session_token(cx).is_some(), "kept in memory instead"));
+    assert!(matches!(auth(&view, cx), AuthState::SignedIn(_)));
+    assert!(
+        view.read_with(cx, |view, _| view.notice.is_some()),
+        "the user is told the keychain refused it"
+    );
+}
+
 #[gpui::test]
 async fn without_a_client_id_only_the_github_cli_is_offered(cx: &mut TestAppContext) {
     let harness = install(

@@ -752,3 +752,75 @@ async fn picking_a_person_in_the_tab_assigns_and_picking_again_unassigns(cx: &mu
         Some(Vec::new())
     );
 }
+
+/// Text typed while the comment is on its way is not the sent comment, and
+/// is not thrown away with it.
+#[gpui::test]
+async fn text_typed_while_a_comment_is_sent_is_kept(cx: &mut TestAppContext) {
+    init(cx);
+    let (workspace, cx) = workspace_window(cx).await;
+    let fake = Arc::new(fake());
+    let view = open_detail(&workspace, fake.clone(), 2, cx);
+    let editor = view.update_in(cx, |view, window, cx| view.comment_editor(window, cx));
+    set_text(&editor, "First", cx);
+    view.update_in(cx, |view, window, cx| view.send_comment(window, cx));
+    set_text(&editor, "First, and then more", cx);
+    cx.run_until_parked();
+
+    assert_eq!(
+        fake.writes(),
+        vec![FakeWrite::AddComment(repository(), 2, "First".to_string())]
+    );
+    assert_eq!(text(&editor, cx), "First, and then more");
+    view.read_with(cx, |view, _| {
+        assert_eq!(
+            view.comments().last().map(|comment| comment.body.as_str()),
+            Some("First")
+        );
+    });
+}
+
+/// A write whose outcome is not known says to check before trying again,
+/// keeps what was typed, and sends nothing a second time by itself.
+#[gpui::test]
+async fn an_unknown_outcome_tells_the_user_to_check_before_retrying(cx: &mut TestAppContext) {
+    init(cx);
+    let (workspace, cx) = workspace_window(cx).await;
+    let fake = Arc::new(fake());
+    let list = list_over(fake.clone(), cx);
+    let unknown = GithubError::OutcomeUnknown {
+        message: "connection closed".to_string(),
+    };
+
+    let dialog = open_create_dialog(&workspace, &list, cx);
+    let title = dialog.read_with(cx, |dialog, _| dialog.title.clone());
+    set_text(&title, "Maybe created", cx);
+    fake.set_failure(Some(unknown.clone()));
+    dialog.update(cx, |dialog, cx| dialog.submit(cx));
+    cx.run_until_parked();
+    let error = dialog.read_with(cx, |dialog, _| dialog.error().map(str::to_string));
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|error| error.contains("Reload and check before trying again")),
+        "{error:?}"
+    );
+    assert_eq!(text(&title, cx), "Maybe created");
+
+    fake.set_failure(None);
+    let view = open_detail(&workspace, fake.clone(), 2, cx);
+    let editor = view.update_in(cx, |view, window, cx| view.comment_editor(window, cx));
+    set_text(&editor, "Maybe sent", cx);
+    fake.set_failure(Some(unknown));
+    view.update_in(cx, |view, window, cx| view.send_comment(window, cx));
+    cx.run_until_parked();
+    let error = view.read_with(cx, |view, _| view.comment_error().map(str::to_string));
+    assert!(
+        error
+            .as_deref()
+            .is_some_and(|error| error.contains("Reload and check before trying again")),
+        "{error:?}"
+    );
+    assert_eq!(text(&editor, cx), "Maybe sent");
+    assert!(fake.writes().is_empty(), "nothing was sent again");
+}

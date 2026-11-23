@@ -23,6 +23,7 @@ mod issue_list_states_render;
 mod issue_list_writes;
 mod issue_row_render;
 mod issue_type_picker;
+mod paged_reads;
 mod sub_issue_section;
 mod sub_issue_section_render;
 

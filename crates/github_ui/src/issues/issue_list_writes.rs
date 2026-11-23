@@ -10,12 +10,16 @@ use workspace::Workspace;
 
 use crate::github_markdown::issue_page;
 use crate::github_view::DetailKey;
+use crate::github_view_session::is_live_session;
 use crate::issues::bulk_issue_actions::BulkIssueDialog;
 use crate::issues::issue_actions::{
     BulkIssueAction, IssueMenuEntry, close_reason_label, may_triage, row_menu_entries,
 };
 use crate::issues::issue_editor::{CreateIssueDialog, CreateIssueOptions, CreateIssueOwner};
 use crate::issues::issue_list::IssueList;
+
+pub(crate) const SIGNED_OUT_WRITE: &str =
+    "Signed out or account changed. Nothing was sent; reconnect in the GitHub tab, then try again.";
 
 impl IssueList {
     pub fn selected(&self) -> &BTreeSet<u64> {
@@ -69,6 +73,7 @@ impl IssueList {
         let number = issue.number;
         self.rows.retain(|row| row.number != number);
         self.rows.insert(0, issue);
+        self.rows_changed();
         self.saved_draft = Default::default();
         self.notice = Some(match ignored {
             Some(ignored) => format!("Created #{number}. {ignored}"),
@@ -90,8 +95,42 @@ impl IssueList {
     ) {
         if let Some(row) = self.rows.iter_mut().find(|row| row.number == number) {
             change(row);
+            self.rows_changed();
             cx.notify();
         }
+    }
+
+    /// Reads rows again whose write may or may not have reached GitHub, such
+    /// as the one a stopped bulk action was sending, so they show what is
+    /// there rather than what was last known.
+    pub(crate) fn refresh_rows(&mut self, numbers: Vec<u64>, cx: &mut Context<Self>) {
+        for number in numbers {
+            if self.row_writes.contains_key(&number) {
+                continue;
+            }
+            let backend = self.context.backend.clone();
+            let repository = self.context.repository.clone();
+            let task = cx.spawn(async move |this, cx| {
+                let issue = backend.issue(&repository, number).await;
+                this.update(cx, |this, cx| {
+                    this.row_writes.remove(&number);
+                    match issue {
+                        Ok(issue) => this.replace_row(issue, cx),
+                        Err(error) => {
+                            this.note_error(&error, cx);
+                            this.write_error = Some(format!(
+                                "Could not check #{number} after stopping: {error}. \
+                                 Reload to see where it stands."
+                            ));
+                            cx.notify();
+                        }
+                    }
+                })
+                .ok();
+            });
+            self.row_writes.insert(number, task);
+        }
+        cx.notify();
     }
 
     pub fn row_menu(&self, number: u64) -> Vec<IssueMenuEntry> {
@@ -114,6 +153,11 @@ impl IssueList {
             self.write_error = Some(format!(
                 "#{number} is still being changed. Try again once it finishes."
             ));
+            cx.notify();
+            return;
+        }
+        if !is_live_session(&self.context.session, cx) {
+            self.write_error = Some(SIGNED_OUT_WRITE.to_string());
             cx.notify();
             return;
         }

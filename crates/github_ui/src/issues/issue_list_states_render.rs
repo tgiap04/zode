@@ -55,8 +55,12 @@ fn empty_state(
 }
 
 impl IssueList {
-    pub(crate) fn render_placeholder(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        Some(match self.placeholder()? {
+    pub(crate) fn render_placeholder(
+        &self,
+        no_visible_rows: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        Some(match self.placeholder_for(no_visible_rows)? {
             ListPlaceholder::Loading => v_flex()
                 .id("github-issues-loading")
                 .tooltip(Tooltip::text("Loading issues…"))
@@ -151,7 +155,7 @@ impl IssueList {
         Some(
             h_flex()
                 .w_full()
-                .py_2()
+                .h(px(ROW_HEIGHT))
                 .justify_center()
                 .child(
                     Button::new(

@@ -644,34 +644,29 @@ impl FetchOptions {
         }
     }
 
-    /// Refuses a remote name or refspec that git could read as an option, a
-    /// refspec that would write outside `refs/remotes/<remote>/`, and either
-    /// holding wildcards or characters git does not allow in a ref. A peer
-    /// chooses the remote name, so every kind is checked.
+    /// The remote a fetch names, if it names one.
+    pub fn remote_name(&self) -> Option<&str> {
+        match self {
+            FetchOptions::All => None,
+            FetchOptions::Remote(remote) | FetchOptions::Refspec { remote, .. } => {
+                Some(remote.name.as_ref())
+            }
+        }
+    }
+
+    /// Refuses a remote name that git could read as an option or that is not
+    /// a valid ref component, and a refspec that is anything but one pull
+    /// request's `refs/pull/<n>/head` into `refs/remotes/<remote>/pull/<n>/head`.
+    /// A peer chooses these, so every kind is checked; the narrow shape keeps
+    /// it from repointing `refs/remotes/<remote>/HEAD` or a tracked branch.
     pub fn validate(&self) -> Result<()> {
-        let unsafe_part = |part: &str| {
-            part.is_empty()
-                || part.starts_with('-')
-                || part.contains("..")
-                || part.contains("@{")
-                || part.chars().any(|character| {
-                    character.is_control()
-                        || character.is_whitespace()
-                        || "~^:?*[\\".contains(character)
-                })
-        };
         let remote = match self {
             FetchOptions::All => return Ok(()),
             FetchOptions::Remote(remote) | FetchOptions::Refspec { remote, .. } => remote,
         };
-        // A slash inside a name is fine for git (`team/fork`); only an empty
-        // component would make the name misread.
-        if unsafe_part(&remote.name)
-            || remote.name.starts_with('/')
-            || remote.name.ends_with('/')
-            || remote.name.contains("//")
-        {
-            bail!("unsafe remote name {:?}", remote.name);
+        // A slash inside a name is fine for git (`team/fork`).
+        if let Some(problem) = ref_name_problem(&remote.name) {
+            bail!("unsafe remote name {:?}: {problem}", remote.name);
         }
         let FetchOptions::Refspec {
             source,
@@ -681,15 +676,14 @@ impl FetchOptions {
         else {
             return Ok(());
         };
-        if unsafe_part(source) || !source.starts_with("refs/") {
-            bail!("unsafe source ref {source:?}");
-        }
-        let allowed_prefix = format!("refs/remotes/{}/", remote.name);
-        if unsafe_part(destination)
-            || !destination.starts_with(&allowed_prefix)
-            || destination.len() == allowed_prefix.len()
-        {
-            bail!("destination {destination:?} is not under {allowed_prefix}");
+        let number = source
+            .strip_prefix("refs/pull/")
+            .and_then(|rest| rest.strip_suffix("/head"))
+            .filter(|number| !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+            .with_context(|| format!("unsafe source ref {source:?}: not refs/pull/<n>/head"))?;
+        let expected = format!("refs/remotes/{}/pull/{number}/head", remote.name);
+        if destination.as_ref() != expected {
+            bail!("destination {destination:?} is not {expected}");
         }
         Ok(())
     }
@@ -728,6 +722,80 @@ impl std::fmt::Display for FetchOptions {
             } => write!(f, "{} {source}:{destination}", remote.name),
         }
     }
+}
+
+/// Why git would refuse a name as a branch or as a part of a ref
+/// (`git check-ref-format`'s rules, less the ones about a whole ref's
+/// `refs/` prefix). One list, so a branch name checked for the user and a
+/// remote name checked for a peer cannot drift apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefNameProblem {
+    Empty,
+    StartsWithDash,
+    Reserved,
+    Control(char),
+    Forbidden(char),
+    ForbiddenSequence,
+    SlashOrDotAtEdge,
+    BadComponent,
+}
+
+impl std::fmt::Display for RefNameProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "The name is empty."),
+            Self::StartsWithDash => write!(f, "A name cannot start with “-”."),
+            Self::Reserved => write!(f, "“HEAD” and “@” are not branch names."),
+            Self::Control(character) => write!(
+                f,
+                "The name holds a control character (U+{:04X}).",
+                u32::from(*character)
+            ),
+            Self::Forbidden(character) => {
+                write!(f, "A name cannot contain “{character}”.")
+            }
+            Self::ForbiddenSequence => write!(f, "A name cannot contain “..”, “@{{” or “//”."),
+            Self::SlashOrDotAtEdge => {
+                write!(f, "A name cannot start with “/” or end with “/” or “.”.")
+            }
+            Self::BadComponent => write!(
+                f,
+                "No part of a name can start with “.” or end with “.lock”."
+            ),
+        }
+    }
+}
+
+/// The first rule `name` breaks, or `None` when git takes it as a branch name
+/// (and as one component of a remote-tracking ref).
+pub fn ref_name_problem(name: &str) -> Option<RefNameProblem> {
+    if name.is_empty() {
+        return Some(RefNameProblem::Empty);
+    }
+    if name.starts_with('-') {
+        return Some(RefNameProblem::StartsWithDash);
+    }
+    if name == "HEAD" || name == "@" {
+        return Some(RefNameProblem::Reserved);
+    }
+    if let Some(character) = name.chars().find(|character| character.is_control()) {
+        return Some(RefNameProblem::Control(character));
+    }
+    if let Some(character) = name
+        .chars()
+        .find(|character| character.is_whitespace() || "~^:?*[\\".contains(*character))
+    {
+        return Some(RefNameProblem::Forbidden(character));
+    }
+    if name.contains("..") || name.contains("@{") || name.contains("//") {
+        return Some(RefNameProblem::ForbiddenSequence);
+    }
+    if name.starts_with('/') || name.ends_with('/') || name.ends_with('.') {
+        return Some(RefNameProblem::SlashOrDotAtEdge);
+    }
+    name.split('/')
+        .any(|component| component.starts_with('.') || component.ends_with(".lock"))
+        .then_some(RefNameProblem::BadComponent)
 }
 
 /// Modifies .git/info/exclude temporarily
@@ -2800,6 +2868,10 @@ impl GitRepository for RealGitRepository {
         let working_directory = self.working_directory();
         let git_directory = self.path();
         let fetch_args = fetch_options.command_args();
+        // `git fetch -- <name>` takes a directory or a URL as readily as a
+        // remote's name; the name is only ever meant to be a remote's.
+        let named_remote = fetch_options.remote_name().map(str::to_string);
+        let configured_remotes = named_remote.as_ref().map(|_| self.get_all_remotes());
         let git_binary_path = self.system_git_binary_path.clone();
         let executor = cx.background_executor().clone();
         let is_trusted = self.is_trusted();
@@ -2808,6 +2880,13 @@ impl GitRepository for RealGitRepository {
         async move {
             let git_binary_path = git_binary_path.context("git not found on $PATH, can't fetch")?;
             let working_directory = working_directory?;
+            let fetch_args = fetch_args?;
+            if let (Some(name), Some(configured)) = (named_remote, configured_remotes) {
+                anyhow::ensure!(
+                    configured.await?.iter().any(|remote| remote.name == name),
+                    "{name:?} is not a configured remote"
+                );
+            }
             let git = GitBinary::new(
                 git_binary_path,
                 working_directory,
@@ -2817,7 +2896,7 @@ impl GitRepository for RealGitRepository {
             );
             let mut command = git.build_command(&["fetch"]);
             command
-                .args(fetch_args?)
+                .args(fetch_args)
                 .envs(env.iter())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -4260,6 +4339,184 @@ mod tests {
         assert_eq!(
             FetchOptions::All.command_args().unwrap(),
             vec!["--all".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_ref_name_problem_follows_check_ref_format() {
+        for name in [
+            "", "-x", "HEAD", "@", "a b", "a\tb", "a~b", "a^b", "a:b", "a?b", "a*b", "a[b", "a\\b",
+            "a..b", "a@{b", "a//b", "/a", "a/", "a.", "a.lock", "a/b.lock", "a/.b", ".a",
+        ] {
+            assert!(ref_name_problem(name).is_some(), "{name:?} must be refused");
+        }
+        for name in [
+            "main",
+            "team/fork",
+            "pr-7-feature/login",
+            "fix-ü",
+            "a.b",
+            "v1.0",
+        ] {
+            assert_eq!(ref_name_problem(name), None, "{name:?} is a fine name");
+        }
+    }
+
+    /// The destination is checked, not only its prefix: a peer must not be able
+    /// to repoint `refs/remotes/<remote>/HEAD` or a branch the user tracks.
+    #[test]
+    fn test_a_refspec_may_only_fetch_a_pull_request_into_its_own_ref() {
+        let refspec = |remote: &str, source: &str, destination: &str| FetchOptions::Refspec {
+            remote: Remote {
+                name: remote.to_string().into(),
+            },
+            source: source.to_string().into(),
+            destination: destination.to_string().into(),
+        };
+        for (remote, source, destination) in [
+            ("upstream", "refs/heads/x", "refs/remotes/upstream/HEAD"),
+            ("upstream", "refs/heads/x", "refs/remotes/upstream/main"),
+            (
+                "upstream",
+                "refs/pull/7/head",
+                "refs/remotes/upstream/pull/8/head",
+            ),
+            (
+                "upstream",
+                "refs/pull/7/head",
+                "refs/remotes/upstream/pull/7/merge",
+            ),
+            (
+                "upstream",
+                "refs/pull/x/head",
+                "refs/remotes/upstream/pull/x/head",
+            ),
+            (
+                "upstream",
+                "refs/heads/main",
+                "refs/remotes/upstream/pull/7/head",
+            ),
+            (
+                "upstream",
+                "refs/pull/7/head",
+                "refs/remotes/upstream/pull/7/head.lock",
+            ),
+            (
+                "team/fork",
+                "refs/pull/7/head",
+                "refs/remotes/team/fork/HEAD",
+            ),
+            (
+                "up.lock",
+                "refs/pull/7/head",
+                "refs/remotes/up.lock/pull/7/head",
+            ),
+            (
+                "upstream.",
+                "refs/pull/7/head",
+                "refs/remotes/upstream./pull/7/head",
+            ),
+            (
+                "up/.hidden",
+                "refs/pull/7/head",
+                "refs/remotes/up/.hidden/pull/7/head",
+            ),
+        ] {
+            let options = refspec(remote, source, destination);
+            assert!(
+                options.validate().is_err(),
+                "{remote} {source}:{destination} must be refused"
+            );
+            assert!(
+                FetchOptions::from_proto(options.to_proto(), options.refspec_to_proto()).is_err(),
+                "{remote} {source}:{destination} must be refused over proto"
+            );
+        }
+        for (remote, number) in [("upstream", 7), ("team/fork", 12345)] {
+            let options = refspec(
+                remote,
+                &format!("refs/pull/{number}/head"),
+                &format!("refs/remotes/{remote}/pull/{number}/head"),
+            );
+            assert!(options.validate().is_ok(), "{remote} #{number}");
+        }
+    }
+
+    /// `git fetch -- <name>` takes a path or a URL as readily as a remote's
+    /// name, so a peer's "remote name" is held to the configured remotes.
+    #[gpui::test]
+    async fn test_a_fetch_names_a_configured_remote_not_a_path(cx: &mut TestAppContext) {
+        let (upstream_dir, _upstream, _) = repository_with_one_commit(cx).await;
+        let (local_dir, local, _) = repository_with_one_commit(cx).await;
+        git2::Repository::open(local_dir.path())
+            .unwrap()
+            .remote("upstream", upstream_dir.path().to_str().unwrap())
+            .unwrap();
+        let fetch = |options: FetchOptions, cx: &mut TestAppContext| {
+            local.fetch(
+                options,
+                AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {}),
+                Arc::new(HashMap::default()),
+                cx.to_async(),
+            )
+        };
+        let configured = fetch(
+            FetchOptions::Remote(Remote {
+                name: "upstream".into(),
+            }),
+            cx,
+        )
+        .await;
+        assert!(configured.is_ok(), "{configured:?}");
+
+        // A directory beside the working tree: git reads its name as a path.
+        let sibling = local_dir.path().join("vendored");
+        let sibling_git = git2::Repository::init(&sibling).unwrap();
+        let signature = git2::Signature::now("Author", "author@example.com").unwrap();
+        let tree = sibling_git
+            .find_tree(sibling_git.treebuilder(None).unwrap().write().unwrap())
+            .unwrap();
+        let commit = sibling_git
+            .commit(Some("HEAD"), &signature, &signature, "Vendored", &tree, &[])
+            .unwrap();
+        sibling_git
+            .reference("refs/pull/7/head", commit, true, "pull request")
+            .unwrap();
+
+        let by_path = fetch(
+            FetchOptions::Remote(Remote {
+                name: "vendored".into(),
+            }),
+            cx,
+        )
+        .await;
+        let error = by_path.expect_err("a path is not a configured remote");
+        assert!(
+            error.to_string().contains("not a configured remote"),
+            "{error:#}"
+        );
+        let refspec_by_path = fetch(
+            FetchOptions::Refspec {
+                remote: Remote {
+                    name: "vendored".into(),
+                },
+                source: "refs/pull/7/head".into(),
+                destination: "refs/remotes/vendored/pull/7/head".into(),
+            },
+            cx,
+        )
+        .await;
+        let error = refspec_by_path.expect_err("a path is not a configured remote");
+        assert!(
+            error.to_string().contains("not a configured remote"),
+            "{error:#}"
+        );
+        assert!(
+            git2::Repository::open(local_dir.path())
+                .unwrap()
+                .refname_to_id("refs/remotes/vendored/pull/7/head")
+                .is_err(),
+            "nothing was fetched from the directory"
         );
     }
 

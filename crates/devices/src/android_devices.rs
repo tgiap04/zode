@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::host::{ToolInvocation, ToolRunner};
+use crate::input_validation::validate_avd_name;
 use crate::{Device, DeviceKey, DeviceKind, DeviceState};
 
 /// The reasons a physical Android row is unusable, said once so the panel can
@@ -91,7 +92,13 @@ pub(crate) fn parse_avd_name_reply(stdout: &str) -> Option<String> {
     if first_line == "OK" || first_line.starts_with("KO") {
         return None;
     }
-    Some(first_line.to_string())
+    accepted_avd_name(first_line)
+}
+
+/// Whatever listens on an emulator's console port may answer with anything,
+/// so a name that no AVD can have never becomes a row.
+fn accepted_avd_name(name: &str) -> Option<String> {
+    validate_avd_name(name).ok().map(|()| name.to_string())
 }
 
 pub(crate) fn is_adb_server_mismatch(text: &str) -> bool {
@@ -286,8 +293,7 @@ pub(crate) async fn emulator_avd_names(
                 .await
                 .ok()
                 .filter(|output| output.success())
-                .map(|output| output.stdout.trim().to_string())
-                .filter(|name| !name.is_empty()),
+                .and_then(|output| accepted_avd_name(output.stdout.trim())),
         };
         name.map(|name| (serial.to_string(), name))
     });

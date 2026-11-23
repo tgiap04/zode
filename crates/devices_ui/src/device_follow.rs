@@ -35,31 +35,52 @@ struct Started {
     log_file: Option<PathBuf>,
     /// The started emulator process, which may die before adb ever sees it.
     exit: Option<DetachedExit>,
+    process_id: Option<u32>,
     error: Option<DeviceError>,
 }
 
-pub(crate) async fn execute(
-    context: OperationContext,
-    plan: OperationPlan,
-) -> (OperationOutcome, Option<u64>) {
-    let outcome = run(&context, plan).await;
-    (outcome, context.host.available_memory_bytes())
+/// An emulator that Zode started and gave up on, whose process may still be
+/// running although adb never listed it: nothing else can stop it.
+pub(crate) struct StrayEmulator {
+    pub process_id: u32,
+    /// Still unsettled only while `process_id` is still this emulator's.
+    pub exit: DetachedExit,
 }
 
-async fn run(context: &OperationContext, plan: OperationPlan) -> OperationOutcome {
+pub(crate) struct Executed {
+    pub outcome: OperationOutcome,
+    pub available_bytes: Option<u64>,
+    pub stray: Option<StrayEmulator>,
+}
+
+pub(crate) async fn execute(context: OperationContext, plan: OperationPlan) -> Executed {
+    let (outcome, stray) = run(&context, plan).await;
+    Executed {
+        outcome,
+        available_bytes: context.host.available_memory_bytes(),
+        stray,
+    }
+}
+
+async fn run(
+    context: &OperationContext,
+    plan: OperationPlan,
+) -> (OperationOutcome, Option<StrayEmulator>) {
     if let OperationPlan::ShowSimulatorWindow { udid } = &plan {
-        return match open_simulator_window(&*context.runner, udid).await {
+        let outcome = match open_simulator_window(&*context.runner, udid).await {
             Ok(()) => OperationOutcome {
                 settled: Settled::Done(None),
                 error: None,
             },
             Err(error) => OperationOutcome::failed(DeviceError::new(format!("{error:#}")), None),
         };
+        return (outcome, None);
     }
     let started = match start(context, plan).await {
         Ok(started) => started,
         Err(error) => {
-            return OperationOutcome::failed(DeviceError::new(format!("{error:#}")), None);
+            let outcome = OperationOutcome::failed(DeviceError::new(format!("{error:#}")), None);
+            return (outcome, None);
         }
     };
     follow(context, started).await
@@ -82,6 +103,7 @@ async fn start(context: &OperationContext, plan: OperationPlan) -> anyhow::Resul
                 target: TrackTarget::SimulatorBoot { udid },
                 log_file: None,
                 exit: None,
+                process_id: None,
                 error,
             })
         }
@@ -91,6 +113,7 @@ async fn start(context: &OperationContext, plan: OperationPlan) -> anyhow::Resul
                 target: TrackTarget::SimulatorShutdown { udid },
                 log_file: None,
                 exit: None,
+                process_id: None,
                 error: None,
             })
         }
@@ -115,6 +138,7 @@ async fn start(context: &OperationContext, plan: OperationPlan) -> anyhow::Resul
                 },
                 log_file: Some(started.log_file),
                 exit: Some(started.exit),
+                process_id: Some(started.process_id),
                 error: None,
             })
         }
@@ -126,6 +150,7 @@ async fn start(context: &OperationContext, plan: OperationPlan) -> anyhow::Resul
                 target: TrackTarget::EmulatorStop { avd_name, serial },
                 log_file: None,
                 exit: None,
+                process_id: None,
                 error: None,
             })
         }
@@ -136,11 +161,15 @@ async fn start(context: &OperationContext, plan: OperationPlan) -> anyhow::Resul
 /// One probe per interval for the one device acted on, until the verdict says
 /// stop or the started emulator process exits. This loop ending is the only
 /// thing that ever stops it.
-async fn follow(context: &OperationContext, started: Started) -> OperationOutcome {
+async fn follow(
+    context: &OperationContext,
+    started: Started,
+) -> (OperationOutcome, Option<StrayEmulator>) {
     let Started {
         target,
         log_file,
         mut exit,
+        process_id,
         error,
     } = started;
     let deadline = context.executor.now() + target.time_limit();
@@ -151,7 +180,7 @@ async fn follow(context: &OperationContext, started: Started) -> OperationOutcom
             Some(receiver) => match futures::future::select(interval, receiver).await {
                 Either::Left(_) => {}
                 Either::Right((Ok(exit_code), _)) => {
-                    return exited_early(context, &target, exit_code, log_file);
+                    return (exited_early(context, &target, exit_code, log_file), None);
                 }
                 // Its exit cannot be known; adb alone decides from here.
                 Either::Right((Err(_), _)) => {
@@ -161,30 +190,52 @@ async fn follow(context: &OperationContext, started: Started) -> OperationOutcom
             },
             None => interval.await,
         }
-        let result = probe(&*context.host, &*context.runner, &target).await;
+        let time_left = deadline.saturating_duration_since(context.executor.now());
+        let result = probe(&*context.host, &*context.runner, &target, time_left).await;
         if result.device.is_some() {
             last_seen = result.device.clone();
         }
         match tracking_verdict(&target, &result, context.executor.now(), deadline) {
             TrackingVerdict::Continue => {}
             TrackingVerdict::Done(device) => {
-                return OperationOutcome {
+                let outcome = OperationOutcome {
                     settled: Settled::Done(device),
                     error,
                 };
+                return (outcome, None);
             }
             TrackingVerdict::TimedOut(reason) => {
-                return OperationOutcome::failed(
+                // With no serial adb cannot stop it; the process can still be
+                // running, so it stays reachable instead of being forgotten.
+                let stray = match (&target, exit, process_id) {
+                    (TrackTarget::EmulatorStart { .. }, Some(exit), Some(process_id))
+                        if last_seen
+                            .as_ref()
+                            .is_none_or(|device| device.serial.is_none()) =>
+                    {
+                        Some(StrayEmulator { process_id, exit })
+                    }
+                    _ => None,
+                };
+                let mut message = explained(context, reason, log_file.as_deref());
+                if stray.is_some() {
+                    message.push_str(STILL_RUNNING_NOTE);
+                }
+                let outcome = OperationOutcome::failed(
                     DeviceError {
-                        message: explained(context, reason, log_file.as_deref()).into(),
+                        message: message.into(),
                         log_file,
                     },
                     last_seen,
                 );
+                return (outcome, stray);
             }
         }
     }
 }
+
+pub(crate) const STILL_RUNNING_NOTE: &str =
+    " It may still be starting in the background; stop it to start this one again.";
 
 /// The emulator process ended before the device came up: nothing will come
 /// up, and its log already says why.

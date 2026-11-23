@@ -4,7 +4,7 @@
 
 use editor::Editor;
 use github::{
-    GithubResult, IssueFilter, IssueStateFilter, ProjectFieldKind, ProjectItemContent,
+    GithubError, GithubResult, IssueFilter, IssueStateFilter, ProjectFieldKind, ProjectItemContent,
     ProjectV2Item, PullRequestStateFilter,
 };
 use gpui::{Context, Entity, SharedString, Task};
@@ -96,14 +96,20 @@ impl ProjectsSection {
                         title: pull_request.title,
                         pull_request: true,
                     }]),
-                    Err(_) => backend.issue(&repository, number).await.map(|issue| {
-                        vec![AddCandidate {
-                            content_id: issue.node_id,
-                            number,
-                            title: issue.title,
-                            pull_request: false,
-                        }]
-                    }),
+                    // Only "no such pull request" means the number may be an
+                    // issue; a refused token or a lost connection is told as
+                    // it is, not answered by a second request.
+                    Err(GithubError::NotFound) => {
+                        backend.issue(&repository, number).await.map(|issue| {
+                            vec![AddCandidate {
+                                content_id: issue.node_id,
+                                number,
+                                title: issue.title,
+                                pull_request: false,
+                            }]
+                        })
+                    }
+                    Err(error) => Err(error),
                 },
                 None => {
                     let filter = IssueFilter {
@@ -301,6 +307,8 @@ impl ProjectsSection {
                     repository,
                 }
             };
+            self.layout_changed();
+            self.note_item_added(&item_id);
             self.items.push(ProjectV2Item {
                 id: item_id.clone(),
                 content,

@@ -75,6 +75,9 @@ pub struct FakeGitRepositoryState {
     pub graph_fetch_count: usize,
     /// Makes a scoped diff never finish, as a repository on a stalled disk would.
     pub simulated_scoped_diff_hangs: bool,
+    /// Makes `create_branch` start from HEAD whatever base it is given, as a
+    /// host older than the base field does.
+    pub simulated_create_branch_drops_base: bool,
     pub refs: HashMap<String, String>,
     pub graph_commits: Vec<Arc<InitialGraphCommitData>>,
     pub graph_commit_details: HashMap<Oid, GraphCommitData>,
@@ -97,6 +100,7 @@ impl FakeGitRepositoryState {
             simulated_commit_data_error: None,
             graph_fetch_count: 0,
             simulated_scoped_diff_hangs: false,
+            simulated_create_branch_drops_base: false,
             refs: HashMap::from_iter([("HEAD".into(), "abc".into())]),
             merge_base_contents: Default::default(),
             oids: Default::default(),
@@ -912,6 +916,7 @@ impl GitRepository for FakeGitRepository {
         })
     }
 
+    /// As `git switch -c`: the new branch is checked out.
     fn create_branch(
         &self,
         name: String,
@@ -923,6 +928,7 @@ impl GitRepository for FakeGitRepository {
             {
                 state.remotes.insert(remote.to_owned(), "".to_owned());
             }
+            let base_branch = base_branch.filter(|_| !state.simulated_create_branch_drops_base);
             // As git does: a base must name something, and no base means
             // HEAD. A base known only as a branch name has no commit here.
             let commit = match base_branch {
@@ -941,7 +947,8 @@ impl GitRepository for FakeGitRepository {
             if let Some(commit) = commit {
                 state.refs.insert(format!("refs/heads/{name}"), commit);
             }
-            state.branches.insert(name);
+            state.branches.insert(name.clone());
+            state.current_branch_name = Some(name);
             Ok(())
         })
     }
@@ -959,11 +966,16 @@ impl GitRepository for FakeGitRepository {
         })
     }
 
+    /// As git: the branch checked out cannot be deleted.
     fn delete_branch(&self, _is_remote: bool, name: String) -> BoxFuture<'_, Result<()>> {
         self.with_state_async(true, move |state| {
+            if state.current_branch_name.as_deref() == Some(name.as_str()) {
+                bail!("cannot delete branch '{name}' checked out");
+            }
             if !state.branches.remove(&name) {
                 bail!("no such branch: {name}");
             }
+            state.refs.remove(&format!("refs/heads/{name}"));
             Ok(())
         })
     }

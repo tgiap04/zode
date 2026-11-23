@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 
 use github::{
     GithubError, Issue, IssueStateFilter, IssueType, Label, Milestone, RepositoryPermission,
@@ -9,11 +10,12 @@ use workspace::Workspace;
 
 use crate::github_view::{DetailKey, GithubContext};
 use crate::github_view_session::report_if_revoked;
-use crate::issues::epic_tree::EpicTree;
+use crate::issues::epic_tree::{EpicTree, ListEntry};
 use crate::issues::issue_editor::IssueDraftText;
 use crate::issues::issue_filters::{IssueListFilters, MineFilter, matches_query};
 use crate::issues::issue_list_render::SearchField;
 use crate::issues::open_issue_detail;
+use crate::issues::paged_reads::{MAX_OPTION_PAGES, options_note, read_pages};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ListLoad {
@@ -65,9 +67,18 @@ pub struct IssueList {
     awaited_load: u64,
     pub(crate) labels: Vec<Label>,
     pub(crate) milestones: Vec<Milestone>,
+    /// There are more labels or milestones than were read.
+    labels_cut_short: bool,
+    milestones_cut_short: bool,
     /// Empty when the repository's owner has no issue types.
     pub(crate) issue_types: Vec<IssueType>,
     pub(crate) epic_tree: EpicTree,
+    /// What the list draws, kept between frames. Dropped by
+    /// [`Self::rows_changed`] wherever the rows, the filters, the typed text
+    /// or the opened rows change.
+    pub(crate) entries: Option<Rc<Vec<ListEntry>>>,
+    #[cfg(test)]
+    pub(crate) rebuilds: usize,
     pub(crate) search_field: Option<SearchField>,
     load_task: Option<Task<()>>,
     options_task: Option<Task<()>>,
@@ -103,8 +114,13 @@ impl IssueList {
             awaited_load: 0,
             labels: Vec::new(),
             milestones: Vec::new(),
+            labels_cut_short: false,
+            milestones_cut_short: false,
             issue_types: Vec::new(),
             epic_tree: EpicTree::default(),
+            entries: None,
+            #[cfg(test)]
+            rebuilds: 0,
             search_field: None,
             load_task: None,
             options_task: None,
@@ -172,6 +188,40 @@ impl IssueList {
         self.next_cursor.is_some()
     }
 
+    /// Ticked rows the typed text or the filters keep out of view; they are
+    /// still selected, and a bulk action takes them.
+    pub fn hidden_selected_count(&self) -> usize {
+        self.hidden_selected_among(self.visible_rows().iter().map(|issue| issue.number))
+    }
+
+    pub(crate) fn hidden_selected_among(&self, visible: impl Iterator<Item = u64>) -> usize {
+        let visible = visible.collect::<HashSet<_>>();
+        self.selected
+            .iter()
+            .filter(|number| !visible.contains(number))
+            .count()
+    }
+
+    /// What the filter menus lack, when GitHub has more labels or milestones
+    /// than were read.
+    pub fn options_note(&self) -> Option<String> {
+        options_note(
+            self.labels_cut_short.then_some(self.labels.len()),
+            self.milestones_cut_short.then_some(self.milestones.len()),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn row_rebuilds(&self) -> usize {
+        self.rebuilds
+    }
+
+    /// The drawn rows are stale: the rows, a filter, the typed text or an
+    /// opened row changed.
+    pub(crate) fn rows_changed(&mut self) {
+        self.entries = None;
+    }
+
     /// The loaded rows the filters and the typed text let through.
     pub fn visible_rows(&self) -> Vec<&Issue> {
         let login = self.context.login.as_ref();
@@ -184,10 +234,16 @@ impl IssueList {
 
     /// What stands in for the rows, if anything.
     pub fn placeholder(&self) -> Option<ListPlaceholder> {
+        self.placeholder_for(self.visible_rows().is_empty())
+    }
+
+    /// [`Self::placeholder`], told whether any row is visible, which the
+    /// caller has already worked out.
+    pub(crate) fn placeholder_for(&self, no_visible_rows: bool) -> Option<ListPlaceholder> {
         if let ListLoad::Failed(error) = &self.load {
             return Some(ListPlaceholder::Failed(error.clone()));
         }
-        if !self.visible_rows().is_empty() {
+        if !no_visible_rows {
             return None;
         }
         Some(match (&self.load, &self.searched) {
@@ -207,9 +263,11 @@ impl IssueList {
         self.fetch(None, cx);
     }
 
+    /// The next page. After a page that failed it asks for that page again;
+    /// a failed first page leaves no cursor, so there is nothing to ask for.
     pub fn load_more(&mut self, cx: &mut Context<Self>) {
         if let Some(cursor) = self.next_cursor.clone()
-            && self.load == ListLoad::Idle
+            && matches!(self.load, ListLoad::Idle | ListLoad::Failed(_))
         {
             self.fetch(Some(cursor), cx);
         }
@@ -244,6 +302,7 @@ impl IssueList {
     /// Narrows the loaded rows as the text is typed; nothing is sent.
     pub fn set_query(&mut self, query: String, cx: &mut Context<Self>) {
         self.query = query;
+        self.rows_changed();
         cx.notify();
     }
 
@@ -292,6 +351,8 @@ impl IssueList {
 
     /// `None` reads the first page and replaces the rows; a cursor appends.
     fn fetch(&mut self, cursor: Option<String>, cx: &mut Context<Self>) {
+        // A filter may have changed just before this.
+        self.rows_changed();
         let load = self.next_load();
         self.awaited_load = load;
         let appending = cursor.is_some();
@@ -345,9 +406,15 @@ impl IssueList {
                     }
                     Err(error) => {
                         this.note_error(&error, cx);
+                        // A failed page can be asked for again; a failed first
+                        // page cannot, its cursor was the previous list's.
+                        if !appending {
+                            this.next_cursor = None;
+                        }
                         this.load = ListLoad::Failed(error);
                     }
                 }
+                this.rows_changed();
                 cx.emit(IssueListEvent::Loaded);
                 cx.notify();
             })
@@ -356,14 +423,21 @@ impl IssueList {
         cx.notify();
     }
 
-    /// The first page of labels and milestones, for the filter menus. A
-    /// failure leaves the menus empty; the list itself reports errors.
+    /// The labels and milestones for the filter menus, page after page up
+    /// to a limit. A failure leaves the menus empty; the list itself reports
+    /// errors.
     fn load_options(&mut self, cx: &mut Context<Self>) {
         let backend = self.context.backend.clone();
         let repository = self.context.repository.clone();
         self.options_task = Some(cx.spawn(async move |this, cx| {
-            let labels = backend.list_labels(&repository, None).await;
-            let milestones = backend.list_milestones(&repository, None).await;
+            let labels = read_pages(MAX_OPTION_PAGES, usize::MAX, |cursor| {
+                backend.list_labels(&repository, cursor)
+            })
+            .await;
+            let milestones = read_pages(MAX_OPTION_PAGES, usize::MAX, |cursor| {
+                backend.list_milestones(&repository, cursor)
+            })
+            .await;
             let permission = backend.repository_permission(&repository).await;
             let issue_types = backend.list_issue_types(&repository).await;
             this.update(cx, |this, cx| {
@@ -389,11 +463,17 @@ impl IssueList {
                     Err(error) => log::info!("could not read the account's role: {error}"),
                 }
                 match labels {
-                    Ok(page) => this.labels = page.items,
+                    Ok(read) => {
+                        this.labels = read.items;
+                        this.labels_cut_short = read.cut_short;
+                    }
                     Err(error) => log::info!("could not read the repository's labels: {error}"),
                 }
                 match milestones {
-                    Ok(page) => this.milestones = page.items,
+                    Ok(read) => {
+                        this.milestones = read.items;
+                        this.milestones_cut_short = read.cut_short;
+                    }
                     Err(error) => {
                         log::info!("could not read the repository's milestones: {error}")
                     }

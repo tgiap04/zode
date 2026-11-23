@@ -119,8 +119,10 @@ impl IssueDetailView {
             .filter(|label| !present.contains(&label.name))
             .cloned()
             .collect::<Vec<_>>();
+        let note = self.options_note();
         let label_menu = ContextMenu::build(window, cx, {
             let this = this.clone();
+            let note = note.clone();
             move |mut menu, _, _| {
                 if addable.is_empty() {
                     return menu.label("No other labels");
@@ -134,7 +136,10 @@ impl IssueDetailView {
                             .ok();
                     });
                 }
-                menu
+                match note {
+                    Some(note) => menu.separator().label(note),
+                    None => menu,
+                }
             }
         });
         let milestones = self.milestones.clone();
@@ -168,7 +173,10 @@ impl IssueDetailView {
                     },
                 );
             }
-            menu
+            match note {
+                Some(note) => menu.separator().label(note),
+                None => menu,
+            }
         });
         let milestone_text = issue
             .milestone

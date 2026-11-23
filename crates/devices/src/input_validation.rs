@@ -11,11 +11,16 @@ pub struct InvalidInput {
     pub reason: String,
 }
 
+/// What an error repeats of a value.
+const MAX_SHOWN_VALUE_CHARS: usize = 200;
+
 impl InvalidInput {
     fn new(what: &'static str, value: &str, reason: impl Into<String>) -> Self {
+        // The value is untrusted and the error reaches the screen.
+        let shown: String = value.chars().take(MAX_SHOWN_VALUE_CHARS).collect();
         Self {
             what,
-            value: value.to_string(),
+            value: shown,
             reason: reason.into(),
         }
     }
@@ -133,7 +138,17 @@ pub fn validate_serial(value: &str) -> Result<(), InvalidInput> {
     )
 }
 
+/// Longer than any AVD name `avdmanager` or Android Studio makes.
+const MAX_AVD_NAME_CHARS: usize = 100;
+
 pub fn validate_avd_name(value: &str) -> Result<(), InvalidInput> {
+    if value.chars().count() > MAX_AVD_NAME_CHARS {
+        return Err(InvalidInput::new(
+            "AVD name",
+            value,
+            format!("it is longer than {MAX_AVD_NAME_CHARS} characters"),
+        ));
+    }
     validate_shape(
         "AVD name",
         value,
