@@ -5153,6 +5153,7 @@ mod tests {
                 "debug_panel",
                 "debugger",
                 "dev",
+                "devices_panel",
                 "diagnostics",
                 "editor",
                 "encoding_selector",
