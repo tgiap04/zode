@@ -43,6 +43,8 @@ members = [
     "crates/debugger_ui",
     "crates/denoise",
     "crates/dev_container",
+    "crates/devices",
+    "crates/devices_ui",
     "crates/diagnostics",
     "crates/docs_preprocessor",
     "crates/edit_prediction_types",
@@ -288,6 +290,8 @@ debugger_tools = { path = "crates/debugger_tools" }
 debugger_ui = { path = "crates/debugger_ui" }
 derive_refineable = { path = "crates/refineable/derive_refineable" }
 dev_container = { path = "crates/dev_container" }
+devices = { path = "crates/devices" }
+devices_ui = { path = "crates/devices_ui" }
 diagnostics = { path = "crates/diagnostics" }
 dialoguer = { version = "0.12", default-features = false }
 editor = { path = "crates/editor" }

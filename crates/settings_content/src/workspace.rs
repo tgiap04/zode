@@ -749,6 +749,20 @@ pub struct ProjectPanelAutoOpenSettings {
 
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct DevicesPanelSettingsContent {
+    /// Whether to show the Devices panel button in the right dock.
+    ///
+    /// Default: true
+    pub button: Option<bool>,
+    /// Default width (in pixels) of the Devices panel.
+    ///
+    /// Default: 320
+    #[serde(serialize_with = "crate::serialize_optional_f32_with_two_decimal_places")]
+    pub default_width: Option<f32>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
 pub struct ProjectPanelSettingsContent {
     /// Whether to show the project panel button in the status bar.
     ///

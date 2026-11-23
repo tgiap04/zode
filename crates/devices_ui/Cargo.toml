@@ -1,0 +1,47 @@
+[package]
+name = "devices_ui"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/devices_ui.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+devices.workspace = true
+futures.workspace = true
+gpui.workspace = true
+menu.workspace = true
+paths.workspace = true
+project.workspace = true
+settings.workspace = true
+task.workspace = true
+terminal.workspace = true
+terminal_view.workspace = true
+ui.workspace = true
+ui_input.workspace = true
+util.workspace = true
+workspace.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+devices = { workspace = true, features = ["test-support"] }
+editor.workspace = true
+fs = { workspace = true, features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+parking_lot.workspace = true
+project = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true
+smol.workspace = true
+tempfile.workspace = true
+theme.workspace = true
+theme_settings.workspace = true
+workspace = { workspace = true, features = ["test-support"] }
+zlog.workspace = true

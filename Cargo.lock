@@ -3702,6 +3702,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "devices"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "devices",
+ "futures 0.3.32",
+ "log",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "smol",
+ "sysinfo 0.37.2",
+ "util",
+ "which 6.0.3",
+]
+
+[[package]]
+name = "devices_ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "devices",
+ "editor",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "menu",
+ "parking_lot",
+ "paths",
+ "project",
+ "serde_json",
+ "settings",
+ "smol",
+ "task",
+ "tempfile",
+ "terminal",
+ "terminal_view",
+ "theme",
+ "theme_settings",
+ "ui",
+ "ui_input",
+ "util",
+ "workspace",
+ "zlog",
+]
+
+[[package]]
 name = "diagnostics"
 version = "0.1.0"
 dependencies = [
@@ -20246,6 +20295,7 @@ dependencies = [
  "debugger_tools",
  "debugger_ui",
  "dev_container",
+ "devices_ui",
  "diagnostics",
  "editor",
  "encoding_selector",
