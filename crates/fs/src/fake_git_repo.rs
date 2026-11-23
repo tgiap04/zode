@@ -282,14 +282,21 @@ impl GitRepository for FakeGitRepository {
     /// A ref the fake knows answers with its commit, as `git show` would;
     /// anything else is taken to be a commit already.
     fn show(&self, commit: String) -> BoxFuture<'_, Result<CommitDetails>> {
-        self.with_state_async(false, move |state| {
-            let sha = state.refs.get(&commit).cloned().unwrap_or(commit);
+        // Answered at once, without the simulated delay the other calls take:
+        // `show` runs while a repository loads, and a delay here reorders what
+        // every test that opens one sees.
+        let known = self.fs.with_git_state(&self.dot_git_path, false, |state| {
+            state.refs.get(&commit).cloned()
+        });
+        async move {
+            let sha = known?.unwrap_or(commit);
             Ok(CommitDetails {
                 sha: sha.into(),
                 message: "initial commit".into(),
                 ..Default::default()
             })
-        })
+        }
+        .boxed()
     }
 
     fn reset(

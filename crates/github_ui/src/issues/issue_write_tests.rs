@@ -540,6 +540,10 @@ async fn the_secondary_enter_sends_the_comment(cx: &mut TestAppContext) {
     let keystroke = if cfg!(target_os = "macos") {
         "cmd-enter"
     } else {
+        // A real keyboard reports Ctrl held before the Enter arrives; the
+        // handler reads that state, and a simulated keystroke alone does not
+        // set it.
+        cx.simulate_modifiers_change(gpui::Modifiers::control());
         "ctrl-enter"
     };
     cx.simulate_keystrokes(keystroke);

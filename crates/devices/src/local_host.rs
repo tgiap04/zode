@@ -228,12 +228,15 @@ impl HostSystem for LocalHost {
         let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
         let path =
             std::env::temp_dir().join(format!("zode-{}-{sequence}-{stem}", std::process::id()));
-        let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
-        {
+        let builder = {
             use std::os::unix::fs::DirBuilderExt as _;
+            let mut builder = std::fs::DirBuilder::new();
             builder.mode(0o700);
-        }
+            builder
+        };
+        #[cfg(not(unix))]
+        let builder = std::fs::DirBuilder::new();
         builder.create(&path)?;
         Ok(path)
     }
