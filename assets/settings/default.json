@@ -164,6 +164,30 @@
     "enabled": true,
     "quiet_period_ms": 12000,
   },
+  // Reminders to drink water, rest your eyes (20-20-20) and stand up, and a
+  // focus timer (Pomodoro). Off by default. Every interval is in minutes,
+  // 1 to 480. `style` is "bubble" (under the tray icon, falling back to an OS
+  // notification when the icon cannot be seen) or "system" (always an OS
+  // notification). Reminders that come due after `idle_pause_minutes` without
+  // any input on the computer wait until you are back.
+  "reminders": {
+    "enabled": false,
+    "style": "bubble",
+    "idle_pause_minutes": 5,
+    "snooze_minutes": 5,
+    "water": { "enabled": true, "interval_minutes": 45 },
+    "eye_break": { "enabled": true, "interval_minutes": 20 },
+    "stand_up": { "enabled": true, "interval_minutes": 60 },
+    "focus": {
+      "focus_minutes": 25,
+      "short_break_minutes": 5,
+      "long_break_minutes": 15,
+      "rounds_before_long_break": 4,
+    },
+  },
+  // Whether to show the Zode icon in the system tray (the macOS menu bar).
+  // Clicking it opens the reminders panel.
+  "tray_icon": true,
   // Whether another of your devices, signed in to the same account, may watch
   // and type into the agents and terminals running here. Off means Zode opens
   // no connection for it and watches no terminal. Every device must be approved
@@ -173,9 +197,20 @@
   // long: typing in a terminal, browsing files, listing or resuming sessions,
   // and requests from a project opened from another Zode count as use, while
   // pings and that project's heartbeat do not. 0 turns the limit off.
+  // `push_notifications` chooses which agent events are pushed as notifications
+  // to paired phones and tablets that allowed them, while remote control is on:
+  // an agent waiting for `approval`, an agent that `answered` (for agents whose
+  // transcript Zode cannot read, a guess made after a minute of quiet), and a
+  // session that `ended`. A device already showing that agent is not pushed to.
+  // Push notifications need a plan that includes them.
   "remote_control": {
     "enabled": false,
     "idle_timeout_minutes": 30,
+    "push_notifications": {
+      "approval": true,
+      "answered": true,
+      "ended": true,
+    },
   },
   // Whether to show the combined CPU and RAM footprint of every tracked
   // project's child processes -- its language servers and its terminals --
@@ -2396,7 +2431,16 @@
   // Settings overrides to use when using Linux.
   "linux": {},
   // Settings overrides to use when using macOS.
-  "macos": {},
+  "macos": {
+    // Apple's own fonts, as in Finder and Terminal. They come with macOS and
+    // cannot ship with Zode, so other platforms keep Inter and JetBrains Mono,
+    // which stay installed here too.
+    "ui_font_family": "SF Pro",
+    "buffer_font_family": "SF Mono",
+    "terminal": {
+      "font_family": "SF Mono",
+    },
+  },
   // Settings overrides to use when using Windows.
   "windows": {
     "languages": {

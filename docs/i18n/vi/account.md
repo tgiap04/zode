@@ -137,8 +137,12 @@ làm gì thay vì báo lỗi bằng một mã:
   một thiết bị trên web, hoặc nâng cấp.
 - **Đồng bộ `.env` trên Free** không tải lên gì. File đã lưu vẫn đọc
   và xoá được.
-- **Remote control** tạm dừng khi hạn mức relay trong ngày đã dùng hết. Nó đặt
-  lại lúc 00:00 UTC; Pro nâng hạn mức này.
+- **Remote control** trên Free tạm dừng sau 5 GiB qua relay trong một ngày. Nó
+  đặt lại lúc 00:00 UTC; Pro và Team không giới hạn mỗi ngày.
+- **Thông báo đẩy** của remote control chỉ có ở Pro và Team. Ở Free,
+  trang remote báo điều đó và menu remote control có nút nâng cấp.
+- **File dùng chung của nhóm** chỉ còn đọc khi gói của nhóm hết hạn. Thành viên
+  vượt quá số seat nhóm trả tiền được nhắc nhờ chủ nhóm thêm seat.
 
 Không có gì trong trình soạn thảo bị tắt vì gói. Máy chủ quyết định, nên gói bạn
 vừa đổi một phút trước có hiệu lực ngay.

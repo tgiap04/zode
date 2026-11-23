@@ -312,7 +312,7 @@ Giá trị `boolean`
 
 - Mô tả: Tên font dùng để hiển thị văn bản trong trình soạn thảo.
 - Cài đặt: `buffer_font_family`
-- Mặc định: `.ZodeMono`. Hiện tại tên này là bí danh của [Lilex](https://lilex.myrt.co).
+- Mặc định: `SF Mono` trên macOS, có sẵn trong hệ thống; `JetBrains Mono`, đi kèm Zode, trên các hệ điều hành khác.
 
 **Tùy chọn**
 
@@ -2433,7 +2433,12 @@ Giá trị `boolean`
 {
   "remote_control": {
     "enabled": false,
-    "idle_timeout_minutes": 30
+    "idle_timeout_minutes": 30,
+    "push_notifications": {
+      "approval": true,
+      "answered": true,
+      "ended": true
+    }
   }
 }
 ```
@@ -2442,6 +2447,7 @@ Giá trị `boolean`
 
 - `enabled`: `boolean`
 - `idle_timeout_minutes`: số phút kiểu `integer` mà thiết bị đã kết nối được phép không dùng trước khi bị ngắt: gõ trong terminal, duyệt file, liệt kê hoặc tiếp tục phiên, và yêu cầu từ dự án mở từ một Zode khác đều tính là có dùng, còn ping và heartbeat của dự án đó thì không; `0` tắt giới hạn. Xem [Remote control](../remote-control.md#turn-it-on)
+- `push_notifications`: `object` gồm `approval`, `answered` và `ended`, mỗi khoá là `boolean`: sự kiện agent nào được đẩy tới điện thoại và máy tính bảng đã ghép nối và đã cho phép thông báo. Cần gói có thông báo đẩy. Xem [Remote control](../remote-control.md#push-notifications)
 
 ## Chỉ báo mức tiêu thụ của dự án
 
@@ -4179,7 +4185,7 @@ Giá trị `integer`
 
 - Mô tả: Font dùng cho terminal. Khi không đặt, mặc định khớp với font của trình soạn thảo.
 - Cài đặt: `font_family`
-- Mặc định: `null`
+- Mặc định: `SF Mono` trên macOS, `JetBrains Mono NL` ở nơi khác
 
 **Tùy chọn**
 
@@ -5334,7 +5340,7 @@ Giá trị float từ `0.0` (nền hoàn toàn trong suốt) đến `1.0` (nền
 
 - Mô tả: Tên font dùng cho văn bản trong UI.
 - Cài đặt: `ui_font_family`
-- Mặc định: `Inter`. [Inter](https://rsms.me/inter/) đi kèm Zode, nên mặc định này chạy được trên máy không cài font nào.
+- Mặc định: `SF Pro` trên macOS, có sẵn trong hệ thống; nơi khác là [Inter](https://rsms.me/inter/), đi kèm Zode, nên mặc định chạy được trên máy không cài font nào.
 
 **Tùy chọn**
 

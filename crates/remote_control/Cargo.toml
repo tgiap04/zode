@@ -13,6 +13,7 @@ path = "src/remote_control.rs"
 doctest = false
 
 [dependencies]
+agent_notify.workspace = true
 agent_sessions.workspace = true
 agent_ui.workspace = true
 anyhow.workspace = true
@@ -44,6 +45,7 @@ worktree.workspace = true
 zode_account.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 collections.workspace = true
 db = { workspace = true, features = ["test-support"] }
 dunce.workspace = true

@@ -21,6 +21,7 @@ mod ide_heartbeat;
 mod indicator;
 mod pairing_flow;
 mod pairing_modal;
+mod push_notifications;
 mod remote_control_settings;
 mod remote_host;
 mod session_history;
@@ -39,7 +40,8 @@ use std::sync::Arc;
 
 use gpui::{App, AppContext as _, Context, Window, actions};
 use remote_relay_client::{RelayTransport, WebSocketTransport};
-use workspace::Workspace;
+use util::ResultExt as _;
+use workspace::{MultiWorkspace, Workspace};
 use zode_account::Account;
 
 pub use agent_mirror::{AgentMirror, AgentMirrorEvent};
@@ -66,6 +68,9 @@ actions!(
         /// Shows the devices trusted to control this Zode, and lets you remove
         /// them.
         ManageDevices,
+        /// Opens the question a device is waiting on: the six digits to
+        /// compare before it may control this Zode.
+        ReviewPairingRequest,
     ]
 );
 
@@ -174,6 +179,7 @@ fn install(
     host.update(cx, |host, _| host.set_sessions_available(true));
     RemoteHost::set_global(host.clone(), cx);
     turn_off_when_zode_quits(host.clone(), cx);
+    route_pairing_notification_clicks(cx);
 
     cx.observe_new({
         let host = host.clone();
@@ -186,6 +192,49 @@ fn install(
     })
     .detach();
     host
+}
+
+/// A click on the notification that says a device wants to pair. The
+/// question has to be put on screen by the click itself: bringing Zode forward
+/// is not enough when the window that comes forward is minimized, or is not a
+/// workspace window, and the device gives up after two minutes.
+pub(crate) fn route_pairing_notification_clicks(cx: &mut App) {
+    let async_cx = cx.to_async();
+    cx.on_notification_activated(move |id| {
+        if !indicator::is_pairing_notification(&id) {
+            return;
+        }
+        async_cx.update(open_pairing_question_from_anywhere);
+    });
+}
+
+/// Brings the most recently used workspace window forward and asks the
+/// question there.
+fn open_pairing_question_from_anywhere(cx: &mut App) {
+    let Some(host) = RemoteHost::global(cx) else {
+        return;
+    };
+    if host.read(cx).pending_pairing().is_none() {
+        return;
+    }
+    let windows = cx
+        .window_stack()
+        .unwrap_or_else(|| cx.windows())
+        .into_iter()
+        .filter_map(|handle| handle.downcast::<MultiWorkspace>());
+    let Some(window) = windows.into_iter().next() else {
+        log::warn!("a pairing notification was clicked, but no window can show the question");
+        return;
+    };
+    cx.activate(true);
+    window
+        .update(cx, |multi, window, cx| {
+            window.activate_window();
+            multi.workspace().update(cx, |workspace, cx| {
+                indicator::open_pairing_question(host, workspace, window, cx);
+            });
+        })
+        .log_err();
 }
 
 /// Quitting is turning remote control off. Quitting does not run the destructors
@@ -212,6 +261,11 @@ fn register_workspace(
     });
     workspace.register_action(|_, _: &Enable, _window, cx| enable_remote_control(cx));
     workspace.register_action(|_, _: &Disable, _window, cx| disable_remote_control(cx));
+    workspace.register_action(|workspace, _: &ReviewPairingRequest, window, cx| {
+        if let Some(host) = RemoteHost::global(cx) {
+            indicator::open_pairing_question(host, workspace, window, cx);
+        }
+    });
     workspace.register_action(|workspace, _: &ManageDevices, window, cx| {
         let Some(host) = RemoteHost::global(cx) else {
             return;

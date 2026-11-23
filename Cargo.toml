@@ -138,6 +138,8 @@ members = [
     "crates/refineable",
     "crates/refineable/derive_refineable",
     "crates/release_channel",
+    "crates/reminders",
+    "crates/reminders_ui",
     "crates/remote",
     "crates/remote_connection",
     "crates/remote_control",
@@ -185,6 +187,7 @@ members = [
     "crates/time_format",
     "crates/title_bar",
     "crates/toolchain_selector",
+    "crates/tray_sni",
     "crates/ui",
     "crates/ui_input",
     "crates/ui_macros",
@@ -376,6 +379,8 @@ proto = { path = "crates/proto" }
 recent_projects = { path = "crates/recent_projects" }
 refineable = { path = "crates/refineable" }
 release_channel = { path = "crates/release_channel" }
+reminders = { path = "crates/reminders" }
+reminders_ui = { path = "crates/reminders_ui" }
 remote = { path = "crates/remote" }
 remote_connection = { path = "crates/remote_connection" }
 remote_control = { path = "crates/remote_control" }
@@ -421,6 +426,7 @@ time_format = { path = "crates/time_format" }
 platform_title_bar = { path = "crates/platform_title_bar" }
 title_bar = { path = "crates/title_bar" }
 toolchain_selector = { path = "crates/toolchain_selector" }
+tray_sni = { path = "crates/tray_sni" }
 ui = { path = "crates/ui" }
 ui_input = { path = "crates/ui_input" }
 ui_macros = { path = "crates/ui_macros" }

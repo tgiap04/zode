@@ -54,7 +54,11 @@ rằng không có ai chen vào giữa.
 1. Trên thiết bị điều khiển, chọn Zode để ghép nối. Trong trình duyệt, mở
    `zodekit.com/remote`, chọn Zode từ danh sách (nó phải đang online, đã bật
    điều khiển từ xa và đăng nhập cùng tài khoản) rồi chọn **Pair**.
-2. A hiện một lời nhắc: "wants to control this Zode", kèm sáu chữ số.
+2. A hiện một lời nhắc: "wants to control this Zode", kèm sáu chữ số. Nó tự
+   mở trong cửa sổ Zode đang ở trước. Nếu A đang ở nền, một thông báo hệ thống
+   nhắc bạn chuyển sang Zode; bấm vào là lời nhắc mở ra. Trong lúc thiết bị chờ,
+   nút **Pairing Request** ở thanh trạng thái của A, và lệnh
+   `remote_control: review pairing request`, mở nó từ bất kỳ cửa sổ nào.
 3. Thiết bị điều khiển cũng hiện sáu chữ số. **Nếu giống nhau**, chọn
    **The digits match** trong trình duyệt, rồi **The Digits Match: Trust It** trên A.
    Nếu khác nhau, chọn **Digits differ** (trình duyệt) hoặc **Reject** trên A.
@@ -117,6 +121,33 @@ hỗ trợ; với Zode cũ hơn thì không có và không có gì khác thay đ
 - Một phiên chỉ xuất hiện nếu nó đã chạy trong thư mục đang mở trên A, và không nằm dưới đường dẫn
   mà A giữ riêng tư hoặc ẩn khỏi lần quét. Xem
   [Những gì không được cung cấp](#what-is-not-served).
+
+### Thông báo đẩy
+
+Với **Pro** hoặc **Team**, trình duyệt đã ghép nối với A nhận được thông báo đẩy
+khi một agent trên A cần bạn, kể cả khi trang đã đóng hoặc điện thoại đã khoá:
+
+| Sự kiện           | Khi nào                                                                             |
+| ----------------- | ----------------------------------------------------------------------------------- |
+| Đang chờ bạn      | Một tab Claude Code xin bạn duyệt quyền.                                            |
+| Đã trả lời xong   | Agent trả lời xong. Với agent không phải Claude Code, A chờ 60 giây yên lặng trước. |
+| Phiên đã kết thúc | CLI của agent đã thoát.                                                             |
+
+1. Mở `zodekit.com/remote`, kết nối tới A, rồi chọn **Bật thông báo**.
+   Trình duyệt sẽ xin quyền.
+2. Trên iPhone hoặc iPad (iOS 16.4 trở lên), trước hết thêm trang vào Màn hình
+   chính (**Chia sẻ**, rồi **Thêm vào Màn hình chính**) và mở từ đó. Safari chỉ
+   gửi thông báo đẩy cho trang được mở theo cách này.
+3. Bấm vào thông báo là mở đúng tab agent đó.
+
+- Thiết bị đang mở đúng tab agent đó thì không nhận thông báo.
+- Chọn sự kiện nào được đẩy bằng `remote_control.push_notifications` trong
+  settings (cả ba mặc định bật). Thông báo desktop của
+  `agent_finished_notification` là phần riêng và miễn phí.
+- A mã hoá từng thông báo bằng khoá chỉ trình duyệt đó giữ. Server
+  zodekit.com và dịch vụ push của Apple hay Google chuyển tiếp mà không
+  đọc được tên tab. Chúng vẫn biết lúc nào có thông báo được gửi.
+- Ở gói Free, trang báo thông báo không nằm trong gói và có nút **Xem các gói**.
 
 ## Điều khiển A từ một Zode khác
 
@@ -198,18 +229,19 @@ dừng lại và yêu cầu bạn đăng nhập lại, còn khoá và các ghép
 
 ## Giới hạn
 
-| Giới hạn                                    | Giá trị                                                      |
-| ------------------------------------------- | ------------------------------------------------------------ |
-| Zode online làm máy chủ, mỗi tài khoản      | 4                                                            |
-| Thiết bị điều khiển kết nối, mỗi tài khoản  | 8                                                            |
-| Phiên mở tới một máy chủ                    | 4 (thiết bị thứ năm bị từ chối, xem bên dưới)                |
-| Băng thông qua relay                        | Hạn mức byte theo ngày cho mỗi tài khoản (mặc định 2 GiB)    |
-| Yêu cầu liệt kê file và phiên, mỗi thiết bị | 4 cùng lúc; vượt quá thì yêu cầu được trả lời `rate_limited` |
-| Tiếp tục phiên, mỗi thiết bị                | Một lần mỗi lúc, cách nhau 3 giây; sớm hơn là `rate_limited` |
-| Ngắt khi rảnh                               | `idle_timeout_minutes`, mặc định 30                          |
-| Terminal trong dự án từ một Zode khác       | 16 cùng lúc, tính cả những cái đang đóng                     |
-| Project server đang dừng cùng lúc           | 4; dự án khác bị từ chối với `rate_limited`                  |
-| Mở kết nối relay                            | Bỏ cuộc sau 20 giây, rồi thử lại với backoff                 |
+| Giới hạn                                    | Giá trị                                                             |
+| ------------------------------------------- | ------------------------------------------------------------------- |
+| Zode online làm máy chủ, mỗi tài khoản      | 4                                                                   |
+| Thiết bị điều khiển kết nối, mỗi tài khoản  | 8                                                                   |
+| Phiên mở tới một máy chủ                    | 4 (thiết bị thứ năm bị từ chối, xem bên dưới)                       |
+| Băng thông qua relay                        | Free: 5 GiB mỗi ngày cho mỗi tài khoản; Pro và Team: không giới hạn |
+| Yêu cầu liệt kê file và phiên, mỗi thiết bị | 4 cùng lúc; vượt quá thì yêu cầu được trả lời `rate_limited`        |
+| Tiếp tục phiên, mỗi thiết bị                | Một lần mỗi lúc, cách nhau 3 giây; sớm hơn là `rate_limited`        |
+| Thông báo đẩy                               | Pro và Team; tối đa 10 mỗi phút và 60 mỗi giờ cho mỗi máy chủ       |
+| Ngắt khi rảnh                               | `idle_timeout_minutes`, mặc định 30                                 |
+| Terminal trong dự án từ một Zode khác       | 16 cùng lúc, tính cả những cái đang đóng                            |
+| Project server đang dừng cùng lúc           | 4; dự án khác bị từ chối với `rate_limited`                         |
+| Mở kết nối relay                            | Bỏ cuộc sau 20 giây, rồi thử lại với backoff                        |
 
 Thiết bị thứ năm cố kết nối tới một Zode đã có bốn thiết bị kết nối sẽ bị
 từ chối với "this Zode already has 4 devices connected; disconnect one to

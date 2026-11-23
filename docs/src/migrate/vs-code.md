@@ -173,14 +173,14 @@ You can configure most settings in the Settings Editor ({#kb zode::OpenSettings}
 
 Here’s how common VS Code settings translate:
 
-| VS Code             | Zode               | Notes                               |
-| ------------------- | ------------------ | ----------------------------------- |
-| editor.fontFamily   | buffer_font_family | Zode uses JetBrains Mono by default |
-| editor.fontSize     | buffer_font_size   | Set in pixels                       |
-| editor.tabSize      | tab_size           | Can override per language           |
-| editor.insertSpaces | insert_spaces      | Boolean                             |
-| editor.formatOnSave | format_on_save     | Works with formatter enabled        |
-| editor.wordWrap     | soft_wrap          | Supports optional wrap column       |
+| VS Code             | Zode               | Notes                                                |
+| ------------------- | ------------------ | ---------------------------------------------------- |
+| editor.fontFamily   | buffer_font_family | Zode uses SF Mono on macOS, JetBrains Mono elsewhere |
+| editor.fontSize     | buffer_font_size   | Set in pixels                                        |
+| editor.tabSize      | tab_size           | Can override per language                            |
+| editor.insertSpaces | insert_spaces      | Boolean                                              |
+| editor.formatOnSave | format_on_save     | Works with formatter enabled                         |
+| editor.wordWrap     | soft_wrap          | Supports optional wrap column                        |
 
 Zode also supports per-project settings. You can find these in the Settings Editor as well.
 

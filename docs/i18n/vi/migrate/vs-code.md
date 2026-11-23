@@ -173,14 +173,14 @@ Bạn cấu hình được phần lớn cài đặt trong Settings Editor ({#kb 
 
 Dưới đây là cách các cài đặt VS Code thường dùng được chuyển sang Zode:
 
-| VS Code             | Zode               | Ghi chú                           |
-| ------------------- | ------------------ | --------------------------------- |
-| editor.fontFamily   | buffer_font_family | Zode mặc định dùng JetBrains Mono |
-| editor.fontSize     | buffer_font_size   | Đặt theo pixel                    |
-| editor.tabSize      | tab_size           | Có thể ghi đè theo từng ngôn ngữ  |
-| editor.insertSpaces | insert_spaces      | Boolean                           |
-| editor.formatOnSave | format_on_save     | Chạy khi đã bật formatter         |
-| editor.wordWrap     | soft_wrap          | Hỗ trợ cột ngắt dòng tùy chọn     |
+| VS Code             | Zode               | Ghi chú                                                          |
+| ------------------- | ------------------ | ---------------------------------------------------------------- |
+| editor.fontFamily   | buffer_font_family | Zode mặc định dùng SF Mono trên macOS, JetBrains Mono ở nơi khác |
+| editor.fontSize     | buffer_font_size   | Đặt theo pixel                                                   |
+| editor.tabSize      | tab_size           | Có thể ghi đè theo từng ngôn ngữ                                 |
+| editor.insertSpaces | insert_spaces      | Boolean                                                          |
+| editor.formatOnSave | format_on_save     | Chạy khi đã bật formatter                                        |
+| editor.wordWrap     | soft_wrap          | Hỗ trợ cột ngắt dòng tùy chọn                                    |
 
 Zode cũng hỗ trợ cài đặt theo từng dự án. Bạn cũng tìm thấy chúng trong Settings Editor.
 

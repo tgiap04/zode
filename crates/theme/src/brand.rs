@@ -21,24 +21,32 @@ use gpui::Hsla;
 use crate::{Appearance, PlayerColor, Theme};
 
 // Packed rgb rather than `Hsla`, because `Hsla` has no const constructor.
-const ACCENT_LIGHT: u32 = 0xAB4501;
-const ACCENT_DARK: u32 = 0xFFA65E;
+// The logo's orange where the canvas allows it: on dark it is 5.9:1. On white it is
+// 3.1:1, so light takes the brand's solid orange, the deepest of the logo's range
+// that reaches 4.5:1 there.
+const ACCENT_LIGHT: u32 = 0xD04800;
+const ACCENT_DARK: u32 = 0xFD5E04;
 
-const SOLID_LIGHT: u32 = 0xAB4501;
-const SOLID_DARK: u32 = 0xF68001;
+// A filled brand control carries a white label in both appearances. A white label
+// on the logo's own orange (#FD5E04) is 3.1:1, under the 4.5:1 a label needs, so
+// the fill is the deepest orange of the logo's range that still carries it.
+const SOLID_LIGHT: u32 = 0xD04800;
+const SOLID_DARK: u32 = 0xD04800;
 
 // The pressed states move the fill away from the canvas -- darker on light,
 // lighter on dark -- rather than always darker. Darkening a saturated fill took
 // the dark theme's label to 3.65:1 two steps in, under the 4.5:1 floor; moving
 // away from the canvas raises contrast as the button is pressed instead.
-const SOLID_HOVER_LIGHT: u32 = 0x8D3901;
-const SOLID_HOVER_DARK: u32 = 0xFE8F18;
+// With a white label every state goes darker, which only raises the label's
+// contrast; on dark the darkest state still keeps 3:1 against the canvas.
+const SOLID_HOVER_LIGHT: u32 = 0xB83F00;
+const SOLID_HOVER_DARK: u32 = 0xC24300;
 
-const SOLID_ACTIVE_LIGHT: u32 = 0x6E2C01;
-const SOLID_ACTIVE_DARK: u32 = 0xFE9E36;
+const SOLID_ACTIVE_LIGHT: u32 = 0xA03700;
+const SOLID_ACTIVE_DARK: u32 = 0xB83F00;
 
 const ON_SOLID_LIGHT: u32 = 0xFFFFFF;
-const ON_SOLID_DARK: u32 = 0x341A07;
+const ON_SOLID_DARK: u32 = 0xFFFFFF;
 
 // A selection is laid under the text, so it has to stay translucent. Dark needs the
 // heavier alpha: at 0x3d the brand orange over a #121314 canvas is about 1.65:1, too

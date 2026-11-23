@@ -312,7 +312,7 @@ Note that a save will be triggered when an unsaved tab is closed, even if this i
 
 - Description: The name of a font to use for rendering text in the editor.
 - Setting: `buffer_font_family`
-- Default: `.ZodeMono`. This currently aliases to [Lilex](https://lilex.myrt.co).
+- Default: `SF Mono` on macOS, part of the system; `JetBrains Mono`, which ships with Zode, elsewhere.
 
 **Options**
 
@@ -2433,7 +2433,12 @@ Example:
 {
   "remote_control": {
     "enabled": false,
-    "idle_timeout_minutes": 30
+    "idle_timeout_minutes": 30,
+    "push_notifications": {
+      "approval": true,
+      "answered": true,
+      "ended": true
+    }
   }
 }
 ```
@@ -2442,6 +2447,7 @@ Example:
 
 - `enabled`: `boolean`
 - `idle_timeout_minutes`: `integer` minutes a connected device may go unused before it is disconnected: typing in a terminal, browsing files, listing or resuming sessions, and requests from a project opened from another Zode count as use, while pings and that project's heartbeat do not; `0` turns the limit off. See [Remote control](../remote-control.md#turn-it-on)
+- `push_notifications`: `object` with `approval`, `answered` and `ended`, each a `boolean`: which agent events are pushed to paired phones and tablets that allowed notifications. Needs a plan that includes push notifications. See [Remote control](../remote-control.md#push-notifications)
 
 ## Project Footprint Indicator
 
@@ -4179,7 +4185,7 @@ List of `integer` column numbers
 
 - Description: What font to use for the terminal. When not set, defaults to matching the editor's font.
 - Setting: `font_family`
-- Default: `null`
+- Default: `SF Mono` on macOS, `JetBrains Mono NL` elsewhere
 
 **Options**
 
@@ -5334,7 +5340,7 @@ The path of an image file on this machine; `~/` is expanded. The image is read f
 
 - Description: The name of the font to use for text in the UI.
 - Setting: `ui_font_family`
-- Default: `Inter`. [Inter](https://rsms.me/inter/) ships with Zode, so this default works on a machine with no fonts installed.
+- Default: `SF Pro` on macOS, part of the system; elsewhere [Inter](https://rsms.me/inter/), which ships with Zode, so the default works on a machine with no fonts installed.
 
 **Options**
 

@@ -222,6 +222,10 @@ trong frame data trên `stream_id` mà phản hồi nêu tên.
 | `sessions_list_reply` | `request_id`, `sessions`: `[entry]`, `more`, `next` và `unavailable_hosts` tuỳ chọn | Zode → trình duyệt |
 | `session_resume`      | `request_id`, `session_id`, `fork`                                                  | trình duyệt → Zode |
 | `session_resumed`     | `request_id`, `open_agent_id` tuỳ chọn                                              | Zode → trình duyệt |
+| `push_subscribe`      | `p256dh`, `auth`                                                                    | trình duyệt → Zode |
+| `push_unsubscribe`    | không có                                                                            | trình duyệt → Zode |
+| `page_visibility`     | `visible`, `agent_id` tuỳ chọn                                                      | trình duyệt → Zode |
+| `push_status`         | `enabled`, `reason` tuỳ chọn                                                        | Zode → trình duyệt |
 
 `status` là một trong `working`, `waiting_for_input`, `idle`, `finished`,
 `failed`; giá trị mà bên đọc không biết được đọc là unknown thay vì
@@ -235,7 +239,8 @@ Tab mở dưới dạng fork không có `session_id`. Bên đọc không biết 
 trường này thì bỏ qua chúng.
 
 `capabilities` trong `hello_ack` liệt kê những gì host phục vụ: luôn có `terminal`,
-rồi `files`, `ide` và `sessions` theo thứ tự đó, mỗi cái chỉ khi nó được phục vụ.
+rồi `files`, `ide` và `sessions` theo thứ tự đó, mỗi cái chỉ khi nó được phục vụ,
+và cuối cùng luôn có `push`.
 Yêu cầu mà capability của nó thiếu sẽ được trả lời bằng `error` code
 `unsupported`.
 
@@ -597,6 +602,39 @@ Lỗi, trong thông điệp `error` kèm `request_id`:
 
 Thiết bị gửi `sessions_list_reply` hoặc `session_resumed` sẽ nhận `malformed`:
 đó là phản hồi, không phải yêu cầu.
+
+### Push
+
+```
+→ {"t":"push_subscribe","p256dh":"BCVx…","auth":"BTBZ…"}
+← {"t":"push_status","enabled":true}
+→ {"t":"page_visibility","visible":true,"agent_id":"terminal-42"}
+```
+
+- **Capability.** Host luôn liệt kê `push`. Trình duyệt liệt kê `push` trong
+  `hello` của nó khi nó đọc được `push_status`; host chỉ gửi `push_status` cho
+  trình duyệt đó, vì trình duyệt cũ từ chối loại message nó không biết. Trình
+  duyệt chỉ gửi ba message còn lại cho host có liệt kê `push`.
+- **Khoá.** `push_subscribe` mang khoá của push subscription trong trình duyệt,
+  dạng base64url như `PushSubscription.getKey()` trả về. Khoá chỉ đi trên
+  kênh này. Trình duyệt chỉ đưa server endpoint của subscription, không bao giờ
+  đưa khoá, nên server không đọc được thông báo. Host chỉ nhận khoá từ thiết bị
+  đã ghép nối và giữ theo từng thiết bị cho tới khi có `push_unsubscribe`,
+  khi thiết bị bị quên hoặc thu hồi, hoặc khi server báo
+  subscription đã mất.
+- **Thông báo.** Khi một agent chờ duyệt, trả lời xong hoặc kết thúc, host mã
+  hoá
+  `{"v":1,"kind":"approval|answered|ended","agentId","title","host","at"}` cho
+  từng thiết bị đã đăng ký (RFC 8291, `aes128gcm`) rồi nhờ server chuyển đi.
+  Thiết bị có `page_visibility` gần nhất là đang hiện và đang xem đúng agent đó
+  thì được bỏ qua.
+- **Trạng thái.** `push_status` cho biết host có đẩy tới thiết bị này không.
+  `reason` là `not_in_plan` (gói của tài khoản không có push) hoặc `disabled`
+  (người dùng đã tắt các sự kiện trên host); bên đọc giữ nguyên reason nó
+  không biết. Host gửi nó sau `hello`, sau `push_subscribe`, và khi nó
+  thay đổi.
+
+Thiết bị gửi `push_status` sẽ nhận `malformed`.
 
 ### Lỗi
 

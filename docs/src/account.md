@@ -137,8 +137,12 @@ to do instead of failing with a code:
   device on the web, or upgrade.
 - **`.env` sync on Free** uploads nothing. Files already stored stay readable
   and removable.
-- **Remote control** pauses when the day's relay allowance is used up. It resets
-  at 00:00 UTC; Pro raises it.
+- **Remote control** on Free pauses after 5 GiB through the relay in a day. It
+  resets at 00:00 UTC; Pro and Team have no daily limit.
+- **Push notifications** from remote control are Pro and Team only. On Free,
+  the remote page says so and the remote-control menu offers an upgrade.
+- **Shared team files** are read-only once the team's plan ends. A member past
+  the seats the team pays for is told to ask the owner to add one.
 
 Nothing in the editor is switched off because of the plan. The server decides,
 so a plan you changed a minute ago takes effect at once.

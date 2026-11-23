@@ -368,7 +368,7 @@ impl ButtonCommon for Button {
 
 impl RenderOnce for Button {
     #[allow(refining_impl_trait)]
-    fn render(self, _window: &mut Window, cx: &mut App) -> ButtonLike {
+    fn render(mut self, _window: &mut Window, cx: &mut App) -> ButtonLike {
         let is_disabled = self.base.disabled;
         let is_selected = self.base.selected;
 
@@ -385,8 +385,21 @@ impl RenderOnce for Button {
         //
         // It takes precedence over `is_selected` because the fill itself does not
         // change when the button is selected, so its foreground must not either.
-        let brand_foreground = (self.base.style == ButtonStyle::Brand)
-            .then(|| Color::Custom(crate::brand_on_solid(cx)));
+        // A selected button with no selected style of its own takes the brand's
+        // solid fill with a white label, so nothing selected reads as orange text.
+        if is_selected && self.base.selected_style.is_none() {
+            self.base.selected_style = Some(ButtonStyle::Tinted(TintColor::Accent));
+        }
+        let effective_style = self
+            .base
+            .selected_style
+            .filter(|_| is_selected)
+            .unwrap_or(self.base.style);
+        let on_brand_fill = matches!(
+            effective_style,
+            ButtonStyle::Brand | ButtonStyle::Tinted(TintColor::Accent)
+        );
+        let brand_foreground = on_brand_fill.then(|| Color::Custom(crate::brand_on_solid(cx)));
 
         let label_color = if is_disabled {
             Color::Disabled
@@ -406,7 +419,7 @@ impl RenderOnce for Button {
                     this.child(
                         Icon::new(IconName::LoadCircle)
                             .size(IconSize::Small)
-                            .color(Color::Muted)
+                            .color(brand_foreground.unwrap_or(Color::Muted))
                             .with_rotate_animation(2),
                     )
                 })
@@ -433,11 +446,15 @@ impl RenderOnce for Button {
                         .child(
                             Label::new(label)
                                 .color(label_color)
+                                .weight(gpui::FontWeight::MEDIUM)
                                 .size(self.label_size.unwrap_or_default())
                                 .when_some(self.alpha, |this, alpha| this.alpha(alpha))
                                 .when(self.truncate, |this| this.truncate()),
                         )
-                        .children(self.key_binding),
+                        .children(self.key_binding.map(|key_binding| match brand_foreground {
+                            Some(foreground) if !is_disabled => key_binding.color(foreground),
+                            _ => key_binding,
+                        })),
                 )
                 .when_some(self.end_icon, |this, icon| {
                     this.child(if is_disabled {

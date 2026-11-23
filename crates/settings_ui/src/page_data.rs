@@ -236,7 +236,7 @@ fn general_page(cx: &App) -> SettingsPage {
         ]
     }
 
-    fn remote_control_section() -> [SettingsPageItem; 3] {
+    fn remote_control_section() -> [SettingsPageItem; 6] {
         [
             SettingsPageItem::SectionHeader("Remote Control"),
             SettingsPageItem::SettingItem(SettingItem {
@@ -276,6 +276,415 @@ fn general_page(cx: &App) -> SettingsPage {
                             .remote_control
                             .get_or_insert_default()
                             .idle_timeout_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Push When an Agent Needs Approval",
+                description: "Notify paired phones and tablets that allowed notifications when an agent is waiting for your approval.",
+                field: Box::new(SettingField {
+                    json_path: Some("remote_control.push_notifications.approval"),
+                    pick: |settings_content| {
+                        settings_content
+                            .remote_control
+                            .as_ref()
+                            .and_then(|settings| settings.push_notifications.as_ref())
+                            .and_then(|push| push.approval.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .remote_control
+                            .get_or_insert_default()
+                            .push_notifications
+                            .get_or_insert_default()
+                            .approval = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Push When an Agent Finishes",
+                description: "Notify paired phones and tablets that allowed notifications when an agent finishes answering. For agents whose transcript Zode cannot read, this is a guess made after a minute of quiet.",
+                field: Box::new(SettingField {
+                    json_path: Some("remote_control.push_notifications.answered"),
+                    pick: |settings_content| {
+                        settings_content
+                            .remote_control
+                            .as_ref()
+                            .and_then(|settings| settings.push_notifications.as_ref())
+                            .and_then(|push| push.answered.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .remote_control
+                            .get_or_insert_default()
+                            .push_notifications
+                            .get_or_insert_default()
+                            .answered = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Push When an Agent Session Ends",
+                description: "Notify paired phones and tablets that allowed notifications when an agent's session ends.",
+                field: Box::new(SettingField {
+                    json_path: Some("remote_control.push_notifications.ended"),
+                    pick: |settings_content| {
+                        settings_content
+                            .remote_control
+                            .as_ref()
+                            .and_then(|settings| settings.push_notifications.as_ref())
+                            .and_then(|push| push.ended.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .remote_control
+                            .get_or_insert_default()
+                            .push_notifications
+                            .get_or_insert_default()
+                            .ended = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
+    fn reminders_section() -> [SettingsPageItem; 16] {
+        [
+            SettingsPageItem::SectionHeader("Reminders"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Reminders",
+                description: "Remind me to drink water, rest my eyes and stand up, and run a focus timer.",
+                field: Box::new(SettingField {
+                    json_path: Some("reminders.enabled"),
+                    pick: |settings_content| {
+                        settings_content
+                            .reminders
+                            .as_ref()
+                            .and_then(|reminders| reminders.enabled.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content.reminders.get_or_insert_default().enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Show Reminders As",
+                description: "A bubble under the tray icon, falling back to an OS notification when the icon cannot be seen, or always an OS notification.",
+                field: Box::new(SettingField {
+                    json_path: Some("reminders.style"),
+                    pick: |settings_content| {
+                        settings_content
+                            .reminders
+                            .as_ref()
+                            .and_then(|reminders| reminders.style.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content.reminders.get_or_insert_default().style = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Tray Icon",
+                description: "Show the Zode icon in the system tray (the macOS menu bar). Clicking it opens the reminders panel.",
+                field: Box::new(SettingField {
+                    json_path: Some("tray_icon"),
+                    pick: |settings_content| settings_content.tray_icon.as_ref(),
+                    write: |settings_content, value| {
+                        settings_content.tray_icon = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Drink Water",
+                description: "Remind me to drink water.",
+                field: Box::new(SettingField {
+                    json_path: Some("reminders.water.enabled"),
+                    pick: |settings_content| {
+                        settings_content
+                            .reminders
+                            .as_ref()
+                            .and_then(|reminders| reminders.water.as_ref())
+                            .and_then(|reminder| reminder.enabled.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .reminders
+                            .get_or_insert_default()
+                            .water
+                            .get_or_insert_default()
+                            .enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Drink Water Every",
+                description: "Minutes between water reminders.",
+                field: Box::new(SettingField {
+                    json_path: Some("reminders.water.interval_minutes"),
+                    pick: |settings_content| {
+                        settings_content
+                            .reminders
+                            .as_ref()
+                            .and_then(|reminders| reminders.water.as_ref())
+                            .and_then(|reminder| reminder.interval_minutes.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .reminders
+                            .get_or_insert_default()
+                            .water
+                            .get_or_insert_default()
+                            .interval_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Eye Break",
+                description: "Remind me every so often to look at something 6 m (20 ft) away for 20 seconds.",
+                field: Box::new(SettingField {
+                    json_path: Some("reminders.eye_break.enabled"),
+                    pick: |settings_content| {
+                        settings_content
+                            .reminders
+                            .as_ref()
+                            .and_then(|reminders| reminders.eye_break.as_ref())
+                            .and_then(|reminder| reminder.enabled.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .reminders
+                            .get_or_insert_default()
+                            .eye_break
+                            .get_or_insert_default()
+                            .enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Eye Break Every",
+                description: "Minutes between eye breaks.",
+                field: Box::new(SettingField {
+                    json_path: Some("reminders.eye_break.interval_minutes"),
+                    pick: |settings_content| {
+                        settings_content
+                            .reminders
+                            .as_ref()
+                            .and_then(|reminders| reminders.eye_break.as_ref())
+                            .and_then(|reminder| reminder.interval_minutes.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .reminders
+                            .get_or_insert_default()
+                            .eye_break
+                            .get_or_insert_default()
+                            .interval_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Stand Up",
+                description: "Remind me to stand up and move.",
+                field: Box::new(SettingField {
+                    json_path: Some("reminders.stand_up.enabled"),
+                    pick: |settings_content| {
+                        settings_content
+                            .reminders
+                            .as_ref()
+                            .and_then(|reminders| reminders.stand_up.as_ref())
+                            .and_then(|reminder| reminder.enabled.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .reminders
+                            .get_or_insert_default()
+                            .stand_up
+                            .get_or_insert_default()
+                            .enabled = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Stand Up Every",
+                description: "Minutes between stand-up reminders.",
+                field: Box::new(SettingField {
+                    json_path: Some("reminders.stand_up.interval_minutes"),
+                    pick: |settings_content| {
+                        settings_content
+                            .reminders
+                            .as_ref()
+                            .and_then(|reminders| reminders.stand_up.as_ref())
+                            .and_then(|reminder| reminder.interval_minutes.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .reminders
+                            .get_or_insert_default()
+                            .stand_up
+                            .get_or_insert_default()
+                            .interval_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Focus Length",
+                description: "Minutes in a focus round.",
+                field: Box::new(SettingField {
+                    json_path: Some("reminders.focus.focus_minutes"),
+                    pick: |settings_content| {
+                        settings_content
+                            .reminders
+                            .as_ref()
+                            .and_then(|reminders| reminders.focus.as_ref())
+                            .and_then(|reminder| reminder.focus_minutes.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .reminders
+                            .get_or_insert_default()
+                            .focus
+                            .get_or_insert_default()
+                            .focus_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Short Break Length",
+                description: "Minutes in the break after each focus round.",
+                field: Box::new(SettingField {
+                    json_path: Some("reminders.focus.short_break_minutes"),
+                    pick: |settings_content| {
+                        settings_content
+                            .reminders
+                            .as_ref()
+                            .and_then(|reminders| reminders.focus.as_ref())
+                            .and_then(|reminder| reminder.short_break_minutes.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .reminders
+                            .get_or_insert_default()
+                            .focus
+                            .get_or_insert_default()
+                            .short_break_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Long Break Length",
+                description: "Minutes in the long break.",
+                field: Box::new(SettingField {
+                    json_path: Some("reminders.focus.long_break_minutes"),
+                    pick: |settings_content| {
+                        settings_content
+                            .reminders
+                            .as_ref()
+                            .and_then(|reminders| reminders.focus.as_ref())
+                            .and_then(|reminder| reminder.long_break_minutes.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .reminders
+                            .get_or_insert_default()
+                            .focus
+                            .get_or_insert_default()
+                            .long_break_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Rounds Before a Long Break",
+                description: "Focus rounds between long breaks.",
+                field: Box::new(SettingField {
+                    json_path: Some("reminders.focus.rounds_before_long_break"),
+                    pick: |settings_content| {
+                        settings_content
+                            .reminders
+                            .as_ref()
+                            .and_then(|reminders| reminders.focus.as_ref())
+                            .and_then(|reminder| reminder.rounds_before_long_break.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .reminders
+                            .get_or_insert_default()
+                            .focus
+                            .get_or_insert_default()
+                            .rounds_before_long_break = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Wait While Away",
+                description: "Reminders that come due after this many minutes without any input wait until you are back.",
+                field: Box::new(SettingField {
+                    json_path: Some("reminders.idle_pause_minutes"),
+                    pick: |settings_content| {
+                        settings_content
+                            .reminders
+                            .as_ref()
+                            .and_then(|reminders| reminders.idle_pause_minutes.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .reminders
+                            .get_or_insert_default()
+                            .idle_pause_minutes = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Snooze Length",
+                description: "Minutes Snooze puts a reminder off.",
+                field: Box::new(SettingField {
+                    json_path: Some("reminders.snooze_minutes"),
+                    pick: |settings_content| {
+                        settings_content
+                            .reminders
+                            .as_ref()
+                            .and_then(|reminders| reminders.snooze_minutes.as_ref())
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .reminders
+                            .get_or_insert_default()
+                            .snooze_minutes = value;
                     },
                 }),
                 metadata: None,
@@ -410,6 +819,7 @@ fn general_page(cx: &App) -> SettingsPage {
             general_settings_section(cx),
             security_section(),
             remote_control_section(),
+            reminders_section(),
             workspace_restoration_section(),
             scoped_settings_section(),
             privacy_section(),

@@ -1,0 +1,21 @@
+[package]
+name = "tray_sni"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/tray_sni.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+futures.workspace = true
+image.workspace = true
+log.workspace = true
+smol.workspace = true
+zbus.workspace = true

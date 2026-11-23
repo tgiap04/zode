@@ -343,6 +343,24 @@ pub fn init(http_client: Arc<dyn HttpClient>, cx: &mut App) {
     })
     .detach();
 
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        let app_id = ReleaseChannel::global(cx).app_id();
+        cx.background_spawn(async move {
+            use util::ResultExt as _;
+            let home_dir = PathBuf::from(env::var("HOME").context("no HOME env var set")?);
+            // Where script/install.sh writes the entry.
+            let desktop_entry = home_dir
+                .join(".local/share/applications")
+                .join(format!("{app_id}.desktop"));
+            refresh_desktop_entry_after_icon_change(&desktop_entry)
+                .context("failed to refresh the desktop entry's icon")
+                .log_err();
+            anyhow::Ok(())
+        })
+        .detach();
+    }
+
     let version = release_channel::AppVersion::global(cx);
     let auto_updater = cx.new(|cx| AutoUpdater::new(version, http_client, cx));
     cx.set_global(GlobalAutoUpdate(Some(auto_updater)));
@@ -953,6 +971,49 @@ async fn install_release_linux(
     .map(Some)
 }
 
+/// Marks the desktop entry as modified when the icon it names is newer than the entry, and says
+/// whether it did.
+///
+/// An update rsyncs a new icon over the old one at the same path, but the entry that names it
+/// is written once by script/install.sh and never again, so desktop environments that cache
+/// icons by entry (KDE's sycoca, GNOME's app list) keep showing the old icon until the next
+/// login. A newer modification time on the entry is what makes them read it again. This runs
+/// from the new version on start, because the update that ships it is installed by the old
+/// version's code.
+#[cfg(any(target_os = "linux", target_os = "freebsd", test))]
+fn refresh_desktop_entry_after_icon_change(desktop_entry: &Path) -> Result<bool> {
+    let contents = match std::fs::read_to_string(desktop_entry) {
+        Ok(contents) => contents,
+        // No entry: not installed through script/install.sh (a distribution package, flatpak).
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("could not read the desktop entry"),
+    };
+    let Some(icon) = contents
+        .lines()
+        .find_map(|line| line.strip_prefix("Icon="))
+        .map(|icon| Path::new(icon.trim()))
+        .filter(|icon| icon.is_absolute())
+    else {
+        // An icon theme name is looked up by the desktop itself, not cached per entry.
+        return Ok(false);
+    };
+    let icon_modified = match std::fs::metadata(icon) {
+        Ok(metadata) => metadata.modified()?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("could not read the icon's modification time"),
+    };
+    let entry_modified = std::fs::metadata(desktop_entry)?.modified()?;
+    if icon_modified <= entry_modified {
+        return Ok(false);
+    }
+    std::fs::File::options()
+        .write(true)
+        .open(desktop_entry)
+        .and_then(|entry| entry.set_modified(std::time::SystemTime::now()))
+        .context("could not update the desktop entry's modification time")?;
+    Ok(true)
+}
+
 /// Extracts the release tarball under `work_dir` and rsyncs its app folder over the running
 /// install's prefix, or into `<home_dir>/.local` when the running binary is not inside one.
 async fn install_linux_tarball(
@@ -1244,6 +1305,95 @@ mod tests {
     }
 
     use super::*;
+
+    /// A desktop entry naming `icon`, with the icon and the entry last modified at the given
+    /// offsets from now.
+    fn desktop_entry_with_icon(
+        directory: &Path,
+        icon_line: &str,
+        icon_age: Option<Duration>,
+        entry_age: Duration,
+    ) -> PathBuf {
+        let now = std::time::SystemTime::now();
+        let icon = directory.join("zode.png");
+        if let Some(icon_age) = icon_age {
+            std::fs::write(&icon, b"png").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&icon)
+                .unwrap()
+                .set_modified(now - icon_age)
+                .unwrap();
+        }
+        let entry = directory.join("io.github.tgiap04.zode.desktop");
+        let icon_line = icon_line.replace("{icon}", &icon.to_string_lossy());
+        std::fs::write(&entry, format!("[Desktop Entry]\nName=Zode\n{icon_line}\n")).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&entry)
+            .unwrap()
+            .set_modified(now - entry_age)
+            .unwrap();
+        entry
+    }
+
+    fn modified(path: &Path) -> std::time::SystemTime {
+        std::fs::metadata(path).unwrap().modified().unwrap()
+    }
+
+    #[test]
+    fn an_icon_newer_than_its_desktop_entry_marks_the_entry_modified() {
+        let directory = tempdir().unwrap();
+        let entry = desktop_entry_with_icon(
+            directory.path(),
+            "Icon={icon}",
+            Some(Duration::from_secs(60)),
+            Duration::from_secs(3600),
+        );
+        let before = modified(&entry);
+
+        assert!(refresh_desktop_entry_after_icon_change(&entry).unwrap());
+        assert!(modified(&entry) > before + Duration::from_secs(3000));
+        assert!(
+            !refresh_desktop_entry_after_icon_change(&entry).unwrap(),
+            "a second start leaves the entry alone"
+        );
+    }
+
+    #[test]
+    fn a_desktop_entry_newer_than_its_icon_is_left_alone() {
+        let directory = tempdir().unwrap();
+        let entry = desktop_entry_with_icon(
+            directory.path(),
+            "Icon={icon}",
+            Some(Duration::from_secs(3600)),
+            Duration::from_secs(60),
+        );
+        let before = modified(&entry);
+
+        assert!(!refresh_desktop_entry_after_icon_change(&entry).unwrap());
+        assert_eq!(modified(&entry), before);
+    }
+
+    #[test]
+    fn a_desktop_entry_without_a_file_icon_is_left_alone() {
+        let directory = tempdir().unwrap();
+        for icon_line in ["Icon=zode", "Name[en]=Zode", "Icon={icon}"] {
+            // The last case names a file icon that does not exist.
+            let entry =
+                desktop_entry_with_icon(directory.path(), icon_line, None, Duration::from_secs(60));
+            let before = modified(&entry);
+            assert!(
+                !refresh_desktop_entry_after_icon_change(&entry).unwrap(),
+                "{icon_line}"
+            );
+            assert_eq!(modified(&entry), before, "{icon_line}");
+        }
+        assert!(
+            !refresh_desktop_entry_after_icon_change(&directory.path().join("missing.desktop"))
+                .unwrap()
+        );
+    }
 
     pub(super) struct InstallOverride(pub Rc<dyn Fn(&Path, &AsyncApp) -> Result<Option<PathBuf>>>);
     impl Global for InstallOverride {}

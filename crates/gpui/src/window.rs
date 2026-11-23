@@ -936,6 +936,7 @@ pub struct Window {
     pub(crate) invalidator: WindowInvalidator,
     pub(crate) removed: bool,
     pub(crate) platform_window: Box<dyn PlatformWindow>,
+    kind: crate::WindowKind,
     display_id: Option<DisplayId>,
     sprite_atlas: Arc<dyn PlatformAtlas>,
     text_system: Arc<WindowTextSystem>,
@@ -1256,7 +1257,7 @@ impl Window {
             WindowParams {
                 bounds: window_bounds.get_bounds(),
                 titlebar,
-                kind,
+                kind: kind.clone(),
                 is_movable,
                 is_resizable,
                 is_minimizable,
@@ -1551,6 +1552,7 @@ impl Window {
             invalidator,
             removed: false,
             platform_window,
+            kind,
             display_id,
             sprite_atlas,
             text_system,
@@ -2201,6 +2203,16 @@ impl Window {
     /// Sets the application identifier.
     pub fn set_app_id(&mut self, app_id: &str) {
         self.platform_window.set_app_id(app_id);
+    }
+
+    /// The kind this window was opened as.
+    pub fn kind(&self) -> &crate::WindowKind {
+        &self.kind
+    }
+
+    /// The window background appearance in effect.
+    pub fn background_appearance(&self) -> WindowBackgroundAppearance {
+        self.platform_window.background_appearance()
     }
 
     /// Sets the window background appearance.

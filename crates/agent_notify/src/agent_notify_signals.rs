@@ -7,11 +7,12 @@
 use std::time::Duration;
 
 use agent_ui::{AgentView, TurnEvent};
-use gpui::{Context, EntityId, Notification, SharedString};
+use gpui::{App, Context, EntityId, Notification, SharedString};
 use util::ResultExt as _;
 
 use crate::agent_notify_settings::AgentFinishedNotificationSetting;
 use crate::agent_notify_watch::AgentNotifier;
+use crate::{AgentAttention, AttentionKind, HEURISTIC_ANSWER_MIN_GAP, HEURISTIC_ANSWER_QUIET};
 
 /// How long a transcript-reported turn end is held before it is believed.
 ///
@@ -33,6 +34,7 @@ impl AgentNotifier {
         title: SharedString,
         cx: &mut Context<Self>,
     ) {
+        let attention_wanted = self.attention_wanted;
         let Some(watched) = self.watched.get_mut(&id) else {
             return;
         };
@@ -50,19 +52,36 @@ impl AgentNotifier {
             // clearing `notified` re-arms the next falling edge.
             watched.quiet = None;
             watched.notified = false;
+            watched.attention_quiet = None;
+            watched.answer_raised = false;
             return;
         }
 
-        if watched.notified {
+        // Armed once per quiet stretch, so the wait counts from its start.
+        if attention_wanted && !watched.answer_raised && watched.attention_quiet.is_none() {
+            let title = title.clone();
+            watched.attention_quiet = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(HEURISTIC_ANSWER_QUIET).await;
+                this.update(cx, |this, cx| {
+                    if let Some(watched) = this.watched.get_mut(&id) {
+                        watched.attention_quiet = None;
+                    }
+                    this.raise_answer(id, &title, false, cx);
+                })
+                .log_err();
+            }));
+        }
+
+        if watched.notified || !cx.can_post_notifications() {
             // Already notified for this answer -- a pause after the pause
-            // must not arm a second timer.
+            // must not arm a second timer -- or nothing could be posted.
             return;
         }
 
         let period = AgentFinishedNotificationSetting::quiet_period(cx);
         watched.quiet = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(period).await;
-            this.update(cx, |this, cx| this.fire_answered(id, &title, cx))
+            this.update(cx, |this, cx| this.fire_answered(id, &title, false, cx))
                 .log_err();
         }));
     }
@@ -92,26 +111,36 @@ impl AgentNotifier {
                 // suppresses the announcement.
                 watched.quiet = None;
                 watched.notified = false;
+                watched.attention_quiet = None;
+                watched.answer_raised = false;
             }
             // The transcript is polled on its own clock, so an event can be
             // delivered after the exit waiter has already fired; announcing
             // it would put "Finished answering" behind "Session ended".
             TurnEvent::Ended | TurnEvent::ApprovalNeeded if watched.exited => {}
             TurnEvent::Ended => {
-                if watched.notified {
+                if watched.notified || !(cx.can_post_notifications() || self.attention_wanted) {
                     return;
                 }
                 watched.quiet = Some(cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(TURN_END_CONFIRMATION).await;
-                    this.update(cx, |this, cx| this.fire_answered(id, &title, cx))
+                    this.update(cx, |this, cx| this.fire_answered(id, &title, true, cx))
                         .log_err();
                 }));
             }
             TurnEvent::ApprovalNeeded => {
+                if self.attention_wanted && !watched.approval_raised {
+                    watched.approval_raised = true;
+                    cx.emit(AgentAttention {
+                        tab: id,
+                        title: title.clone(),
+                        kind: AttentionKind::ApprovalNeeded,
+                    });
+                }
                 if watched.approval_notified {
                     return;
                 }
-                if !AgentFinishedNotificationSetting::is_enabled(cx) {
+                if !posts_to_the_desktop(cx) {
                     return;
                 }
                 cx.post_notification(Notification {
@@ -121,7 +150,10 @@ impl AgentNotifier {
                 });
                 watched.approval_notified = true;
             }
-            TurnEvent::ApprovalCleared => watched.approval_notified = false,
+            TurnEvent::ApprovalCleared => {
+                watched.approval_notified = false;
+                watched.approval_raised = false;
+            }
         }
     }
 
@@ -134,7 +166,17 @@ impl AgentNotifier {
     /// true when it started. The one thing that *can* change between arming
     /// and firing without going through this tab's own edges is the setting
     /// itself, which is why that alone is re-read here.
-    fn fire_answered(&mut self, id: EntityId, title: &SharedString, cx: &mut Context<Self>) {
+    fn fire_answered(
+        &mut self,
+        id: EntityId,
+        title: &SharedString,
+        from_transcript: bool,
+        cx: &mut Context<Self>,
+    ) {
+        // The heuristic path raises its event on its own, longer, clock.
+        if from_transcript {
+            self.raise_answer(id, title, true, cx);
+        }
         let Some(watched) = self.watched.get_mut(&id) else {
             return;
         };
@@ -142,7 +184,7 @@ impl AgentNotifier {
         if watched.notified {
             return;
         }
-        if !AgentFinishedNotificationSetting::is_enabled(cx) {
+        if !posts_to_the_desktop(cx) {
             return;
         }
 
@@ -152,6 +194,41 @@ impl AgentNotifier {
             body: "Finished answering".into(),
         });
         watched.notified = true;
+    }
+
+    /// Raises the answer in progress as an event, once.
+    fn raise_answer(
+        &mut self,
+        id: EntityId,
+        title: &SharedString,
+        from_transcript: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.attention_wanted {
+            return;
+        }
+        let now = cx.background_executor().now();
+        let Some(watched) = self.watched.get_mut(&id) else {
+            return;
+        };
+        if watched.answer_raised {
+            return;
+        }
+        watched.answer_raised = true;
+        if !from_transcript {
+            let too_soon = watched.heuristic_answer_raised_at.is_some_and(|raised_at| {
+                now.saturating_duration_since(raised_at) < HEURISTIC_ANSWER_MIN_GAP
+            });
+            if too_soon {
+                return;
+            }
+            watched.heuristic_answer_raised_at = Some(now);
+        }
+        cx.emit(AgentAttention {
+            tab: id,
+            title: title.clone(),
+            kind: AttentionKind::Answered { from_transcript },
+        });
     }
 
     /// Fires once the tab's CLI has actually exited.
@@ -174,8 +251,18 @@ impl AgentNotifier {
         watched.exited = true;
         watched.notified = false;
         watched.approval_notified = false;
+        watched.attention_quiet = None;
+        watched.answer_raised = false;
+        watched.approval_raised = false;
+        if self.attention_wanted {
+            cx.emit(AgentAttention {
+                tab: id,
+                title: title.clone(),
+                kind: AttentionKind::Ended,
+            });
+        }
 
-        if !AgentFinishedNotificationSetting::is_enabled(cx) {
+        if !posts_to_the_desktop(cx) {
             return;
         }
 
@@ -211,6 +298,12 @@ impl AgentNotifier {
             })
             .log_err();
     }
+}
+
+/// Whether a desktop notification is both wanted and possible here. The
+/// [`AgentAttention`] events are raised either way.
+fn posts_to_the_desktop(cx: &App) -> bool {
+    cx.can_post_notifications() && AgentFinishedNotificationSetting::is_enabled(cx)
 }
 
 /// Whether a tab needs to be looked at again, given which terminal (if any)

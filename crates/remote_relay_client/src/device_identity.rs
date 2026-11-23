@@ -287,11 +287,18 @@ fn bearer_header(bearer: &str) -> Result<HeaderValue, DirectoryError> {
 /// mentioning it: the body is the account service's to write, and a revoked
 /// device deletes everything it has paired.
 fn says_device_revoked(body: &[u8]) -> bool {
+    error_slug(body).as_deref() == Some("device_revoked")
+}
+
+/// The `error` of a JSON error body, if the body is one.
+fn error_slug(body: &[u8]) -> Option<String> {
     #[derive(Deserialize)]
     struct ErrorBody {
         error: String,
     }
-    serde_json::from_slice::<ErrorBody>(body).is_ok_and(|body| body.error == "device_revoked")
+    serde_json::from_slice::<ErrorBody>(body)
+        .ok()
+        .map(|body| body.error)
 }
 
 /// Tells the account service this device's public key, so that a browser can
@@ -379,6 +386,104 @@ pub async fn list_devices(
             }
         })
         .collect())
+}
+
+/// How soon a push service should wake the browser for a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushUrgency {
+    /// Somebody is waited on: an agent asking for approval.
+    High,
+    Normal,
+}
+
+impl PushUrgency {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::High => "high",
+            Self::Normal => "normal",
+        }
+    }
+}
+
+/// One encrypted message for one device, for the account service to hand to
+/// that device's push service.
+#[derive(Debug, Clone, Copy)]
+pub struct PushRequest<'a> {
+    pub device_id: &'a str,
+    /// An `aes128gcm` body; see `web_push_crypto`.
+    pub payload: &'a [u8],
+    pub urgency: PushUrgency,
+    /// Groups messages about the same thing, so a newer one replaces an older
+    /// one still waiting. At most 32 base64url characters.
+    pub topic: &'a str,
+}
+
+/// What became of a push.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PushOutcome {
+    Accepted,
+    /// The account's plan does not include pushes.
+    NotInPlan,
+    /// The device has no subscription, or its push service has dropped it:
+    /// its keys are of no further use.
+    SubscriptionGone,
+    /// Not delivered this time, for a reason that may pass. Nothing is retried.
+    Dropped(String),
+}
+
+#[derive(Serialize)]
+struct PushBody<'a> {
+    #[serde(rename = "deviceId")]
+    device_id: &'a str,
+    payload: String,
+    urgency: &'static str,
+    topic: &'a str,
+}
+
+/// Asks the account service to push `request` to the device it names.
+pub async fn send_push(
+    http_client: &Arc<dyn HttpClient>,
+    api_url: &str,
+    bearer: &str,
+    request: PushRequest<'_>,
+) -> PushOutcome {
+    match try_send_push(http_client, api_url, bearer, request).await {
+        Ok(outcome) => outcome,
+        Err(error) => PushOutcome::Dropped(error.to_string()),
+    }
+}
+
+async fn try_send_push(
+    http_client: &Arc<dyn HttpClient>,
+    api_url: &str,
+    bearer: &str,
+    request: PushRequest<'_>,
+) -> Result<PushOutcome, DirectoryError> {
+    let body = serde_json::to_string(&PushBody {
+        device_id: request.device_id,
+        payload: URL_SAFE_NO_PAD.encode(request.payload),
+        urgency: request.urgency.as_str(),
+        topic: request.topic,
+    })
+    .map_err(|error| DirectoryError::Unreachable(error.to_string()))?;
+    let http_request = Request::builder()
+        .method("POST")
+        .uri(format!("{api_url}/remote/push"))
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .header("Authorization", bearer_header(bearer)?)
+        .body(AsyncBody::from(body))
+        .map_err(|error| DirectoryError::Unreachable(error.to_string()))?;
+    let (status, response_body) = send(http_client, http_request).await?;
+    let slug = error_slug(&response_body);
+    Ok(match (status, slug.as_deref()) {
+        (200..=299, _) => PushOutcome::Accepted,
+        (402, Some("push_not_in_plan")) => PushOutcome::NotInPlan,
+        (404, Some("no_subscription" | "device_not_found")) | (410, _) => {
+            PushOutcome::SubscriptionGone
+        }
+        (other, _) => PushOutcome::Dropped(DirectoryError::Rejected(other).to_string()),
+    })
 }
 
 /// Sends the request and returns the status with at most
@@ -1065,5 +1170,134 @@ mod tests {
         let name = local_device_name();
         assert!(!name.is_empty());
         assert!(name.chars().count() <= MAX_DEVICE_NAME_CHARS);
+    }
+
+    fn push_request(urgency: PushUrgency) -> PushRequest<'static> {
+        PushRequest {
+            device_id: "phone-1",
+            payload: &[0xde, 0xad, 0xbe, 0xef],
+            urgency,
+            topic: "0123abcd",
+        }
+    }
+
+    #[gpui::test]
+    async fn a_push_is_posted_for_the_device_under_the_bearer(_cx: &mut TestAppContext) {
+        let seen = Arc::new(parking_lot::Mutex::new(None));
+        let client: Arc<dyn HttpClient> = FakeHttpClient::create({
+            let seen = seen.clone();
+            move |request| {
+                let seen = seen.clone();
+                async move {
+                    let (parts, mut body) = request.into_parts();
+                    let mut text = String::new();
+                    body.read_to_string(&mut text).await.unwrap();
+                    let authorization = parts.headers.get("authorization").cloned();
+                    *seen.lock() = Some((
+                        parts.method.to_string(),
+                        parts.uri.to_string(),
+                        authorization,
+                        text,
+                    ));
+                    Ok(Response::builder()
+                        .status(202)
+                        .body(AsyncBody::default())
+                        .unwrap())
+                }
+            }
+        });
+        let outcome = send_push(
+            &client,
+            "https://api.test/api",
+            "tok",
+            push_request(PushUrgency::High),
+        )
+        .await;
+        assert_eq!(outcome, PushOutcome::Accepted);
+        let (method, uri, authorization, body) = seen.lock().clone().expect("a request");
+        assert_eq!(method, "POST");
+        assert_eq!(uri, "https://api.test/api/remote/push");
+        let authorization = authorization.expect("an authorization header");
+        assert_eq!(authorization.to_str().ok(), Some("Bearer tok"));
+        assert!(authorization.is_sensitive());
+        let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "deviceId": "phone-1",
+                "payload": "3q2-7w",
+                "urgency": "high",
+                "topic": "0123abcd",
+            })
+        );
+    }
+
+    #[gpui::test]
+    async fn each_answer_to_a_push_means_what_the_contract_says(_cx: &mut TestAppContext) {
+        let cases: [(u16, &'static str, PushOutcome); 9] = [
+            (202, "", PushOutcome::Accepted),
+            (200, "{}", PushOutcome::Accepted),
+            (
+                402,
+                r#"{"error":"push_not_in_plan"}"#,
+                PushOutcome::NotInPlan,
+            ),
+            (
+                404,
+                r#"{"error":"no_subscription"}"#,
+                PushOutcome::SubscriptionGone,
+            ),
+            (
+                404,
+                r#"{"error":"device_not_found"}"#,
+                PushOutcome::SubscriptionGone,
+            ),
+            (
+                410,
+                r#"{"error":"subscription_gone"}"#,
+                PushOutcome::SubscriptionGone,
+            ),
+            (
+                402,
+                r#"{"error":"payment_required"}"#,
+                PushOutcome::Dropped("the account service answered 402".into()),
+            ),
+            (
+                404,
+                "<html>not found</html>",
+                PushOutcome::Dropped("the account service answered 404".into()),
+            ),
+            (
+                429,
+                r#"{"error":"push_rate_limited"}"#,
+                PushOutcome::Dropped("the account service answered 429".into()),
+            ),
+        ];
+        for (status, body, expected) in cases {
+            let client = answering(status, move || AsyncBody::from(body));
+            assert_eq!(
+                send_push(
+                    &client,
+                    "https://api.test/api",
+                    "t",
+                    push_request(PushUrgency::Normal)
+                )
+                .await,
+                expected,
+                "{status} {body}"
+            );
+        }
+        let unreachable: Arc<dyn HttpClient> =
+            FakeHttpClient::create(|_| async { Err(anyhow::anyhow!("offline")) });
+        assert!(matches!(
+            send_push(
+                &unreachable,
+                "https://api.test/api",
+                "t",
+                push_request(PushUrgency::Normal)
+            )
+            .await,
+            PushOutcome::Dropped(_)
+        ));
     }
 }

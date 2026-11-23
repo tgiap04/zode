@@ -54,7 +54,11 @@ that nobody sits in between.
 1. On the controlling device, choose the Zode to pair with. In a browser, open
    `zodekit.com/remote`, pick the Zode from the list (it must be online, with
    remote control on and signed in to the same account) and choose **Pair**.
-2. A shows a prompt: "wants to control this Zode", with six digits.
+2. A shows a prompt: "wants to control this Zode", with six digits. It opens
+   by itself in the Zode window in front. If A is in the background, a system
+   notification asks you to switch to Zode; clicking it opens the prompt. While
+   the device waits, a **Pairing Request** button in A's status bar, and the
+   `remote_control: review pairing request` command, open it from any window.
 3. The controlling device shows six digits too. **If they are the same**, choose
    **The digits match** in the browser, then **The Digits Match: Trust It** on A.
    If they differ, choose **Digits differ** (browser) or **Reject** on A.
@@ -117,6 +121,33 @@ supports it; with an older Zode it is not there and nothing else changes.
 - A session appears only if it ran in a folder open on A, and not under a path
   A keeps private or hides from the scan. See
   [What is not served](#what-is-not-served).
+
+### Push notifications
+
+With **Pro** or **Team**, a browser paired with A can get a push notification
+when an agent on A needs you, even with the page closed or the phone locked:
+
+| Event              | When                                                                                                    |
+| ------------------ | ------------------------------------------------------------------------------------------------------- |
+| Waiting for you    | A Claude Code tab asks for your approval.                                                               |
+| Finished answering | The agent finished its reply. For agents other than Claude Code, A waits for 60 seconds of quiet first. |
+| Session ended      | The agent's CLI exited.                                                                                 |
+
+1. Open `zodekit.com/remote`, connect to A, and choose **Turn on notifications**.
+   The browser asks for permission.
+2. On an iPhone or iPad (iOS 16.4 or later), first add the page to the Home
+   Screen (**Share**, then **Add to Home Screen**) and open it from there. Safari
+   gives push notifications only to a page opened that way.
+3. Tapping a notification opens that agent's tab.
+
+- A device that is showing that agent's tab right now is not notified.
+- Choose which events are pushed with `remote_control.push_notifications` in
+  your settings (all three are on by default). The desktop notifications of
+  `agent_finished_notification` are separate and are free.
+- A encrypts each notification with keys that only that browser holds. The
+  zodekit.com server, and Apple's or Google's push service, forward it without
+  being able to read the tab's name. They do see when a notification is sent.
+- On Free, the page says notifications are not part of your plan and offers **See plans**.
 
 ## Control A from another Zode
 
@@ -203,9 +234,10 @@ stops and asks you to sign in again, and the key and pairings stay.
 | Zodes online as hosts, per account         | 4                                                          |
 | Controlling devices connected, per account | 8                                                          |
 | Sessions open to one host                  | 4 (a fifth device is refused, see below)                   |
-| Bandwidth through the relay                | A daily byte quota per account (2 GiB by default)          |
+| Bandwidth through the relay                | Free: 5 GiB a day per account; Pro and Team: unlimited     |
 | File and session list requests, per device | 4 at once; past that, requests are answered `rate_limited` |
 | Session resumes, per device                | One at a time, 3 seconds apart; sooner is `rate_limited`   |
+| Push notifications                         | Pro and Team; at most 10 a minute and 60 an hour per host  |
 | Idle disconnect                            | `idle_timeout_minutes`, 30 by default                      |
 | Terminals in a project from another Zode   | 16 at once, counting ones that are still closing           |
 | Project servers being stopped at once      | 4; another project is refused with `rate_limited`          |

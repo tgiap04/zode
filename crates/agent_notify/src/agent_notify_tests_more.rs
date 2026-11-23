@@ -3,25 +3,69 @@
 //! module doc for the boundary both files share (real bookkeeping, a
 //! synthetic answering signal).
 
+use std::{cell::RefCell, rc::Rc, time::Duration};
+
+use agent_ui::TurnEvent;
 use gpui::{AppContext as _, EntityId, TestAppContext};
 
-use crate::GlobalAgentNotifier;
 use crate::agent_notify_signals::needs_reread;
-use crate::agent_notify_tests::{notifier, open_tab};
+use crate::agent_notify_tests::{notifier, open_tab, open_tab_where};
+use crate::{AgentAttention, AgentNotifier, AttentionKind};
 
+/// A platform that cannot post -- macOS outside an app bundle, which is every
+/// `cargo run` build -- still tells another device: only the desktop
+/// notification depends on the platform.
 #[gpui::test]
-fn a_platform_that_cannot_post_builds_nothing(cx: &mut TestAppContext) {
-    // Deliberately no `cx.set_notifications_supported(true)` -- the default
-    // is `false`, which stands in for a platform with no implementation.
-    cx.update(|cx| crate::init(cx));
-
-    cx.update(|cx| {
-        assert!(
-            !cx.has_global::<GlobalAgentNotifier>(),
-            "a platform that cannot post notifications must get no entity, \
-             no subscriptions and no timers"
-        );
+async fn a_platform_that_cannot_post_still_raises_attention_but_posts_nothing(
+    cx: &mut TestAppContext,
+) {
+    let (_workspace, id, cx) = open_tab_where(cx, false).await;
+    let notifier = cx.update(|_, cx| AgentNotifier::global(cx));
+    assert!(
+        notifier.is_some(),
+        "the notifier is built whatever the platform can post"
+    );
+    let Some(notifier) = notifier else {
+        return;
+    };
+    notifier.update(cx, |notifier, _| notifier.set_attention_wanted(true));
+    let heard = Rc::new(RefCell::new(Vec::new()));
+    let _subscription = cx.update(|_, cx| {
+        let heard = heard.clone();
+        cx.subscribe(&notifier, move |_, event: &AgentAttention, _| {
+            heard.borrow_mut().push(event.kind);
+        })
     });
+
+    notifier.update(cx, |n, cx| {
+        n.on_turn(
+            id,
+            TurnEvent::ApprovalNeeded,
+            true,
+            "Claude Code".into(),
+            cx,
+        );
+        n.on_turn(id, TurnEvent::Ended, true, "Claude Code".into(), cx);
+    });
+    cx.executor().advance_clock(Duration::from_secs(3));
+    cx.run_until_parked();
+    notifier.update(cx, |n, cx| n.fire_exit(id, &"Claude Code".into(), cx));
+    cx.run_until_parked();
+
+    assert_eq!(
+        *heard.borrow(),
+        vec![
+            AttentionKind::ApprovalNeeded,
+            AttentionKind::Answered {
+                from_transcript: true
+            },
+            AttentionKind::Ended,
+        ]
+    );
+    assert!(
+        cx.posted_notifications().is_empty(),
+        "nothing is posted where the platform cannot show it"
+    );
 }
 
 /// A guard against a future contributor "improving" this feature by adding

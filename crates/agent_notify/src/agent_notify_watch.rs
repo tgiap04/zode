@@ -6,12 +6,14 @@
 use std::collections::HashMap;
 
 use agent_ui::{AgentView, AgentViewEvent};
-use gpui::{AnyWindowHandle, Context, Entity, EntityId, Subscription, Task, WeakEntity};
+use gpui::{
+    AnyWindowHandle, Context, Entity, EntityId, EventEmitter, Subscription, Task, WeakEntity,
+};
 use project::AgentId;
 use util::ResultExt as _;
 use workspace::Workspace;
 
-use crate::agent_notify_signals::needs_reread;
+use crate::{AgentAttention, agent_notify_signals::needs_reread};
 
 /// What is kept alive per watched agent tab.
 ///
@@ -51,6 +53,18 @@ pub(crate) struct Watched {
     pub(crate) approval_notified: bool,
     /// Awaits this tab's CLI exiting.
     pub(crate) exit: Option<Task<()>>,
+    /// The heuristic path's longer wait before an answer is raised as an
+    /// [`AgentAttention`](crate::AgentAttention). Cancelled by the same edges
+    /// that cancel `quiet`, by dropping it.
+    pub(crate) attention_quiet: Option<Task<()>>,
+    /// Whether the answer in progress has been raised as an event. Kept apart
+    /// from `notified`, which only a posted desktop notification sets.
+    pub(crate) answer_raised: bool,
+    /// Whether the pending approval has been raised as an event.
+    pub(crate) approval_raised: bool,
+    /// When the heuristic path last raised an answer, which a keystroke or a
+    /// resize can otherwise make it do once a minute.
+    pub(crate) heuristic_answer_raised_at: Option<std::time::Instant>,
     _activity: Subscription,
     _identity: Subscription,
     _release: Subscription,
@@ -59,8 +73,13 @@ pub(crate) struct Watched {
 /// Watches every `AgentView` in the process and notifies on its two triggers.
 pub struct AgentNotifier {
     pub(crate) watched: HashMap<EntityId, Watched>,
+    /// Whether anybody listens for [`AgentAttention`] -- remote control while
+    /// it runs. Nothing is armed or raised for it otherwise.
+    pub(crate) attention_wanted: bool,
     _observe_new: Subscription,
 }
+
+impl EventEmitter<AgentAttention> for AgentNotifier {}
 
 impl AgentNotifier {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
@@ -86,6 +105,7 @@ impl AgentNotifier {
         });
         Self {
             watched: HashMap::default(),
+            attention_wanted: false,
             _observe_new: observe_new,
         }
     }
@@ -138,6 +158,10 @@ impl AgentNotifier {
                 exited: false,
                 approval_notified: false,
                 exit: None,
+                attention_quiet: None,
+                answer_raised: false,
+                approval_raised: false,
+                heuristic_answer_raised_at: None,
                 _activity: activity,
                 _identity: identity,
                 _release: release,

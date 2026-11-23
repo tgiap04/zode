@@ -34,6 +34,7 @@ pub struct CopyButton {
     id: ElementId,
     message: SharedString,
     icon_size: IconSize,
+    size: ButtonSize,
     disabled: bool,
     tooltip_label: SharedString,
     visible_on_hover: Option<SharedString>,
@@ -46,6 +47,7 @@ impl CopyButton {
             id: id.into(),
             message: message.into(),
             icon_size: IconSize::Small,
+            size: ButtonSize::Default,
             disabled: false,
             tooltip_label: "Copy".into(),
             visible_on_hover: None,
@@ -55,6 +57,11 @@ impl CopyButton {
 
     pub fn icon_size(mut self, icon_size: IconSize) -> Self {
         self.icon_size = icon_size;
+        self
+    }
+
+    pub fn size(mut self, size: ButtonSize) -> Self {
+        self.size = size;
         self
     }
 
@@ -102,6 +109,7 @@ impl RenderOnce for CopyButton {
         let button = IconButton::new(id, icon)
             .icon_color(color)
             .icon_size(self.icon_size)
+            .size(self.size)
             .disabled(self.disabled)
             .tooltip(Tooltip::text(tooltip))
             .on_click(move |_, window, cx| {

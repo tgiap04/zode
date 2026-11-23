@@ -254,7 +254,10 @@ impl DiagnosticBlock {
                 ),
             )
             .child(
+                // The block is laid out one editor line tall, and a button
+                // taller than that line grows every diagnostic by a row.
                 CopyButton::new(copy_button_id, self.copy_message.clone())
+                    .size(ButtonSize::Compact)
                     .tooltip_label("Copy Diagnostic"),
             )
             .into_any_element()

@@ -279,6 +279,9 @@ impl<T: ButtonBuilder, const COLS: usize, const ROWS: usize> RenderOnce
     for ToggleButtonGroup<T, COLS, ROWS>
 {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // A selected entry is the brand's solid fill, so its label and icon are the
+        // white drawn on that fill rather than an orange that would vanish into it.
+        let selected_foreground = Color::Custom(crate::brand_on_solid(cx));
         let custom_height = match self.size {
             ToggleButtonGroupSize::Custom(height) => Some(height),
             _ => None,
@@ -337,7 +340,7 @@ impl<T: ButtonBuilder, const COLS: usize, const ROWS: usize> RenderOnce
                                     this.py_2()
                                         .child(Icon::new(icon).size(IconSize::XSmall).map(|this| {
                                             if entry_index == self.selected_index || selected {
-                                                this.color(Color::Accent)
+                                                this.color(selected_foreground)
                                             } else {
                                                 this.color(Color::Muted)
                                             }
@@ -345,7 +348,7 @@ impl<T: ButtonBuilder, const COLS: usize, const ROWS: usize> RenderOnce
                                 })
                                 .child(Label::new(label).size(self.label_size).when(
                                     entry_index == self.selected_index || selected,
-                                    |this| this.color(Color::Accent),
+                                    |this| this.color(selected_foreground),
                                 )),
                         )
                         .when_some(tooltip, |this, tooltip| {

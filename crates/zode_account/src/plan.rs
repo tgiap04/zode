@@ -55,7 +55,9 @@ pub struct SyncDeviceUsage {
 pub struct PlanLimits {
     pub sync_devices: SyncDeviceUsage,
     pub env_sync: bool,
-    pub relay_daily_bytes: u64,
+    /// `None` is unlimited: paid plans, and everyone while the server
+    /// enforces no plan.
+    pub relay_daily_bytes: Option<u64>,
     pub team_vault: bool,
 }
 
@@ -150,7 +152,7 @@ struct PlanResponse {
 struct LimitsResponse {
     sync_devices: SyncDevicesResponse,
     env_sync: bool,
-    relay_daily_bytes: u64,
+    relay_daily_bytes: Option<u64>,
     team_vault: bool,
 }
 
@@ -182,6 +184,8 @@ pub enum PlanLimitReason {
     EnvSyncNotInPlan,
     TeamVaultNotInPlan,
     TeamInactive,
+    /// A member past the paid seats of a team that is still live.
+    TeamSeatUnavailable,
     /// A reason added on the server after this build, carried as its slug.
     Other(String),
 }
@@ -223,6 +227,7 @@ impl PlanLimit {
             Some("env_sync_not_in_plan") => PlanLimitReason::EnvSyncNotInPlan,
             Some("team_vault_not_in_plan") => PlanLimitReason::TeamVaultNotInPlan,
             Some("team_inactive") => PlanLimitReason::TeamInactive,
+            Some("team_seat_unavailable") => PlanLimitReason::TeamSeatUnavailable,
             Some(other) => PlanLimitReason::Other(other.to_string()),
             None => PlanLimitReason::Other("http_402".into()),
         };
@@ -260,6 +265,9 @@ impl PlanLimit {
             }
             PlanLimitReason::TeamInactive => {
                 "Your team's plan has ended. Shared files are read-only.".to_string()
+            }
+            PlanLimitReason::TeamSeatUnavailable => {
+                "Your team has more members than paid seats, and you are past them. Ask the team owner to add a seat.".to_string()
             }
             PlanLimitReason::Other(slug) => format!(
                 "Your plan does not cover this ({slug}). See your plan on the web."
@@ -340,7 +348,7 @@ mod tests {
             PlanLimits {
                 sync_devices: SyncDeviceUsage { used: 3, max: None },
                 env_sync: true,
-                relay_daily_bytes: 21_474_836_480,
+                relay_daily_bytes: Some(21_474_836_480),
                 team_vault: true,
             }
         );
@@ -381,6 +389,31 @@ mod tests {
         );
         assert_eq!(plan.upgrade_url, "https://zodekit.com/pricing");
         assert_eq!(plan.manage_url, "https://zodekit.com/account/billing");
+    }
+
+    /// Paid plans, and everyone while the server enforces no plan, have no
+    /// relay cap; the server says so with `null`. Older servers send a number.
+    #[test]
+    fn an_unlimited_relay_is_null_and_does_not_lose_the_plan() {
+        let mut body = full_plan();
+        body["limits"]["relayDailyBytes"] = serde_json::Value::Null;
+        let plan = PlanSummary::parse(&body.to_string(), WEB).expect("a valid plan");
+        assert_eq!(plan.limits.relay_daily_bytes, None);
+        assert!(plan.limits.env_sync, "the other limits are kept");
+
+        body["limits"]["relayDailyBytes"] = 5_368_709_120u64.into();
+        let plan = PlanSummary::parse(&body.to_string(), WEB).expect("a valid plan");
+        assert_eq!(plan.limits.relay_daily_bytes, Some(5_368_709_120));
+    }
+
+    /// A member past the paid seats of a team that is still active: the plan has
+    /// not ended, and only the owner can fix it, by adding a seat.
+    #[test]
+    fn a_member_past_the_paid_seats_is_told_to_ask_the_owner() {
+        let limit = PlanLimit::from_body(r#"{"error":"team_seat_unavailable"}"#, WEB);
+        let sentence = limit.sentence();
+        assert!(sentence.contains("owner"), "{sentence}");
+        assert!(!sentence.contains("ended"), "{sentence}");
     }
 
     #[test]

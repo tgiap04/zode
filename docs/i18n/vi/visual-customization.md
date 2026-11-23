@@ -39,9 +39,9 @@ Cài đặt `icon_theme` vẫn còn — mặc định là `"Material Icon Theme"
 ## Phông chữ
 
 ```json [settings]
-  // UI Font. Zode's default is the bundled "Inter". Use ".SystemUIFont" for the
-  // default system font (SF Pro on macOS), or ".ZodeSans" to follow whichever
-  // sans Zode ships with rather than naming it
+  // UI Font. Zode's default is SF Pro on macOS, the bundled "Inter" elsewhere.
+  // Use ".SystemUIFont" for the system font of any platform, or ".ZodeSans" to
+  // follow whichever sans Zode ships with rather than naming it
   "ui_font_family": ".SystemUIFont",
   "ui_font_weight": 400, // Font weight in standard CSS units from 100 to 900.
   "ui_font_size": 16,

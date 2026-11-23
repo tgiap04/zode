@@ -217,6 +217,14 @@ mod tests {
         assert_eq!(defaults["buffer_font_family"], "JetBrains Mono");
         assert_eq!(defaults["terminal"]["font_family"], "JetBrains Mono NL");
 
+        // macOS takes Apple's own fonts instead. They are not files this app
+        // ships -- Apple's license forbids that -- but part of every Mac, which
+        // `gpui_macos` reaches by these names; its tests load them.
+        let macos = &defaults["macos"];
+        assert_eq!(macos["ui_font_family"], "SF Pro");
+        assert_eq!(macos["buffer_font_family"], "SF Mono");
+        assert_eq!(macos["terminal"]["font_family"], "SF Mono");
+
         // Every weight, not just Regular: a missing Bold is synthesised by the
         // platform into a smeared fake that nobody notices until it is shipped.
         let fonts = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

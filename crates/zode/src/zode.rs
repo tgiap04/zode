@@ -364,14 +364,17 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
     workspace::panel_size_prune::prune_orphaned_panel_sizes(app_state.fs.clone(), cx)
         .detach_and_log_err(cx);
 
-    // Gated on the capability rather than the setting: an unsupported platform
-    // then never builds the watcher entity at all, so it costs nothing -- no
-    // subscriptions, no timers -- for the life of the process. The setting
-    // itself is read live inside the entity, so toggling it still takes
-    // effect immediately once the capability is present.
-    if cx.can_post_notifications() {
-        agent_notify::init(cx);
+    // Not gated on the capability: what an agent wants somebody to know also
+    // reaches paired devices through remote control, which must work where this
+    // machine cannot post a notification itself -- macOS outside an app
+    // bundle, which is every `cargo run` build. `init` gates the desktop side
+    // on the capability, and arms nothing for remote control while it is off.
+    if !cx.can_post_notifications() {
+        log::debug!(
+            "desktop notifications are unavailable; agent events reach paired devices only"
+        );
     }
+    agent_notify::init(cx);
 
     // Gated the way the status-bar indicator is: where the OS will not hold
     // the display, the always-on action would be a palette entry that can
@@ -379,6 +382,10 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
     if cx.can_keep_display_awake() {
         keep_awake::init(cx);
     }
+
+    // Off by default; with the `reminders` setting off it holds no timer.
+    reminders::init(cx);
+    reminders_ui::init(cx);
 
     // Switched off by default, and built to do nothing while it is: no
     // connection is opened and no terminal is watched until the
@@ -1141,6 +1148,27 @@ fn initialize_pane(
             toolbar.add_item(image_view_toolbar, window, cx);
         })
     });
+}
+
+/// Gives every window the theme's background, after a settings change.
+///
+/// Pop-ups are left alone: they choose their own background -- the reminders
+/// panel and bubble draw on the system's material -- and the theme's would
+/// replace it with a plain fill.
+pub fn apply_theme_window_background(cx: &mut App) {
+    let background_appearance = cx.theme().window_background_appearance();
+    for window in cx.windows() {
+        // On Linux the panel is an ordinary window; see `reminders_ui`.
+        let is_reminders_panel = window.downcast::<reminders_ui::RemindersPanel>().is_some();
+        let result = window.update(cx, |_, window, _| {
+            if *window.kind() != WindowKind::PopUp && !is_reminders_panel {
+                window.set_background_appearance(background_appearance);
+            }
+        });
+        if let Err(error) = result {
+            log::debug!("could not update a window's background: {error:#}");
+        }
+    }
 }
 
 fn open_about_window(cx: &mut App) {
@@ -6123,6 +6151,62 @@ mod tests {
             2,
             "Case 3: Windows should still exist after cancelling quit"
         );
+    }
+
+    #[gpui::test]
+    fn pop_ups_keep_their_own_background_when_settings_change(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
+        });
+        struct Empty;
+        impl Render for Empty {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                gpui::Empty
+            }
+        }
+        let open = |kind: WindowKind,
+                    background: gpui::WindowBackgroundAppearance,
+                    cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                cx.open_window(
+                    WindowOptions {
+                        kind,
+                        window_background: background,
+                        ..Default::default()
+                    },
+                    |_, cx| cx.new(|_| Empty),
+                )
+                .unwrap()
+            })
+        };
+        let pop_up = open(
+            WindowKind::PopUp,
+            gpui::WindowBackgroundAppearance::Vibrancy,
+            cx,
+        );
+        let normal = open(
+            WindowKind::Normal,
+            gpui::WindowBackgroundAppearance::Vibrancy,
+            cx,
+        );
+
+        cx.update(apply_theme_window_background);
+
+        let theme_background = cx.update(|cx| cx.theme().window_background_appearance());
+        let background = |handle: WindowHandle<Empty>, cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                handle
+                    .update(cx, |_, window, _| window.background_appearance())
+                    .unwrap()
+            })
+        };
+        assert_eq!(
+            background(pop_up, cx),
+            gpui::WindowBackgroundAppearance::Vibrancy
+        );
+        assert_eq!(background(normal, cx), theme_background);
     }
 
     #[gpui::test]

@@ -842,6 +842,11 @@ pub(crate) fn check_scripts() -> NamedJob {
         named::bash!("./script/shellcheck-scripts error")
     }
 
+    /// Whether a release is signed or refused is decided in shell; this pins it.
+    fn test_macos_signing() -> Step<Run> {
+        named::bash!("./script/test-macos-signing")
+    }
+
     fn check_xtask_workflows() -> Step<Run> {
         named::bash!(indoc::indoc! {r#"
             cargo xtask workflows
@@ -858,6 +863,7 @@ pub(crate) fn check_scripts() -> NamedJob {
             .runs_on(runners::LINUX_SMALL)
             .add_step(steps::checkout_repo())
             .add_step(run_shellcheck())
+            .add_step(test_macos_signing())
             .add_step(download_actionlint().id("get_actionlint"))
             .add_step(run_actionlint())
             .add_step(cache_rust_dependencies_namespace())

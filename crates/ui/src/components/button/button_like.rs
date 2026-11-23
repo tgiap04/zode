@@ -78,11 +78,14 @@ impl TintColor {
             // `ButtonLikeStyles`), which makes the tint's legibility a property of
             // this background alone: measured at 7.86:1 on the dark surface and
             // 13.52:1 on the light one.
+            // The brand's solid fill with a white label, the same as a brand
+            // button and a switch that is on: a selected or highlighted control
+            // reads as one orange across the app.
             TintColor::Accent => ButtonLikeStyles {
-                background: crate::brand_accent(cx).opacity(0.1),
-                border_color: crate::brand_accent(cx).opacity(0.4),
-                label_color: cx.theme().colors().text,
-                icon_color: cx.theme().colors().text,
+                background: crate::brand_solid(cx),
+                border_color: crate::brand_solid(cx),
+                label_color: crate::brand_on_solid(cx),
+                icon_color: crate::brand_on_solid(cx),
             },
             TintColor::Error => ButtonLikeStyles {
                 background: cx.theme().status().error_background,
@@ -109,11 +112,11 @@ impl TintColor {
 impl From<TintColor> for Color {
     fn from(tint: TintColor) -> Self {
         match tint {
-            // The tint's background and border come from `brand_accent`, which is
-            // what `Color::Selected` resolves to. `Color::Accent` reads the theme's
-            // `text_accent`, which a user's override can move, and would then put a
-            // different colour on the glyph than on the tint around it.
-            TintColor::Accent => Color::Selected,
+            // The tint is the brand's solid fill, which carries a white glyph in
+            // both appearances (`brand_on_solid`). This conversion has no `App`,
+            // so it names the colour directly; `brand_answers_the_same_white_on_solid`
+            // pins the palette to it.
+            TintColor::Accent => Color::Custom(gpui::white()),
             TintColor::Error => Color::Error,
             TintColor::Warning => Color::Warning,
             TintColor::Success => Color::Success,
@@ -306,6 +309,11 @@ impl ButtonStyle {
                 label_color: crate::brand_on_solid(cx),
                 icon_color: crate::brand_on_solid(cx),
             },
+            ButtonStyle::Tinted(TintColor::Accent) => {
+                let mut styles = TintColor::Accent.button_like_style(cx);
+                styles.background = crate::brand_solid_hovered(cx);
+                styles
+            }
             ButtonStyle::Tinted(tint) => {
                 let mut styles = tint.button_like_style(cx);
                 let theme = cx.theme();
@@ -361,6 +369,11 @@ impl ButtonStyle {
                 label_color: crate::brand_on_solid(cx),
                 icon_color: crate::brand_on_solid(cx),
             },
+            ButtonStyle::Tinted(TintColor::Accent) => {
+                let mut styles = TintColor::Accent.button_like_style(cx);
+                styles.background = crate::brand_solid_active(cx);
+                styles
+            }
             ButtonStyle::Tinted(tint) => tint.button_like_style(cx),
             ButtonStyle::Subtle => ButtonLikeStyles {
                 background: cx.theme().colors().ghost_element_active,
@@ -412,6 +425,11 @@ impl ButtonStyle {
                 label_color: crate::brand_on_solid(cx),
                 icon_color: crate::brand_on_solid(cx),
             },
+            ButtonStyle::Tinted(TintColor::Accent) => {
+                let mut styles = TintColor::Accent.button_like_style(cx);
+                styles.border_color = cx.theme().colors().border_focused;
+                styles
+            }
             ButtonStyle::Tinted(tint) => tint.button_like_style(cx),
             ButtonStyle::Subtle => ButtonLikeStyles {
                 background: cx.theme().colors().ghost_element_background,
@@ -520,10 +538,10 @@ pub enum ButtonSize {
 impl ButtonSize {
     pub fn rems(self) -> Rems {
         match self {
-            ButtonSize::Large => rems_from_px(32.),
-            ButtonSize::Medium => rems_from_px(28.),
-            ButtonSize::Default => rems_from_px(22.),
-            ButtonSize::Compact => rems_from_px(18.),
+            ButtonSize::Large => rems_from_px(36.),
+            ButtonSize::Medium => rems_from_px(30.),
+            ButtonSize::Default => rems_from_px(26.),
+            ButtonSize::Compact => rems_from_px(20.),
             ButtonSize::None => rems_from_px(16.),
         }
     }
@@ -932,5 +950,25 @@ impl Component for ButtonLike {
                 ])
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gpui::TestAppContext;
+
+    use super::*;
+
+    /// A selected accent button is the brand's solid fill, so pressing it has to
+    /// darken that fill the way pressing a `Brand` button does; the tint's own
+    /// pressed colour is a different, lighter orange.
+    #[gpui::test]
+    fn a_pressed_accent_button_darkens_the_brand_fill(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            theme::init(theme::LoadThemes::JustBase, cx);
+            let pressed = ButtonStyle::Tinted(TintColor::Accent).active(cx);
+            assert_eq!(pressed.background, crate::brand_solid_active(cx));
+            assert_eq!(pressed.label_color, crate::brand_on_solid(cx));
+        });
     }
 }

@@ -176,6 +176,16 @@ pub struct SettingsContent {
     /// its CLI exits.
     pub agent_finished_notification: Option<AgentFinishedNotificationContent>,
 
+    /// Reminders to drink water, rest the eyes and stand up, and a focus timer
+    /// that alternates work and breaks. Each interval is yours to set.
+    pub reminders: Option<RemindersContent>,
+
+    /// Whether to show the Zode icon in the system tray (the macOS menu bar).
+    /// Clicking it opens the reminders panel.
+    ///
+    /// Default: true
+    pub tray_icon: Option<bool>,
+
     /// Lets another of your devices, signed in to the same account, watch and
     /// type into the agents and terminals running in this Zode.
     pub remote_control: Option<RemoteControlSettingsContent>,
@@ -1249,6 +1259,107 @@ pub struct ReplSettingsContent {
     pub output_max_height_lines: Option<usize>,
 }
 
+/// Reminders and the focus timer.
+///
+/// Every interval is in minutes and is clamped to 1..=480; a value outside that
+/// range is replaced by the default.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct RemindersContent {
+    /// Whether reminders run at all. Off stops every reminder and the focus
+    /// timer.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
+    /// How a reminder is shown: a bubble under the tray icon, or an OS
+    /// notification. A bubble falls back to an OS notification whenever the
+    /// tray icon cannot be seen, such as behind a full-screen app.
+    ///
+    /// Default: bubble
+    pub style: Option<ReminderStyle>,
+    /// Reminders that come due after this many minutes without any input on
+    /// the computer wait until you are back, instead of firing at an empty
+    /// desk. Where the system cannot say how long it has been idle (Linux),
+    /// nothing is held.
+    ///
+    /// Default: 5
+    pub idle_pause_minutes: Option<u32>,
+    /// How long "Snooze" puts a reminder off.
+    ///
+    /// Default: 5
+    pub snooze_minutes: Option<u32>,
+    /// A reminder to drink water.
+    ///
+    /// Default: on, every 45 minutes
+    pub water: Option<ReminderContent>,
+    /// The 20-20-20 rule: every so often, look at something 20 feet (6 m) away
+    /// for 20 seconds.
+    ///
+    /// Default: on, every 20 minutes
+    pub eye_break: Option<ReminderContent>,
+    /// A reminder to stand up and move.
+    ///
+    /// Default: on, every 60 minutes
+    pub stand_up: Option<ReminderContent>,
+    /// The focus timer (Pomodoro): work, then a short break, and a long break
+    /// after a set number of rounds. It runs only when started.
+    pub focus: Option<FocusTimerContent>,
+}
+
+/// One periodic reminder.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct ReminderContent {
+    /// Whether this reminder runs.
+    pub enabled: Option<bool>,
+    /// Minutes between reminders.
+    pub interval_minutes: Option<u32>,
+}
+
+/// The focus timer's lengths, in minutes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct FocusTimerContent {
+    /// Length of a focus round.
+    ///
+    /// Default: 25
+    pub focus_minutes: Option<u32>,
+    /// Length of the break after each round.
+    ///
+    /// Default: 5
+    pub short_break_minutes: Option<u32>,
+    /// Length of the break after every `rounds_before_long_break` rounds.
+    ///
+    /// Default: 15
+    pub long_break_minutes: Option<u32>,
+    /// How many focus rounds come before a long break.
+    ///
+    /// Default: 4
+    pub rounds_before_long_break: Option<u32>,
+}
+
+/// How a reminder is shown.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ReminderStyle {
+    /// A bubble under the tray icon, or an OS notification when the icon
+    /// cannot be seen.
+    #[default]
+    Bubble,
+    /// Always an OS notification.
+    System,
+}
+
 /// Settings for OS notifications when an agent finishes answering.
 ///
 /// One object rather than two flat keys: `quiet_period_ms` alone means
@@ -1305,6 +1416,29 @@ pub struct RemoteControlSettingsContent {
     ///
     /// Default: 30
     pub idle_timeout_minutes: Option<u64>,
+    /// Which agent events are pushed as notifications to the phones and
+    /// tablets paired for remote control, while remote control is on. A device
+    /// that already shows the agent concerned is not pushed to.
+    pub push_notifications: Option<RemoteControlPushContent>,
+}
+
+/// Which agent events reach paired devices as push notifications.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct RemoteControlPushContent {
+    /// An agent is waiting for your approval.
+    ///
+    /// Default: true
+    pub approval: Option<bool>,
+    /// An agent finished answering. For agents whose transcript Zode cannot
+    /// read this is a guess made after a minute of quiet, which a long-running
+    /// command can also cause.
+    ///
+    /// Default: true
+    pub answered: Option<bool>,
+    /// An agent's session ended.
+    ///
+    /// Default: true
+    pub ended: Option<bool>,
 }
 
 /// Settings for configuring the which-key popup behaviour.

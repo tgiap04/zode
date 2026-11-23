@@ -158,6 +158,7 @@ impl LinuxCommon {
 pub(crate) struct LinuxPlatform<P> {
     pub(crate) inner: P,
     notifications: NotificationState,
+    tray: crate::linux::TrayState,
 }
 
 impl<P> LinuxPlatform<P> {
@@ -165,6 +166,7 @@ impl<P> LinuxPlatform<P> {
         Self {
             inner,
             notifications: NotificationState::default(),
+            tray: Default::default(),
         }
     }
 }
@@ -247,6 +249,19 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
             self.background_executor(),
             self.foreground_executor(),
         );
+    }
+
+    fn set_tray_icon(&self, icon: Option<gpui::TrayIcon>) {
+        self.tray
+            .set_icon(icon, self.background_executor(), self.foreground_executor());
+    }
+
+    fn on_tray_icon_click(&self, callback: Box<dyn FnMut(Option<gpui::TrayIconAnchor>)>) {
+        self.tray.on_click(callback);
+    }
+
+    fn tray_icon_visible(&self) -> bool {
+        self.tray.visible()
     }
 
     fn run(&self, on_finish_launching: Box<dyn FnOnce()>) {
