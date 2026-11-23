@@ -1,0 +1,39 @@
+[package]
+name = "github"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/github.rs"
+
+[features]
+default = []
+# An in-memory backend with a builder, so the panel can be tested without
+# reaching GitHub.
+test-support = ["dep:parking_lot"]
+
+[dependencies]
+anyhow.workspace = true
+credentials_provider.workspace = true
+futures.workspace = true
+gpui.workspace = true
+http_client.workspace = true
+log.workspace = true
+parking_lot = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+url.workspace = true
+util.workspace = true
+which.workspace = true
+
+[dev-dependencies]
+github = { path = ".", features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
+http_client = { workspace = true, features = ["test-support"] }

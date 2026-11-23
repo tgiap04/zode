@@ -2305,6 +2305,233 @@ async fn test_remote_git_branches(cx: &mut TestAppContext, server_cx: &mut TestA
     assert_eq!(server_branch.name(), "totally-new-branch");
 }
 
+/// A fork's pull request is fetched by refspec on the server, and the branch
+/// made from it starts at the fetched commit rather than at HEAD.
+#[gpui::test]
+async fn test_remote_git_fetches_a_refspec_and_branches_from_a_base(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(
+        path!("/code"),
+        json!({
+            "project1": {
+                ".git": {},
+                "README.md": "# project 1",
+            },
+        }),
+    )
+    .await;
+    let dot_git = Path::new(path!("/code/project1/.git"));
+    fs.set_remote_for_repo(dot_git, "upstream", "https://github.com/octo/repo.git");
+    fs.insert_branches(dot_git, &["main"]);
+    fs.with_git_state(dot_git, false, |state| {
+        state
+            .remote_refs
+            .entry("upstream".to_string())
+            .or_default()
+            .insert("refs/pull/7/head".to_string(), "f0rk".to_string());
+    })
+    .unwrap();
+
+    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
+    project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/code/project1"), true, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    let repository = project.update(cx, |project, cx| project.active_repository(cx).unwrap());
+
+    let fetch_options = git::repository::FetchOptions::Refspec {
+        remote: git::repository::Remote {
+            name: "upstream".into(),
+        },
+        source: "refs/pull/7/head".into(),
+        destination: "refs/remotes/upstream/pull/7/head".into(),
+    };
+    let askpass = cx.update(|cx| askpass::AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {}));
+    cx.update(|cx| {
+        repository.update(cx, |repository, cx| {
+            repository.fetch(fetch_options, askpass, cx)
+        })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let fetched = fs
+        .with_git_state(dot_git, false, |state| {
+            state.refs.get("refs/remotes/upstream/pull/7/head").cloned()
+        })
+        .unwrap();
+    assert_eq!(fetched.as_deref(), Some("f0rk"));
+
+    cx.update(|cx| {
+        repository.update(cx, |repository, _| {
+            repository.create_branch(
+                "pr-7".to_string(),
+                Some("refs/remotes/upstream/pull/7/head".to_string()),
+            )
+        })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let branch_head = fs
+        .with_git_state(dot_git, false, |state| {
+            state.refs.get("refs/heads/pr-7").cloned()
+        })
+        .unwrap();
+    assert_eq!(
+        branch_head.as_deref(),
+        Some("f0rk"),
+        "the base must reach the server"
+    );
+    let shown = cx
+        .update(|cx| {
+            repository.update(cx, |repository, _| {
+                repository.show("refs/heads/pr-7".to_string())
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        shown.sha.as_ref(),
+        "f0rk",
+        "the checkout reads the new branch's commit back over the wire"
+    );
+}
+
+/// What an older server does with a base it does not know about: it makes
+/// the branch from HEAD. Read back, the branch's commit tells that apart
+/// from the fetched one. A base that names nothing is refused, as git does.
+#[gpui::test]
+async fn test_remote_git_branch_made_without_its_base_starts_at_head(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(
+        path!("/code"),
+        json!({
+            "project1": {
+                ".git": {},
+                "README.md": "# project 1",
+            },
+        }),
+    )
+    .await;
+    let dot_git = Path::new(path!("/code/project1/.git"));
+    fs.insert_branches(dot_git, &["main"]);
+    fs.with_git_state(dot_git, false, |state| {
+        state.refs.insert("HEAD".to_string(), "h3ad".to_string());
+    })
+    .unwrap();
+
+    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
+    project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/code/project1"), true, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    let repository = project.update(cx, |project, cx| project.active_repository(cx).unwrap());
+
+    cx.update(|cx| {
+        repository.update(cx, |repository, _| {
+            repository.create_branch("pr-7".to_string(), None)
+        })
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let shown = cx
+        .update(|cx| {
+            repository.update(cx, |repository, _| {
+                repository.show("refs/heads/pr-7".to_string())
+            })
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(shown.sha.as_ref(), "h3ad");
+
+    let unknown_base = cx
+        .update(|cx| {
+            repository.update(cx, |repository, _| {
+                repository.create_branch(
+                    "pr-8".to_string(),
+                    Some("refs/remotes/upstream/pull/8/head".to_string()),
+                )
+            })
+        })
+        .await
+        .unwrap();
+    assert!(
+        unknown_base.is_err(),
+        "a base that names nothing is refused"
+    );
+    let made = fs
+        .with_git_state(dot_git, false, |state| state.branches.contains("pr-8"))
+        .unwrap();
+    assert!(!made);
+}
+
+/// A remote name is chosen by the peer: one that git would read as an
+/// option is refused on the server before git runs.
+#[gpui::test]
+async fn test_remote_git_fetch_refuses_a_remote_name_that_reads_as_an_option(
+    cx: &mut TestAppContext,
+    server_cx: &mut TestAppContext,
+) {
+    let fs = FakeFs::new(server_cx.executor());
+    fs.insert_tree(
+        path!("/code"),
+        json!({
+            "project1": {
+                ".git": {},
+                "README.md": "# project 1",
+            },
+        }),
+    )
+    .await;
+    let dot_git = Path::new(path!("/code/project1/.git"));
+    let hostile = "--upload-pack=touch /tmp/pwned";
+    fs.set_remote_for_repo(dot_git, hostile, "https://github.com/octo/repo.git");
+
+    let (project, _headless_project) = init_test(&fs, cx, server_cx).await;
+    project
+        .update(cx, |project, cx| {
+            project.find_or_create_worktree(path!("/code/project1"), true, cx)
+        })
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    let repository = project.update(cx, |project, cx| project.active_repository(cx).unwrap());
+
+    let fetch_options = git::repository::FetchOptions::Remote(git::repository::Remote {
+        name: hostile.into(),
+    });
+    let askpass = cx.update(|cx| askpass::AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {}));
+    let result = cx
+        .update(|cx| {
+            repository.update(cx, |repository, cx| {
+                repository.fetch(fetch_options, askpass, cx)
+            })
+        })
+        .await
+        .unwrap();
+    let error = result.expect_err("the server refuses the remote name");
+    assert!(
+        format!("{error:#}").contains("unsafe remote name"),
+        "{error:#}"
+    );
+}
+
 #[gpui::test]
 async fn test_remote_git_checkpoints(cx: &mut TestAppContext, server_cx: &mut TestAppContext) {
     let fs = FakeFs::new(server_cx.executor());

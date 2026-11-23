@@ -5268,6 +5268,53 @@ You can define these in user or project settings; project settings are merged on
 }
 ```
 
+## GitHub Panel
+
+- Description: Customize the GitHub tab, which shows the issues, pull requests and projects of the project's GitHub repository. The sign-in is kept in the system keychain or comes from the GitHub CLI, so it is not a setting. See [GitHub](../github.md).
+- Setting: `github_panel`
+- Note: the GitHub tab opens in the middle of the window like a file, so there is no `dock` or `default_width` setting for it.
+- Default:
+
+```json [settings]
+{
+  "github_panel": {
+    "button": true
+  }
+}
+```
+
+**Options**
+
+- `button`: Whether to show the GitHub button in the sidebar rail
+
+## Translate {#translate}
+
+- Description: Translate the selected text with a keyboard shortcut. API keys are kept in the system keychain and the language pairs in your keymap, so neither is a setting. See [Translate](../translate.md).
+- Setting: `translate`
+- Default:
+
+```json [settings]
+{
+  "translate": {
+    "provider": "deepl",
+    "openai_compatible": {
+      "base_url": "http://localhost:11434/v1",
+      "model": ""
+    },
+    "max_characters": 2000,
+    "timeout_seconds": 20
+  }
+}
+```
+
+**Options**
+
+- `provider`: The service that translates: `"deepl"`, `"google"` (Google Cloud Translation), `"openai_compatible"` (any OpenAI-compatible chat completions API, such as OpenAI, Ollama or LM Studio) or `"google_free"` (Google Translate through its unofficial free endpoint: no key, may be rate limited or stop working, sends the text to Google)
+- `openai_compatible.base_url`: The API address up to and including the version segment. Plain `http` is only accepted for `localhost` and `127.0.0.1`
+- `openai_compatible.model`: The model that translates. Required when `provider` is `"openai_compatible"`
+- `max_characters`: The longest selection, in characters, that is sent. A longer one is refused with a warning rather than cut
+- `timeout_seconds`: How long to wait for a translation before giving up, in seconds
+
 ## Colorize Brackets
 
 - Description: Whether to use tree-sitter bracket queries to detect and colorize the brackets in the editor (also known as "rainbow brackets").

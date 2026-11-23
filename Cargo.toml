@@ -72,6 +72,8 @@ members = [
     "crates/git_graph",
     "crates/git_graph_core",
     "crates/git_hosting_providers",
+    "crates/github",
+    "crates/github_ui",
     "crates/git_ui",
     "crates/go_to_line",
     "crates/grammars",
@@ -189,6 +191,9 @@ members = [
     "crates/time_format",
     "crates/title_bar",
     "crates/toolchain_selector",
+    "crates/translate",
+    "crates/translate_settings",
+    "crates/translate_ui",
     "crates/tray_sni",
     "crates/ui",
     "crates/ui_input",
@@ -314,6 +319,8 @@ git = { path = "crates/git" }
 git_graph = { path = "crates/git_graph" }
 git_graph_core = { path = "crates/git_graph_core" }
 git_hosting_providers = { path = "crates/git_hosting_providers" }
+github = { path = "crates/github" }
+github_ui = { path = "crates/github_ui" }
 git_ui = { path = "crates/git_ui" }
 go_to_line = { path = "crates/go_to_line" }
 grammars = { path = "crates/grammars" }
@@ -430,6 +437,9 @@ time_format = { path = "crates/time_format" }
 platform_title_bar = { path = "crates/platform_title_bar" }
 title_bar = { path = "crates/title_bar" }
 toolchain_selector = { path = "crates/toolchain_selector" }
+translate = { path = "crates/translate" }
+translate_settings = { path = "crates/translate_settings" }
+translate_ui = { path = "crates/translate_ui" }
 tray_sni = { path = "crates/tray_sni" }
 ui = { path = "crates/ui" }
 ui_input = { path = "crates/ui_input" }

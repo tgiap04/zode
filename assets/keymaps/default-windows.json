@@ -64,6 +64,8 @@
     "use_key_equivalents": true,
     "bindings": {
       "escape": "editor::Cancel",
+      "ctrl-shift-1": ["translate::TranslateSelection", { "from": "vi", "to": "en" }],
+      "ctrl-shift-2": ["translate::TranslateSelection", { "from": "en", "to": "vi" }],
       "shift-backspace": "editor::Backspace",
       "backspace": "editor::Backspace",
       "delete": "editor::Delete",
@@ -175,6 +177,8 @@
     "use_key_equivalents": true,
     "bindings": {
       "ctrl-c": "markdown::Copy",
+      "ctrl-shift-1": ["translate::TranslateSelection", { "from": "vi", "to": "en" }],
+      "ctrl-shift-2": ["translate::TranslateSelection", { "from": "en", "to": "vi" }],
     },
   },
   {
@@ -809,6 +813,15 @@
     },
   },
   {
+    "context": "GithubMarkdownComposer > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-b": "github::FormatBold",
+      "ctrl-i": "github::FormatItalic",
+      "ctrl-e": "github::FormatCode",
+    },
+  },
+  {
     "context": "GitCommit > Editor",
     "use_key_equivalents": true,
     "bindings": {
@@ -1039,6 +1052,16 @@
     "bindings": {
       "ctrl-shift-backspace": "stash_picker::DropStashItem",
       "ctrl-shift-v": "stash_picker::ShowStashItem",
+    },
+  },
+  {
+    // Translates the selection or, without one, what the program just copied (OSC 52).
+    // With neither, the key still reaches the program in the terminal.
+    "context": "Terminal",
+    "use_key_equivalents": true,
+    "bindings": {
+      "ctrl-shift-1": ["translate::TranslateSelection", { "from": "vi", "to": "en" }],
+      "ctrl-shift-2": ["translate::TranslateSelection", { "from": "en", "to": "vi" }],
     },
   },
   {

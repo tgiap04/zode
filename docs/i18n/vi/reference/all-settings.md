@@ -5268,6 +5268,53 @@ Bạn có thể định nghĩa chúng trong cài đặt người dùng hoặc c�
 }
 ```
 
+## Bảng GitHub
+
+- Mô tả: Tùy biến tab GitHub, nơi hiện issue, pull request và project của repo GitHub của dự án. Phần đăng nhập nằm trong keychain của hệ thống hoặc lấy từ GitHub CLI, nên không phải cài đặt. Xem [GitHub](../github.md).
+- Cài đặt: `github_panel`
+- Lưu ý: tab GitHub mở ở giữa cửa sổ như một file, nên không có cài đặt `dock` hay `default_width` cho nó.
+- Mặc định:
+
+```json [settings]
+{
+  "github_panel": {
+    "button": true
+  }
+}
+```
+
+**Tùy chọn**
+
+- `button`: Có hiện nút GitHub trên thanh rail của sidebar hay không
+
+## Dịch {#translate}
+
+- Mô tả: Dịch chữ đang chọn bằng phím tắt. API key nằm trong keychain của hệ thống còn các cặp ngôn ngữ nằm trong keymap, nên cả hai đều không phải cài đặt. Xem [Dịch](../translate.md).
+- Cài đặt: `translate`
+- Mặc định:
+
+```json [settings]
+{
+  "translate": {
+    "provider": "deepl",
+    "openai_compatible": {
+      "base_url": "http://localhost:11434/v1",
+      "model": ""
+    },
+    "max_characters": 2000,
+    "timeout_seconds": 20
+  }
+}
+```
+
+**Tùy chọn**
+
+- `provider`: Dịch vụ dịch: `"deepl"`, `"google"` (Google Cloud Translation), `"openai_compatible"` (mọi API chat completions kiểu OpenAI, như OpenAI, Ollama hay LM Studio) hoặc `"google_free"` (Google Translate qua endpoint miễn phí không chính thức: không cần key, có thể bị giới hạn hoặc ngừng chạy, gửi chữ tới Google)
+- `openai_compatible.base_url`: Địa chỉ API tính tới hết phần phiên bản. `http` trơn chỉ được chấp nhận với `localhost` và `127.0.0.1`
+- `openai_compatible.model`: Model sẽ dịch. Bắt buộc khi `provider` là `"openai_compatible"`
+- `max_characters`: Độ dài tối đa của vùng chọn được gửi đi, tính bằng ký tự. Dài hơn thì bị từ chối kèm cảnh báo, không bị cắt
+- `timeout_seconds`: Thời gian chờ bản dịch trước khi bỏ cuộc, tính bằng giây
+
 ## Tô màu ngoặc
 
 - Mô tả: Có dùng truy vấn ngoặc của tree-sitter để phát hiện và tô màu các dấu ngoặc trong trình soạn thảo hay không (còn gọi là "rainbow brackets").

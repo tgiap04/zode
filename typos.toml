@@ -9,6 +9,9 @@ extend-exclude = [
     # Contributor names aren't typos.
     ".mailmap",
 
+    # GitHub's public GraphQL schema, vendored as is for the query check.
+    "crates/github/test-data/schema.docs.graphql",
+
     # Vietnamese prose: its words (tham, thay, ...) read as English misspellings.
     "docs/i18n/",
     ".tobi/memory/",

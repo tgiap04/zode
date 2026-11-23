@@ -5166,6 +5166,7 @@ mod tests {
                 "git_onboarding",
                 "git_panel",
                 "git_picker",
+                "github",
                 "go_to_line",
                 "highlights_tree_view",
                 "image_viewer",
@@ -5212,6 +5213,7 @@ mod tests {
                 "theme_selector",
                 "toast",
                 "toolchain",
+                "translate",
                 "variable_list",
                 "vim",
                 "welcome",
@@ -5404,6 +5406,7 @@ mod tests {
             database_ui::init(cx);
             container_ui::init(cx);
             devices_ui::init(cx);
+            github_ui::init(cx);
             floating_pane::init(cx);
 
             repl::init(app_state.fs.clone(), cx);

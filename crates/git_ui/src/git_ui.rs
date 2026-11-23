@@ -30,7 +30,7 @@ use zode_actions;
 
 use crate::{commit_view::CommitView, git_panel::GitPanel, text_diff_view::TextDiffView};
 
-mod askpass_modal;
+pub mod askpass_modal;
 pub mod branch_panel;
 pub mod branch_picker;
 mod branch_service;

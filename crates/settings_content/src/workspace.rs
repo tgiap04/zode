@@ -763,6 +763,15 @@ pub struct DevicesPanelSettingsContent {
 
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
+pub struct GithubPanelSettingsContent {
+    /// Whether to show the GitHub button in the sidebar rail.
+    ///
+    /// Default: true
+    pub button: Option<bool>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
 pub struct ProjectPanelSettingsContent {
     /// Whether to show the project panel button in the status bar.
     ///

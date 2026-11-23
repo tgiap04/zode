@@ -63,6 +63,9 @@
     "use_key_equivalents": true,
     "bindings": {
       "escape": "editor::Cancel",
+      // cmd-shift-1 and cmd-shift-2, written as the shifted character this platform reports.
+      "cmd-!": ["translate::TranslateSelection", { "from": "vi", "to": "en" }],
+      "cmd-@": ["translate::TranslateSelection", { "from": "en", "to": "vi" }],
       "shift-backspace": "editor::Backspace",
       "ctrl-h": "editor::Backspace",
       "backspace": "editor::Backspace",
@@ -212,6 +215,8 @@
     "use_key_equivalents": true,
     "bindings": {
       "cmd-c": "markdown::Copy",
+      "cmd-!": ["translate::TranslateSelection", { "from": "vi", "to": "en" }],
+      "cmd-@": ["translate::TranslateSelection", { "from": "en", "to": "vi" }],
     },
   },
   {
@@ -999,6 +1004,15 @@
     },
   },
   {
+    "context": "GithubMarkdownComposer > Editor",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-b": "github::FormatBold",
+      "cmd-i": "github::FormatItalic",
+      "cmd-e": "github::FormatCode",
+    },
+  },
+  {
     "context": "GitCommit > Editor",
     "use_key_equivalents": true,
     "bindings": {
@@ -1089,6 +1103,16 @@
     "bindings": {
       "ctrl-shift-backspace": "stash_picker::DropStashItem",
       "ctrl-shift-v": "stash_picker::ShowStashItem",
+    },
+  },
+  {
+    // Translates the selection or, without one, what the program just copied (OSC 52).
+    // With neither, the key still reaches the program in the terminal.
+    "context": "Terminal",
+    "use_key_equivalents": true,
+    "bindings": {
+      "cmd-!": ["translate::TranslateSelection", { "from": "vi", "to": "en" }],
+      "cmd-@": ["translate::TranslateSelection", { "from": "en", "to": "vi" }],
     },
   },
   {

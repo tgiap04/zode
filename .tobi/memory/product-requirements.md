@@ -69,3 +69,40 @@ Trạng thái: `chưa làm` · `đang làm` · `xong` · `huỷ`
 - Máy mở trong cửa sổ riêng của hệ thống (Simulator.app, Android Emulator), không nhúng vào Zode.
 - Run app chạy CLI của chính framework (Flutter, Expo, React Native, Gradle, Xcode) trong terminal của Zode; Zode không tự build.
 - iOS native trên iPhone thật (signing) để sau. Remote project (SSH/WSL) chưa hỗ trợ ở v1.
+
+---
+
+## R4 — Dịch chữ đang chọn bằng phím tắt
+
+- **Ghi nhận:** 2026-11-23
+- **Trạng thái:** code xong 2026-11-23, chưa commit (trên nhánh feat.devices-panel); chờ người dùng thử bản dev — plan `.tobi/outputs/plans/261123-1220-translate-selection-with-shortcut/`; brainstorm `.tobi/outputs/reports/261123-1210-brainstorm-translate-selection-with-shortcut.md`; ý tưởng gốc: extension Chrome `tgiap04/translator`
+- **Yêu cầu:**
+  - Bôi đen chữ, bấm tổ hợp phím, bản dịch hiện trong tooltip tại chỗ.
+  - Settings có trang Translate để chọn phím tắt (mỗi cặp ngôn ngữ một phím, như extension).
+  - Chữ chọn trong chỗ sửa được thì tooltip có nút thay chữ gốc bằng bản dịch.
+
+**Đã chốt (2026-11-23)**
+- Máy dịch do người dùng chọn: DeepL, Google Cloud hoặc API kiểu OpenAI (kể cả Ollama/LM Studio trên máy); key trong keychain. Backend zodekit.com để sau.
+- ~~Không endpoint Google không chính thức~~ — người dùng đổi ý ngày 2026-11-23: thêm "Google Translate (free, no key)" (`google_free`, endpoint `translate.googleapis.com/translate_a/single?client=gtx`) làm lựa chọn tự bật, không phải mặc định (mặc định vẫn DeepL). Không key, không mục keychain; có thể bị Google giới hạn (429/503) hoặc ngừng chạy; docs và trang Settings nói rõ chữ được gửi tới Google.
+- Nút Thay thế ở mọi Editor sửa được, kể cả file code; chỉ thay khi chữ gốc chưa đổi, hoàn tác được bằng Cmd-Z.
+- Nguồn chữ bản đầu: mọi Editor, terminal, markdown preview và các panel dùng `Markdown`.
+
+---
+
+## R5 — Panel GitHub: Issue, Epic, Projects, Pull request
+
+- **Ghi nhận:** 2026-11-23
+- **Trạng thái:** code xong 2026-11-23, chưa commit (nhánh feat.devices-panel); client_id OAuth App đã điền (device flow đã bật); chờ người dùng thử bản dev — plan `.tobi/outputs/plans/261123-1600-github-panel-issues-projects-prs/`; brainstorm `.tobi/outputs/reports/261123-1545-brainstorm-github-panel-issues-projects-prs.md`
+- **Yêu cầu:** quản lý GitHub ngay trong Zode cho từng repo đang mở, giống panel Docker/Database: issue, epic, project board, pull request.
+
+**Đã chốt (2026-11-23)**
+- Đăng nhập: token của `gh` nếu có; không thì GitHub device flow chạy thẳng từ Zode bằng client_id của OAuth App zodekit (đổi sau red team: luồng qua web có lỗi chiếm tài khoản). Token lưu keychain, không qua server. Tài khoản Zode vẫn có thể là Google.
+- Phạm vi: Issue, Epic (sub-issue + issue type), Projects v2 board, Pull request.
+- Panel "GitHub" trong dock theo repo đang mở. Miễn phí cho mọi người.
+
+---
+
+## (Để sau) Tunnel localhost "Share Port"
+
+- **Ghi nhận:** 2026-11-23 · **Trạng thái:** gác lại theo yêu cầu chủ sản phẩm, chưa brainstorm xong.
+- Ghi chú khi bàn lại: tunnel công khai biến Zode thành nhà cung cấp hosting (chống lạm dụng, domain riêng, TLS wildcard); URL dạng path làm hỏng app; Cloudflare Quick Tunnel và Stripe CLI đã miễn phí.

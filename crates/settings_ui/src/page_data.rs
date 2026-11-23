@@ -4,6 +4,7 @@ use settings::{LanguageSettingsContent, SemanticTokens, SettingsContent};
 use std::sync::{Arc, OnceLock};
 use strum::{EnumMessage, IntoDiscriminant as _, VariantArray};
 use ui::IntoElement;
+use util::ResultExt as _;
 
 use crate::{
     ActionLink, DynamicItem, PROJECT, SettingField, SettingItem, SettingsFieldMetadata,
@@ -57,11 +58,12 @@ pub(crate) fn settings_data(cx: &App) -> Vec<SettingsPage> {
         languages_and_tools_page(cx),
         search_and_files_page(),
         window_and_layout_page(),
-        panels_page(),
+        panels_page(cx),
         debugger_page(),
         terminal_page(),
         version_control_page(),
         network_page(),
+        translate_page(),
     ];
 
     use feature_flags::FeatureFlagAppExt as _;
@@ -1547,6 +1549,8 @@ fn keymap_page() -> SettingsPage {
             SettingsPageItem::ActionLink(ActionLink {
                 title: "Edit Keybindings".into(),
                 description: Some("Customize keybindings in the keymap editor.".into()),
+                json_path: None,
+                status: None,
                 button_text: "Open Keymap".into(),
                 on_click: Arc::new(|settings_window, window, cx| {
                     let Some(original_window) = settings_window.original_window else {
@@ -4904,7 +4908,7 @@ fn window_and_layout_page() -> SettingsPage {
     }
 }
 
-fn panels_page() -> SettingsPage {
+fn panels_page(cx: &App) -> SettingsPage {
     fn project_panel_section() -> [SettingsPageItem; 28] {
         [
             SettingsPageItem::SectionHeader("Project Panel"),
@@ -6084,6 +6088,62 @@ fn panels_page() -> SettingsPage {
         ]
     }
 
+    fn github_panel_section(sign_in_with_github: bool) -> Vec<SettingsPageItem> {
+        let mut items = vec![
+            SettingsPageItem::SectionHeader("GitHub"),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "GitHub Button",
+                description: "Show the GitHub button in the sidebar rail.",
+                field: Box::new(SettingField {
+                    json_path: Some("github_panel.button"),
+                    pick: |settings_content| {
+                        settings_content.github_panel.as_ref()?.button.as_ref()
+                    },
+                    write: |settings_content, value| {
+                        settings_content.github_panel.get_or_insert_default().button = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::ActionLink(ActionLink {
+                title: "GitHub Account".into(),
+                description: Some(
+                    "Disconnect forgets the token Zode signed in with and opens GitHub's page for revoking Zode's access. A GitHub CLI token is left alone: sign out of it with `gh auth logout`."
+                        .into(),
+                ),
+                json_path: Some("github_panel.account"),
+                status: Some(|cx| github::sign_in_status(cx).describe().into()),
+                button_text: "Disconnect".into(),
+                on_click: Arc::new(|settings_window, _window, cx| {
+                    open_in_workspace_window(
+                        settings_window,
+                        &zode_actions::github::Disconnect,
+                        cx,
+                    );
+                }),
+                files: USER,
+            }),
+        ];
+        if sign_in_with_github {
+            items.push(SettingsPageItem::ActionLink(ActionLink {
+                title: "Sign in with GitHub".into(),
+                description: Some(
+                    "Opens the GitHub tab and asks GitHub for a code to enter at github.com. The token stays on this machine."
+                        .into(),
+                ),
+                json_path: Some("github_panel.sign_in"),
+                status: None,
+                button_text: "Sign In…".into(),
+                on_click: Arc::new(|settings_window, _window, cx| {
+                    open_in_workspace_window(settings_window, &zode_actions::github::SignIn, cx);
+                }),
+                files: USER,
+            }));
+        }
+        items
+    }
+
     SettingsPage {
         title: "Panels",
         items: concat_sections![
@@ -6093,6 +6153,7 @@ fn panels_page() -> SettingsPage {
             git_panel_section(),
             debugger_panel_section(),
             devices_panel_section(),
+            github_panel_section(github::sign_in_with_github_available(cx)),
         ],
     }
 }
@@ -7450,6 +7511,217 @@ fn network_page() -> SettingsPage {
         title: "Network",
         items: concat_sections![network_section()],
     }
+}
+
+fn translate_page() -> SettingsPage {
+    fn provider_section() -> [SettingsPageItem; 4] {
+        [
+            SettingsPageItem::SectionHeader("Translation Service"),
+            SettingsPageItem::DynamicItem(DynamicItem {
+                discriminant: SettingItem {
+                    files: USER,
+                    title: "Provider",
+                    description: "The service that translates the selected text. Google Translate (free, no key) uses an unofficial endpoint: it needs no key, but may be rate limited or stop working, and sends the selected text to Google.",
+                    field: Box::new(SettingField {
+                        json_path: Some("translate.provider"),
+                        pick: |settings_content| {
+                            settings_content.translate.as_ref()?.provider.as_ref()
+                        },
+                        write: |settings_content, value| {
+                            settings_content.translate.get_or_insert_default().provider = value;
+                        },
+                    }),
+                    metadata: Some(Box::new(SettingsFieldMetadata {
+                        should_do_titlecase: Some(false),
+                        ..Default::default()
+                    })),
+                },
+                pick_discriminant: |settings_content| {
+                    let provider = settings_content.translate.as_ref()?.provider?;
+                    settings::TranslateProviderContent::VARIANTS
+                        .iter()
+                        .position(|variant| *variant == provider)
+                },
+                fields: settings::TranslateProviderContent::VARIANTS
+                    .iter()
+                    .map(|provider| match provider {
+                        settings::TranslateProviderContent::Deepl
+                        | settings::TranslateProviderContent::Google
+                        | settings::TranslateProviderContent::GoogleFree => vec![],
+                        settings::TranslateProviderContent::OpenaiCompatible => vec![
+                            SettingItem {
+                                files: USER,
+                                title: "Base URL",
+                                description: "The API address up to and including the version, such as http://localhost:11434/v1 for Ollama. Plain http is only accepted for localhost.",
+                                field: Box::new(SettingField {
+                                    json_path: Some("translate.openai_compatible.base_url"),
+                                    pick: |settings_content| {
+                                        settings_content
+                                            .translate
+                                            .as_ref()?
+                                            .openai_compatible
+                                            .as_ref()?
+                                            .base_url
+                                            .as_ref()
+                                    },
+                                    write: |settings_content, value| {
+                                        settings_content
+                                            .translate
+                                            .get_or_insert_default()
+                                            .openai_compatible
+                                            .get_or_insert_default()
+                                            .base_url = value;
+                                    },
+                                }),
+                                metadata: Some(Box::new(SettingsFieldMetadata {
+                                    placeholder: Some("http://localhost:11434/v1"),
+                                    ..Default::default()
+                                })),
+                            },
+                            SettingItem {
+                                files: USER,
+                                title: "Model",
+                                description: "The model that translates, such as gpt-4o-mini or llama3.1.",
+                                field: Box::new(SettingField {
+                                    json_path: Some("translate.openai_compatible.model"),
+                                    pick: |settings_content| {
+                                        settings_content
+                                            .translate
+                                            .as_ref()?
+                                            .openai_compatible
+                                            .as_ref()?
+                                            .model
+                                            .as_ref()
+                                            .or(DEFAULT_EMPTY_STRING)
+                                    },
+                                    write: |settings_content, value| {
+                                        settings_content
+                                            .translate
+                                            .get_or_insert_default()
+                                            .openai_compatible
+                                            .get_or_insert_default()
+                                            .model = value;
+                                    },
+                                }),
+                                metadata: Some(Box::new(SettingsFieldMetadata {
+                                    placeholder: Some("llama3.1"),
+                                    ..Default::default()
+                                })),
+                            },
+                        ],
+                    })
+                    .collect(),
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Max Characters",
+                description: "The longest selection sent for translation. A longer one is refused with a warning rather than cut.",
+                field: Box::new(SettingField {
+                    json_path: Some("translate.max_characters"),
+                    pick: |settings_content| {
+                        settings_content.translate.as_ref()?.max_characters.as_ref()
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .translate
+                            .get_or_insert_default()
+                            .max_characters = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+            SettingsPageItem::SettingItem(SettingItem {
+                title: "Timeout (seconds)",
+                description: "How long to wait for a translation before giving up.",
+                field: Box::new(SettingField {
+                    json_path: Some("translate.timeout_seconds"),
+                    pick: |settings_content| {
+                        settings_content.translate.as_ref()?.timeout_seconds.as_ref()
+                    },
+                    write: |settings_content, value| {
+                        settings_content
+                            .translate
+                            .get_or_insert_default()
+                            .timeout_seconds = value;
+                    },
+                }),
+                metadata: None,
+                files: USER,
+            }),
+        ]
+    }
+
+    fn dialogs_section() -> [SettingsPageItem; 3] {
+        [
+            SettingsPageItem::SectionHeader("Key and Shortcuts"),
+            SettingsPageItem::ActionLink(ActionLink {
+                title: "API Key".into(),
+                description: Some(
+                    "Saved in the system keychain, never in settings.json. Optional for local OpenAI-compatible servers; Google Translate (free, no key) needs none."
+                        .into(),
+                ),
+                json_path: Some("translate.api_key"),
+                status: None,
+                button_text: "Set API Key…".into(),
+                on_click: Arc::new(|settings_window, _window, cx| {
+                    open_in_workspace_window(
+                        settings_window,
+                        &zode_actions::translate::SetApiKey,
+                        cx,
+                    );
+                }),
+                files: USER,
+            }),
+            SettingsPageItem::ActionLink(ActionLink {
+                title: "Shortcuts".into(),
+                description: Some(
+                    "Each language pair is a shortcut: select text, press it, and the translation appears in place."
+                        .into(),
+                ),
+                json_path: Some("translate.shortcuts"),
+                status: None,
+                button_text: "Edit Shortcuts…".into(),
+                on_click: Arc::new(|settings_window, _window, cx| {
+                    open_in_workspace_window(
+                        settings_window,
+                        &zode_actions::translate::EditShortcuts,
+                        cx,
+                    );
+                }),
+                files: USER,
+            }),
+        ]
+    }
+
+    SettingsPage {
+        title: "Translate",
+        items: concat_sections![provider_section(), dialogs_section()],
+    }
+}
+
+/// The translate dialogs are workspace modals, so they open over the window
+/// the settings were opened from, or any workspace window when there is none.
+/// The settings window stays open to come back to.
+fn open_in_workspace_window(
+    settings_window: &crate::SettingsWindow,
+    action: &dyn gpui::Action,
+    cx: &mut App,
+) {
+    let target = settings_window.original_window.or_else(|| {
+        cx.windows()
+            .into_iter()
+            .find_map(|window| window.downcast::<workspace::MultiWorkspace>())
+    });
+    let Some(target) = target else {
+        log::warn!("no workspace window to open {} in", action.name());
+        return;
+    };
+    target
+        .update(cx, |_, window, cx| {
+            window.dispatch_action(action.boxed_clone(), cx);
+            window.activate_window();
+        })
+        .log_err();
 }
 
 fn language_settings_field<T>(
@@ -9094,6 +9366,141 @@ fn write_helix_mode(settings: &mut SettingsContent, value: Option<bool>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn translate_provider_item() -> DynamicItem {
+        translate_page()
+            .items
+            .into_vec()
+            .into_iter()
+            .find_map(|item| match item {
+                SettingsPageItem::DynamicItem(item) if item.discriminant.title == "Provider" => {
+                    Some(item)
+                }
+                _ => None,
+            })
+            .expect("the Translate page has a Provider item")
+    }
+
+    fn field_titles_for(
+        item: &DynamicItem,
+        provider: settings::TranslateProviderContent,
+    ) -> Vec<&'static str> {
+        let mut content = SettingsContent::default();
+        content.translate.get_or_insert_default().provider = Some(provider);
+        let Some(index) = (item.pick_discriminant)(&content) else {
+            return vec!["<no discriminant>"];
+        };
+        item.fields
+            .get(index)
+            .map(|fields| fields.iter().map(|field| field.title).collect())
+            .unwrap_or_else(|| vec!["<no field group>"])
+    }
+
+    #[test]
+    fn only_the_openai_compatible_provider_shows_base_url_and_model() {
+        let item = translate_provider_item();
+        assert_eq!(
+            field_titles_for(&item, settings::TranslateProviderContent::OpenaiCompatible),
+            vec!["Base URL", "Model"]
+        );
+        assert_eq!(
+            field_titles_for(&item, settings::TranslateProviderContent::Deepl),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            field_titles_for(&item, settings::TranslateProviderContent::Google),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            field_titles_for(&item, settings::TranslateProviderContent::GoogleFree),
+            Vec::<&str>::new()
+        );
+    }
+
+    #[test]
+    fn the_provider_description_warns_about_the_free_google_endpoint() {
+        let description = translate_provider_item().discriminant.description;
+        for expected in [
+            "Google Translate (free, no key)",
+            "unofficial",
+            "needs no key",
+            "rate limited",
+            "stop working",
+            "sends the selected text to Google",
+        ] {
+            assert!(description.contains(expected), "{expected}: {description}");
+        }
+    }
+
+    fn github_links(cx: &App) -> Vec<(String, Option<String>, String)> {
+        panels_page(cx)
+            .items
+            .iter()
+            .skip_while(|item| !matches!(item, SettingsPageItem::SectionHeader("GitHub")))
+            .filter_map(|item| match item {
+                SettingsPageItem::ActionLink(link) => Some((
+                    link.title.to_string(),
+                    link.status.map(|status| status(cx).to_string()),
+                    link.button_text.to_string(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[gpui::test]
+    fn github_section_shows_the_account_and_hides_sign_in_without_a_client_id(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(github::GithubClientId(None));
+            assert_eq!(
+                github_links(cx),
+                vec![(
+                    "GitHub Account".to_string(),
+                    Some(
+                        "Not checked yet. Zode looks for a token when you open the GitHub tab."
+                            .to_string()
+                    ),
+                    "Disconnect".to_string(),
+                )]
+            );
+
+            cx.set_global(github::GithubClientId(Some("Iv1.settings".to_string())));
+            let links = github_links(cx);
+            assert_eq!(
+                links
+                    .iter()
+                    .map(|(title, _, button)| (title.as_str(), button.as_str()))
+                    .collect::<Vec<_>>(),
+                vec![
+                    ("GitHub Account", "Disconnect"),
+                    ("Sign in with GitHub", "Sign In…"),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn translate_page_links_to_the_key_and_shortcut_dialogs() {
+        let links = translate_page()
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                SettingsPageItem::ActionLink(link) => {
+                    Some((link.title.to_string(), link.json_path))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            links,
+            vec![
+                ("API Key".to_string(), Some("translate.api_key")),
+                ("Shortcuts".to_string(), Some("translate.shortcuts")),
+            ]
+        );
+    }
 
     #[test]
     fn test_write_vim_helix_mode() {

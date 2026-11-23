@@ -5940,6 +5940,67 @@ dependencies = [
 ]
 
 [[package]]
+name = "github"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "credentials_provider",
+ "futures 0.3.32",
+ "github",
+ "gpui",
+ "http_client",
+ "log",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.17",
+ "url",
+ "util",
+ "which 6.0.3",
+]
+
+[[package]]
+name = "github_ui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "askpass",
+ "credentials_provider",
+ "editor",
+ "fs",
+ "futures 0.3.32",
+ "git",
+ "git_ui",
+ "github",
+ "gpui",
+ "http_client",
+ "language",
+ "log",
+ "markdown",
+ "menu",
+ "project",
+ "pulldown-cmark 0.13.0",
+ "release_channel",
+ "remote_connection",
+ "serde",
+ "serde_json",
+ "settings",
+ "theme",
+ "theme_settings",
+ "time",
+ "time_format",
+ "ui",
+ "ui_input",
+ "url",
+ "util",
+ "workspace",
+ "zlog",
+ "zode_actions",
+ "zode_credentials_provider",
+]
+
+[[package]]
 name = "gl_generator"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -14150,6 +14211,7 @@ dependencies = [
  "fs",
  "futures 0.3.32",
  "fuzzy",
+ "github",
  "gpui",
  "heck 0.5.0",
  "itertools 0.14.0",
@@ -14277,6 +14339,7 @@ dependencies = [
  "database_ui",
  "editor",
  "fs",
+ "github_ui",
  "gpui",
  "menu",
  "project",
@@ -16300,6 +16363,76 @@ checksum = "2fb391ac70462b3097a755618fbf9c8f95ecc1eb379a414f7b46f202ed10db1f"
 dependencies = [
  "cc",
  "windows-targets 0.48.5",
+]
+
+[[package]]
+name = "translate"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "credentials_provider",
+ "futures 0.3.32",
+ "gpui",
+ "http_client",
+ "serde_json",
+ "settings",
+ "thiserror 2.0.17",
+ "url",
+ "zode_credentials_provider",
+]
+
+[[package]]
+name = "translate_settings"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "credentials_provider",
+ "editor",
+ "fs",
+ "futures 0.3.32",
+ "gpui",
+ "http_client",
+ "keymap_editor",
+ "log",
+ "menu",
+ "paths",
+ "schemars",
+ "serde",
+ "serde_json",
+ "settings",
+ "terminal",
+ "theme",
+ "theme_settings",
+ "translate",
+ "ui",
+ "ui_input",
+ "workspace",
+ "zode_actions",
+ "zode_credentials_provider",
+]
+
+[[package]]
+name = "translate_ui"
+version = "0.1.0"
+dependencies = [
+ "editor",
+ "futures 0.3.32",
+ "gpui",
+ "http_client",
+ "markdown",
+ "markdown_preview",
+ "project",
+ "schemars",
+ "serde",
+ "settings",
+ "terminal",
+ "terminal_view",
+ "text",
+ "translate",
+ "ui",
+ "util",
+ "workspace",
+ "zode_actions",
 ]
 
 [[package]]
@@ -20314,6 +20447,7 @@ dependencies = [
  "git_graph",
  "git_hosting_providers",
  "git_ui",
+ "github_ui",
  "go_to_line",
  "gpui",
  "gpui_platform",
@@ -20397,6 +20531,9 @@ dependencies = [
  "title_bar",
  "toolchain_selector",
  "tracing",
+ "translate",
+ "translate_settings",
+ "translate_ui",
  "ui",
  "ui_prompt",
  "url",

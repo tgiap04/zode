@@ -2297,7 +2297,8 @@ impl GitStore {
     ) -> Result<proto::RemoteMessageResponse> {
         let repository_id = RepositoryId::from_proto(envelope.payload.repository_id);
         let repository_handle = Self::repository_for_request(&this, repository_id, &mut cx)?;
-        let fetch_options = FetchOptions::from_proto(envelope.payload.remote);
+        let fetch_options =
+            FetchOptions::from_proto(envelope.payload.remote, envelope.payload.refspec)?;
         let askpass_id = envelope.payload.askpass_id;
 
         let askpass = make_remote_delegate(
@@ -2854,10 +2855,11 @@ impl GitStore {
         let repository_id = RepositoryId::from_proto(envelope.payload.repository_id);
         let repository_handle = Self::repository_for_request(&this, repository_id, &mut cx)?;
         let branch_name = envelope.payload.branch_name;
+        let base_branch = envelope.payload.base_branch;
 
         repository_handle
             .update(&mut cx, |repository_handle, _| {
-                repository_handle.create_branch(branch_name, None)
+                repository_handle.create_branch(branch_name, base_branch)
             })
             .await??;
 
@@ -6059,6 +6061,7 @@ impl Repository {
                             repository_id: id.to_proto(),
                             askpass_id,
                             remote: fetch_options.to_proto(),
+                            refspec: fetch_options.refspec_to_proto(),
                         })
                         .await?;
 
@@ -7069,6 +7072,7 @@ impl Repository {
                             project_id: project_id.0,
                             repository_id: id.to_proto(),
                             branch_name,
+                            base_branch,
                         })
                         .await?;
 

@@ -200,6 +200,9 @@ pub struct SettingsContent {
 
     pub journal: Option<JournalSettingsContent>,
 
+    /// Translating the selected text with a keyboard shortcut.
+    pub translate: Option<TranslateSettingsContent>,
+
     /// A map of log scopes to the desired log level.
     /// Useful for filtering out noisy logs or enabling more verbose logging.
     ///
@@ -213,6 +216,8 @@ pub struct SettingsContent {
     pub project_panel: Option<ProjectPanelSettingsContent>,
 
     pub devices_panel: Option<DevicesPanelSettingsContent>,
+
+    pub github_panel: Option<GithubPanelSettingsContent>,
 
     /// Configuration for Node-related features
     pub node: Option<NodeBinarySettings>,
@@ -1004,6 +1009,77 @@ pub enum HourFormat {
     #[default]
     Hour12,
     Hour24,
+}
+
+/// Settings for translating the selected text.
+///
+/// API keys are not settings: they live in the system keychain.
+#[with_fallible_options]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq)]
+pub struct TranslateSettingsContent {
+    /// Which service translates the text.
+    ///
+    /// Default: deepl
+    pub provider: Option<TranslateProviderContent>,
+    /// The OpenAI-compatible chat completions service, used when `provider`
+    /// is `openai_compatible` (OpenAI, Ollama, LM Studio, ...).
+    pub openai_compatible: Option<OpenAiCompatibleTranslateSettingsContent>,
+    /// The longest selection, in characters, that is sent for translation.
+    /// A longer one is refused with a warning rather than cut.
+    ///
+    /// Default: 2000
+    pub max_characters: Option<usize>,
+    /// How long to wait for a translation before giving up, in seconds.
+    ///
+    /// Default: 20
+    pub timeout_seconds: Option<u64>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq)]
+pub struct OpenAiCompatibleTranslateSettingsContent {
+    /// The base URL of the API, up to and including the version segment.
+    /// `http` is only accepted for `localhost` and `127.0.0.1`.
+    ///
+    /// Default: "http://localhost:11434/v1"
+    pub base_url: Option<String>,
+    /// The model that translates.
+    ///
+    /// Default: ""
+    pub model: Option<String>,
+}
+
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslateProviderContent {
+    /// DeepL. Free keys (ending in `:fx`) use the free endpoint.
+    #[default]
+    #[strum(serialize = "DeepL")]
+    Deepl,
+    /// Google Cloud Translation (v2, API key).
+    #[strum(serialize = "Google Cloud Translation")]
+    Google,
+    /// Any service that speaks the OpenAI chat completions API.
+    #[strum(serialize = "OpenAI-compatible API")]
+    OpenaiCompatible,
+    /// Google Translate through its unofficial free web endpoint: no key, but
+    /// it may be rate limited or stop working at any time.
+    #[strum(serialize = "Google Translate (free, no key)")]
+    GoogleFree,
 }
 
 #[with_fallible_options]

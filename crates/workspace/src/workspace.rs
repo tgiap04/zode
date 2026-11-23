@@ -26,6 +26,7 @@ pub mod shared_screen;
 use db::smol::future::yield_now;
 pub use shared_screen::SharedScreen;
 pub mod focus_follows_mouse;
+mod popover_layer;
 mod status_bar;
 mod status_bar_toggles;
 pub mod tasks;
@@ -45,6 +46,7 @@ pub use multi_workspace::{
     SidebarEvent, SidebarHandle, SidebarRenderState, ToggleWorkspaceSidebar,
 };
 pub use path_list::{PathList, SerializedPathList};
+pub use popover_layer::PopoverLayer;
 pub use remote::{
     RemoteConnectionIdentity, remote_connection_identity, same_remote_connection_identity,
 };
@@ -1455,6 +1457,7 @@ pub struct Workspace {
     status_bar_forced_visible: bool,
     pub(crate) modal_layer: Entity<ModalLayer>,
     toast_layer: Entity<ToastLayer>,
+    popover_layer: Entity<PopoverLayer>,
     titlebar_item: Option<AnyView>,
     notifications: Notifications,
     suppressed_notifications: HashSet<NotificationId>,
@@ -1810,6 +1813,7 @@ impl Workspace {
         cx.emit(Event::WorkspaceCreated(weak_handle.clone()));
         let modal_layer = cx.new(|_| ModalLayer::new());
         let toast_layer = cx.new(|_| ToastLayer::new());
+        let popover_layer = cx.new(|_| PopoverLayer::default());
         cx.subscribe(
             &modal_layer,
             |_, _, _: &modal_layer::ModalOpenedEvent, cx| {
@@ -1939,6 +1943,7 @@ impl Workspace {
             status_bar_forced_visible: false,
             modal_layer,
             toast_layer,
+            popover_layer,
             titlebar_item: None,
             notifications: Notifications::default(),
             suppressed_notifications: HashSet::default(),
@@ -7974,6 +7979,11 @@ impl Workspace {
             .update(cx, |modal_layer, cx| modal_layer.hide_modal(window, cx))
     }
 
+    /// The layer that holds the one popover anchored to a window point.
+    pub fn popover_layer(&self) -> &Entity<PopoverLayer> {
+        &self.popover_layer
+    }
+
     pub fn toggle_status_toast<V: ToastView>(&mut self, entity: Entity<V>, cx: &mut App) {
         self.toast_layer
             .update(cx, |toast_layer, cx| toast_layer.toggle_toast(cx, entity))
@@ -9425,7 +9435,8 @@ impl Render for Workspace {
                     .when(self.status_bar_visible(cx), |parent| {
                         parent.child(self.status_bar.clone())
                     })
-                    .child(self.toast_layer.clone()),
+                    .child(self.toast_layer.clone())
+                    .child(self.popover_layer.clone()),
             )
     }
 }

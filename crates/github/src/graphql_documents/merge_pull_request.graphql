@@ -1,0 +1,18 @@
+mutation MergePullRequest(
+  $pullRequestId: ID!
+  $mergeMethod: PullRequestMergeMethod!
+  $expectedHeadOid: GitObjectID!
+) {
+  mergePullRequest(
+    input: {
+      pullRequestId: $pullRequestId
+      mergeMethod: $mergeMethod
+      expectedHeadOid: $expectedHeadOid
+    }
+  ) {
+    pullRequest {
+      id
+      state
+    }
+  }
+}

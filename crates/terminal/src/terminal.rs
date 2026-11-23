@@ -379,6 +379,35 @@ pub const PTY_OUTPUT_HISTORY: usize = 16;
 const SCROLL_REPAINT_WINDOW: Duration = Duration::from_millis(300);
 pub const MAX_SCROLL_HISTORY_LINES: usize = 100_000;
 
+/// The longest program copy kept as text. The same as the highest limit a
+/// translation accepts, so a longer copy is only ever reported by its length.
+pub const PROGRAM_COPY_MAX_CHARACTERS: usize = 30_000;
+
+/// How long a program copy is offered to the user after the program made it.
+pub const PROGRAM_COPY_LIFETIME: Duration = Duration::from_secs(120);
+
+/// What the program in a terminal last put on the clipboard (OSC 52).
+///
+/// TUIs that read the mouse themselves (Claude Code's full-screen mode, vim
+/// with `mouse=a`) select text on their own screen and copy it this way, so
+/// the terminal has no selection of its own to offer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProgramCopy {
+    Text(String),
+    /// Over [`PROGRAM_COPY_MAX_CHARACTERS`]; only its length in characters is kept.
+    TooLong(usize),
+}
+
+impl ProgramCopy {
+    fn new(text: String) -> Self {
+        if text.chars().nth(PROGRAM_COPY_MAX_CHARACTERS).is_some() {
+            Self::TooLong(text.chars().count())
+        } else {
+            Self::Text(text)
+        }
+    }
+}
+
 pub struct TerminalBuilder {
     terminal: Terminal,
     events_rx: UnboundedReceiver<AlacTermEvent>,
@@ -499,6 +528,7 @@ impl TerminalBuilder {
             is_remote_terminal: options.is_remote_terminal,
             last_mouse_move_time: Instant::now(),
             recent_pty_output: VecDeque::new(),
+            program_copy: None,
             last_scroll_sent_to_pty: None,
             last_hyperlink_search_position: None,
             mouse_down_hyperlink: None,
@@ -743,6 +773,7 @@ impl TerminalBuilder {
                 is_remote_terminal,
                 last_mouse_move_time: Instant::now(),
                 recent_pty_output: VecDeque::new(),
+                program_copy: None,
                 last_scroll_sent_to_pty: None,
                 last_hyperlink_search_position: None,
                 mouse_down_hyperlink: None,
@@ -1053,6 +1084,9 @@ pub struct Terminal {
     /// test can move the executor's clock without moving the wall clock, so
     /// the write-rate window can actually be proven to expire.
     recent_pty_output: VecDeque<Instant>,
+    /// The program's last clipboard copy and when it arrived, on the
+    /// executor's clock. Cleared by the user's next input.
+    program_copy: Option<(ProgramCopy, Instant)>,
     /// When a scroll was last forwarded to the pty. See [`SCROLL_REPAINT_WINDOW`].
     last_scroll_sent_to_pty: Option<Instant>,
     last_hyperlink_search_position: Option<Point<Pixels>>,
@@ -1150,7 +1184,8 @@ impl Terminal {
                 cx.emit(Event::BreadcrumbsChanged);
             }
             AlacTermEvent::ClipboardStore(_, data) => {
-                cx.write_to_clipboard(ClipboardItem::new_string(data))
+                cx.write_to_clipboard(ClipboardItem::new_string(data.clone()));
+                self.program_copy = Some((ProgramCopy::new(data), self.background_executor.now()));
             }
             AlacTermEvent::ClipboardLoad(_, format) => {
                 self.write_to_pty(
@@ -1806,11 +1841,25 @@ impl Terminal {
         self.events.push_back(InternalEvent::SetSelection(None));
 
         self.keyboard_input_sent = true;
+        // Once the user has typed or pasted, the key is about their own
+        // input, not the program's copy from before it.
+        self.program_copy = None;
         let input = input.into();
         #[cfg(any(test, feature = "test-support"))]
         self.input_log.push(input.to_vec());
 
         self.write_to_pty(input);
+    }
+
+    /// What the program last copied (OSC 52), unless the user has sent input
+    /// since or [`PROGRAM_COPY_LIFETIME`] has passed.
+    pub fn recent_program_copy(&self) -> Option<&ProgramCopy> {
+        let (copy, copied_at) = self.program_copy.as_ref()?;
+        let age = self
+            .background_executor
+            .now()
+            .saturating_duration_since(*copied_at);
+        (age < PROGRAM_COPY_LIFETIME).then_some(copy)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -3052,6 +3101,20 @@ mod tests {
     use rand::{Rng, distr, rngs::StdRng};
     use smol::channel::Receiver;
     use task::{Shell, ShellBuilder};
+
+    #[test]
+    fn a_program_copy_is_kept_as_text_up_to_the_cap() {
+        let at_cap = "é".repeat(PROGRAM_COPY_MAX_CHARACTERS);
+        assert_eq!(
+            ProgramCopy::new(at_cap.clone()),
+            ProgramCopy::Text(at_cap),
+            "counted in characters, not bytes"
+        );
+        assert_eq!(
+            ProgramCopy::new("é".repeat(PROGRAM_COPY_MAX_CHARACTERS + 1)),
+            ProgramCopy::TooLong(PROGRAM_COPY_MAX_CHARACTERS + 1)
+        );
+    }
 
     fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {

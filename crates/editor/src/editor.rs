@@ -23679,6 +23679,10 @@ impl Editor {
             })
     }
 
+    pub fn is_masked(&self, cx: &App) -> bool {
+        self.display_map.read(cx).masked
+    }
+
     pub fn set_masked(&mut self, masked: bool, cx: &mut Context<Self>) {
         if self.display_map.read(cx).masked != masked {
             self.display_map.update(cx, |map, _| map.masked = masked);
