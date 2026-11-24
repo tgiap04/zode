@@ -34,7 +34,9 @@ probe=$(mktemp -d)/probe
 trap 'macos_signing_cleanup_keychain "$keychain"; rm -rf "$(dirname "$probe")"' EXIT
 
 echo "Checking ${certificate} for \"${identity}\"..."
-macos_signing_setup_keychain "$keychain" "$certificate" "$password" "$identity" || exit 1
+# The release imports a decoded copy with no extension; check the same way.
+cp "$certificate" "$(dirname "$probe")/certificate"
+macos_signing_setup_keychain "$keychain" "$(dirname "$probe")/certificate" "$password" "$identity" || exit 1
 
 cp /bin/echo "$probe"
 /usr/bin/codesign --force --timestamp=none --options runtime --sign "$identity" "$probe"
