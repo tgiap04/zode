@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Checks a Developer ID certificate file the way the release build uses it, in
+# seconds instead of after a full release build: imports it into a throwaway
+# keychain exactly as script/bundle-mac does, signs a copy of /bin/echo with it,
+# and verifies the signature.
+#
+# Usage: script/check-macos-signing <certificate.p12> [identity]
+#   The password comes from MACOS_CERTIFICATE_PASSWORD, or is asked for.
+#   The identity defaults to MACOS_SIGNING_IDENTITY, then to the repository
+#   variable of that name (read with `gh`).
+# When it passes, the file is ready for the MACOS_CERTIFICATE secret:
+#   base64 -i <certificate.p12> | gh secret set MACOS_CERTIFICATE
+set -euo pipefail
+cd "$(dirname "$0")/.."
+source script/lib/macos-signing.sh
+
+certificate=${1:?"usage: script/check-macos-signing <certificate.p12> [identity]"}
+[[ -f "$certificate" ]] || { echo "error: no file at $certificate"; exit 1; }
+
+identity=${2:-${MACOS_SIGNING_IDENTITY:-}}
+if [[ -z "$identity" ]]; then
+    identity=$(gh variable get MACOS_SIGNING_IDENTITY 2>/dev/null || true)
+fi
+[[ -n "$identity" ]] || { echo "error: name the identity as the second argument or in MACOS_SIGNING_IDENTITY"; exit 1; }
+
+password=${MACOS_CERTIFICATE_PASSWORD:-}
+if [[ -z "$password" ]]; then
+    read -r -s -p "Password of ${certificate}: " password
+    echo
+fi
+
+keychain="zode-signing-check-$$.keychain"
+probe=$(mktemp -d)/probe
+trap 'macos_signing_cleanup_keychain "$keychain"; rm -rf "$(dirname "$probe")"' EXIT
+
+echo "Checking ${certificate} for \"${identity}\"..."
+macos_signing_setup_keychain "$keychain" "$certificate" "$password" "$identity" || exit 1
+
+cp /bin/echo "$probe"
+/usr/bin/codesign --force --timestamp=none --options runtime --sign "$identity" "$probe"
+/usr/bin/codesign --verify --strict "$probe"
+echo "ok: \"${identity}\" signs code; this file can go into MACOS_CERTIFICATE."
