@@ -342,7 +342,7 @@ impl DatabasePanel {
                                     .tooltip(|_window, cx| {
                                         Tooltip::for_action(
                                             "Filter Rows",
-                                            &zed_actions::database::ToggleFilterBar,
+                                            &zode_actions::database::ToggleFilterBar,
                                             cx,
                                         )
                                     })
@@ -394,7 +394,7 @@ impl DatabasePanel {
                                     if turnable {
                                         Tooltip::for_action(
                                             "Previous Page",
-                                            &zed_actions::database::PreviousPage,
+                                            &zode_actions::database::PreviousPage,
                                             cx,
                                         )
                                     } else {
@@ -413,7 +413,7 @@ impl DatabasePanel {
                                     if turnable {
                                         Tooltip::for_action(
                                             "Next Page",
-                                            &zed_actions::database::NextPage,
+                                            &zode_actions::database::NextPage,
                                             cx,
                                         )
                                     } else {

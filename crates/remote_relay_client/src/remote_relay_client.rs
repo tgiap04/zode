@@ -17,6 +17,7 @@ pub(crate) mod initiator_tests;
 mod pairing_attempt;
 #[cfg(test)]
 mod pairing_tests;
+mod push_key_store;
 mod relay_transport;
 mod relay_wire;
 #[cfg(any(test, feature = "test-support"))]
@@ -26,6 +27,7 @@ mod session;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 mod trust_store;
+pub mod web_push_crypto;
 
 use std::{net::IpAddr, sync::Arc, time::Duration};
 
@@ -42,13 +44,14 @@ pub use credentials::{
     device_id_from_access_token,
 };
 pub use device_identity::{
-    DirectoryDevice, DirectoryError, decode_public_key, delete_keypair, encode_public_key,
-    list_devices, load_or_create_keypair, local_device_name, register_public_key,
-    sanitize_device_name, sanitize_display_text,
+    DirectoryDevice, DirectoryError, PushOutcome, PushRequest, PushUrgency, decode_public_key,
+    delete_keypair, encode_public_key, list_devices, load_or_create_keypair, local_device_name,
+    register_public_key, sanitize_device_name, sanitize_display_text, send_push,
 };
 pub use environment::{RegisteringCredentials, RelayEnvironment};
 pub use initiator::{ConnectError, InitiatorState, RelayHost, RelayInitiator, RelayInitiatorEvent};
 pub use pairing_attempt::{PairingAttempt, PairingAttemptEvent, PairingFailure, PairingStep};
+pub use push_key_store::PushKeyStore;
 pub use relay_transport::{
     INBOUND_QUEUE_CAPACITY, OUTBOUND_QUEUE_CAPACITY, RELAY_SUBPROTOCOL, RelayLink, RelayTransport,
     TransportError, WebSocketTransport, WireInbound, WireOutbound,
@@ -99,7 +102,7 @@ impl Backoff {
 }
 
 /// The WebSocket address of the relay for an API base such as
-/// `https://api.zodekit.site/api`.
+/// `https://api.zodekit.com/api`.
 pub fn relay_url(api_url: &str) -> String {
     let trimmed = api_url.trim_end_matches('/');
     let websocket = if let Some(rest) = trimmed.strip_prefix("https://") {
@@ -740,8 +743,8 @@ mod tests {
     #[test]
     fn the_relay_address_follows_the_api_address() {
         assert_eq!(
-            relay_url("https://api.zodekit.site/api"),
-            "wss://api.zodekit.site/api/relay"
+            relay_url("https://api.zodekit.com/api"),
+            "wss://api.zodekit.com/api/relay"
         );
         assert_eq!(
             relay_url("http://localhost:8000/api/"),

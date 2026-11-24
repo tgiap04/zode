@@ -578,28 +578,135 @@ pub enum ResetMode {
 pub enum FetchOptions {
     All,
     Remote(Remote),
+    /// One ref of `remote`, such as a pull request's `refs/pull/<n>/head`,
+    /// stored as `destination`. The destination is always replaced, as a
+    /// remote-tracking branch is, and must stay under
+    /// `refs/remotes/<remote>/` so a fetch never moves a local branch.
+    Refspec {
+        remote: Remote,
+        source: SharedString,
+        destination: SharedString,
+    },
 }
 
 impl FetchOptions {
     pub fn to_proto(&self) -> Option<String> {
         match self {
             FetchOptions::All => None,
-            FetchOptions::Remote(remote) => Some(remote.clone().name.into()),
+            FetchOptions::Remote(remote) | FetchOptions::Refspec { remote, .. } => {
+                Some(remote.clone().name.into())
+            }
         }
     }
 
-    pub fn from_proto(remote_name: Option<String>) -> Self {
-        match remote_name {
-            Some(name) => FetchOptions::Remote(Remote { name: name.into() }),
-            None => FetchOptions::All,
+    /// `source:destination`, as `proto::Fetch` carries it.
+    pub fn refspec_to_proto(&self) -> Option<String> {
+        match self {
+            FetchOptions::Refspec {
+                source,
+                destination,
+                ..
+            } => Some(format!("{source}:{destination}")),
+            FetchOptions::All | FetchOptions::Remote(_) => None,
+        }
+    }
+
+    /// A peer that predates refspecs sends none and gets what it asked for
+    /// before. A refspec is checked here, before any git runs.
+    pub fn from_proto(remote_name: Option<String>, refspec: Option<String>) -> Result<Self> {
+        match (remote_name, refspec) {
+            (Some(name), Some(refspec)) => {
+                let (source, destination) = refspec
+                    .split_once(':')
+                    .with_context(|| format!("refspec {refspec:?} has no destination"))?;
+                let options = FetchOptions::Refspec {
+                    remote: Remote { name: name.into() },
+                    source: source.to_string().into(),
+                    destination: destination.to_string().into(),
+                };
+                options.validate()?;
+                Ok(options)
+            }
+            (None, Some(refspec)) => bail!("refspec {refspec:?} sent without a remote"),
+            (Some(name), None) => {
+                let options = FetchOptions::Remote(Remote { name: name.into() });
+                options.validate()?;
+                Ok(options)
+            }
+            (None, None) => Ok(FetchOptions::All),
         }
     }
 
     pub fn name(&self) -> SharedString {
         match self {
             Self::All => "Fetch all remotes".into(),
-            Self::Remote(remote) => remote.name.clone(),
+            Self::Remote(remote) | Self::Refspec { remote, .. } => remote.name.clone(),
         }
+    }
+
+    /// The remote a fetch names, if it names one.
+    pub fn remote_name(&self) -> Option<&str> {
+        match self {
+            FetchOptions::All => None,
+            FetchOptions::Remote(remote) | FetchOptions::Refspec { remote, .. } => {
+                Some(remote.name.as_ref())
+            }
+        }
+    }
+
+    /// Refuses a remote name that git could read as an option or that is not
+    /// a valid ref component, and a refspec that is anything but one pull
+    /// request's `refs/pull/<n>/head` into `refs/remotes/<remote>/pull/<n>/head`.
+    /// A peer chooses these, so every kind is checked; the narrow shape keeps
+    /// it from repointing `refs/remotes/<remote>/HEAD` or a tracked branch.
+    pub fn validate(&self) -> Result<()> {
+        let remote = match self {
+            FetchOptions::All => return Ok(()),
+            FetchOptions::Remote(remote) | FetchOptions::Refspec { remote, .. } => remote,
+        };
+        // A slash inside a name is fine for git (`team/fork`).
+        if let Some(problem) = ref_name_problem(&remote.name) {
+            bail!("unsafe remote name {:?}: {problem}", remote.name);
+        }
+        let FetchOptions::Refspec {
+            source,
+            destination,
+            ..
+        } = self
+        else {
+            return Ok(());
+        };
+        let number = source
+            .strip_prefix("refs/pull/")
+            .and_then(|rest| rest.strip_suffix("/head"))
+            .filter(|number| !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+            .with_context(|| format!("unsafe source ref {source:?}: not refs/pull/<n>/head"))?;
+        let expected = format!("refs/remotes/{}/pull/{number}/head", remote.name);
+        if destination.as_ref() != expected {
+            bail!("destination {destination:?} is not {expected}");
+        }
+        Ok(())
+    }
+
+    /// What follows `git fetch` on the command line. Positional arguments
+    /// come after `--` so git never reads them as options; `--` rather than
+    /// `--end-of-options` because the fetch runs the system git, whose
+    /// version is not known (`--end-of-options` needs 2.24).
+    fn command_args(&self) -> Result<Vec<String>> {
+        self.validate()?;
+        Ok(match self {
+            FetchOptions::All => vec!["--all".to_string()],
+            FetchOptions::Remote(remote) => vec!["--".to_string(), remote.name.to_string()],
+            FetchOptions::Refspec {
+                remote,
+                source,
+                destination,
+            } => vec![
+                "--".to_string(),
+                remote.name.to_string(),
+                format!("+{source}:{destination}"),
+            ],
+        })
     }
 }
 
@@ -608,8 +715,87 @@ impl std::fmt::Display for FetchOptions {
         match self {
             FetchOptions::All => write!(f, "--all"),
             FetchOptions::Remote(remote) => write!(f, "{}", remote.name),
+            FetchOptions::Refspec {
+                remote,
+                source,
+                destination,
+            } => write!(f, "{} {source}:{destination}", remote.name),
         }
     }
+}
+
+/// Why git would refuse a name as a branch or as a part of a ref
+/// (`git check-ref-format`'s rules, less the ones about a whole ref's
+/// `refs/` prefix). One list, so a branch name checked for the user and a
+/// remote name checked for a peer cannot drift apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefNameProblem {
+    Empty,
+    StartsWithDash,
+    Reserved,
+    Control(char),
+    Forbidden(char),
+    ForbiddenSequence,
+    SlashOrDotAtEdge,
+    BadComponent,
+}
+
+impl std::fmt::Display for RefNameProblem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Empty => write!(f, "The name is empty."),
+            Self::StartsWithDash => write!(f, "A name cannot start with “-”."),
+            Self::Reserved => write!(f, "“HEAD” and “@” are not branch names."),
+            Self::Control(character) => write!(
+                f,
+                "The name holds a control character (U+{:04X}).",
+                u32::from(*character)
+            ),
+            Self::Forbidden(character) => {
+                write!(f, "A name cannot contain “{character}”.")
+            }
+            Self::ForbiddenSequence => write!(f, "A name cannot contain “..”, “@{{” or “//”."),
+            Self::SlashOrDotAtEdge => {
+                write!(f, "A name cannot start with “/” or end with “/” or “.”.")
+            }
+            Self::BadComponent => write!(
+                f,
+                "No part of a name can start with “.” or end with “.lock”."
+            ),
+        }
+    }
+}
+
+/// The first rule `name` breaks, or `None` when git takes it as a branch name
+/// (and as one component of a remote-tracking ref).
+pub fn ref_name_problem(name: &str) -> Option<RefNameProblem> {
+    if name.is_empty() {
+        return Some(RefNameProblem::Empty);
+    }
+    if name.starts_with('-') {
+        return Some(RefNameProblem::StartsWithDash);
+    }
+    if name == "HEAD" || name == "@" {
+        return Some(RefNameProblem::Reserved);
+    }
+    if let Some(character) = name.chars().find(|character| character.is_control()) {
+        return Some(RefNameProblem::Control(character));
+    }
+    if let Some(character) = name
+        .chars()
+        .find(|character| character.is_whitespace() || "~^:?*[\\".contains(*character))
+    {
+        return Some(RefNameProblem::Forbidden(character));
+    }
+    if name.contains("..") || name.contains("@{") || name.contains("//") {
+        return Some(RefNameProblem::ForbiddenSequence);
+    }
+    if name.starts_with('/') || name.ends_with('/') || name.ends_with('.') {
+        return Some(RefNameProblem::SlashOrDotAtEdge);
+    }
+    name.split('/')
+        .any(|component| component.starts_with('.') || component.ends_with(".lock"))
+        .then_some(RefNameProblem::BadComponent)
 }
 
 /// Modifies .git/info/exclude temporarily
@@ -841,6 +1027,13 @@ pub trait GitRepository: Send + Sync {
     fn rename_branch(&self, branch: String, new_name: String) -> BoxFuture<'_, Result<()>>;
 
     fn delete_branch(&self, is_remote: bool, name: String) -> BoxFuture<'_, Result<()>>;
+
+    /// Deletes a local branch even when nothing has merged it (`git branch
+    /// -D`). Only for a branch the caller has just made itself. A backend
+    /// with no notion of merged branches can keep this default.
+    fn force_delete_local_branch(&self, name: String) -> BoxFuture<'_, Result<()>> {
+        self.delete_branch(false, name)
+    }
 
     fn worktrees(&self) -> BoxFuture<'_, Result<Vec<Worktree>>>;
 
@@ -1231,7 +1424,7 @@ pub async fn get_git_committer(cx: &AsyncApp) -> GitCommitter {
     }
 
     let git_binary_path =
-        if cfg!(target_os = "macos") && option_env!("ZED_BUNDLE").as_deref() == Some("true") {
+        if cfg!(target_os = "macos") && option_env!("ZODE_BUNDLE").as_deref() == Some("true") {
             cx.update(|cx| {
                 cx.path_for_auxiliary_executable("git")
                     .context("could not find git binary path")
@@ -2131,6 +2324,9 @@ impl GitRepository for RealGitRepository {
                 let mut args = vec!["switch", "-c", &name];
                 let base_branch_str;
                 if let Some(ref base) = base_branch {
+                    // The base can come from a peer over the network; one that
+                    // reads as an option (`--discard-changes`) must not reach git.
+                    anyhow::ensure!(!base.starts_with('-'), "invalid base branch {base:?}");
                     base_branch_str = base.clone();
                     args.push(&base_branch_str);
                 }
@@ -2162,6 +2358,21 @@ impl GitRepository for RealGitRepository {
                 git_binary?
                     .run(&["branch", if is_remote { "-dr" } else { "-d" }, &name])
                     .await?;
+                anyhow::Ok(())
+            })
+            .boxed()
+    }
+
+    fn force_delete_local_branch(&self, name: String) -> BoxFuture<'_, Result<()>> {
+        let git_binary = self.git_binary();
+
+        self.executor
+            .spawn(async move {
+                anyhow::ensure!(
+                    !name.starts_with('-'),
+                    "`{name}` reads as an option, not a branch"
+                );
+                git_binary?.run(&["branch", "-D", &name]).await?;
                 anyhow::Ok(())
             })
             .boxed()
@@ -2656,7 +2867,11 @@ impl GitRepository for RealGitRepository {
     ) -> BoxFuture<'_, Result<RemoteCommandOutput>> {
         let working_directory = self.working_directory();
         let git_directory = self.path();
-        let remote_name = format!("{}", fetch_options);
+        let fetch_args = fetch_options.command_args();
+        // `git fetch -- <name>` takes a directory or a URL as readily as a
+        // remote's name; the name is only ever meant to be a remote's.
+        let named_remote = fetch_options.remote_name().map(str::to_string);
+        let configured_remotes = named_remote.as_ref().map(|_| self.get_all_remotes());
         let git_binary_path = self.system_git_binary_path.clone();
         let executor = cx.background_executor().clone();
         let is_trusted = self.is_trusted();
@@ -2665,6 +2880,13 @@ impl GitRepository for RealGitRepository {
         async move {
             let git_binary_path = git_binary_path.context("git not found on $PATH, can't fetch")?;
             let working_directory = working_directory?;
+            let fetch_args = fetch_args?;
+            if let (Some(name), Some(configured)) = (named_remote, configured_remotes) {
+                anyhow::ensure!(
+                    configured.await?.iter().any(|remote| remote.name == name),
+                    "{name:?} is not a configured remote"
+                );
+            }
             let git = GitBinary::new(
                 git_binary_path,
                 working_directory,
@@ -2672,8 +2894,9 @@ impl GitRepository for RealGitRepository {
                 executor.clone(),
                 is_trusted,
             );
-            let mut command = git.build_command(&["fetch", &remote_name]);
+            let mut command = git.build_command(&["fetch"]);
             command
+                .args(fetch_args)
                 .envs(env.iter())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -4051,6 +4274,440 @@ mod tests {
         .unwrap();
         let head = Oid::from_str(&repo.head_sha().await.unwrap()).unwrap();
         (repo_dir, repo, head)
+    }
+
+    fn pull_request_refspec() -> FetchOptions {
+        FetchOptions::Refspec {
+            remote: Remote {
+                name: "upstream".into(),
+            },
+            source: "refs/pull/7/head".into(),
+            destination: "refs/remotes/upstream/pull/7/head".into(),
+        }
+    }
+
+    #[test]
+    fn test_every_fetch_kind_checks_its_remote_name_and_ends_the_options() {
+        for name in [
+            "--upload-pack=touch pwned",
+            "-q",
+            "/lead",
+            "trail/",
+            "a//b",
+            "has space",
+            "bell\u{7}",
+            "",
+        ] {
+            assert!(
+                FetchOptions::from_proto(Some(name.to_string()), None).is_err(),
+                "{name:?} must be refused over proto"
+            );
+            let options = FetchOptions::Remote(Remote {
+                name: name.to_string().into(),
+            });
+            assert!(options.validate().is_err(), "{name:?} must be refused");
+            assert!(
+                options.command_args().is_err(),
+                "{name:?} never reaches argv"
+            );
+        }
+        // Git allows a slash inside a remote name; refusing it would stop the
+        // Git panel from fetching such a remote.
+        let nested = FetchOptions::Remote(Remote {
+            name: "team/fork".into(),
+        });
+        assert_eq!(
+            nested.command_args().unwrap(),
+            vec!["--".to_string(), "team/fork".to_string()]
+        );
+        assert!(FetchOptions::from_proto(Some("team/fork".to_string()), None).is_ok());
+        let remote = FetchOptions::Remote(Remote {
+            name: "upstream".into(),
+        });
+        assert_eq!(
+            remote.command_args().unwrap(),
+            vec!["--".to_string(), "upstream".to_string()]
+        );
+        assert_eq!(
+            pull_request_refspec().command_args().unwrap(),
+            vec![
+                "--".to_string(),
+                "upstream".to_string(),
+                "+refs/pull/7/head:refs/remotes/upstream/pull/7/head".to_string()
+            ]
+        );
+        assert_eq!(
+            FetchOptions::All.command_args().unwrap(),
+            vec!["--all".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_ref_name_problem_follows_check_ref_format() {
+        for name in [
+            "", "-x", "HEAD", "@", "a b", "a\tb", "a~b", "a^b", "a:b", "a?b", "a*b", "a[b", "a\\b",
+            "a..b", "a@{b", "a//b", "/a", "a/", "a.", "a.lock", "a/b.lock", "a/.b", ".a",
+        ] {
+            assert!(ref_name_problem(name).is_some(), "{name:?} must be refused");
+        }
+        for name in [
+            "main",
+            "team/fork",
+            "pr-7-feature/login",
+            "fix-ü",
+            "a.b",
+            "v1.0",
+        ] {
+            assert_eq!(ref_name_problem(name), None, "{name:?} is a fine name");
+        }
+    }
+
+    /// The destination is checked, not only its prefix: a peer must not be able
+    /// to repoint `refs/remotes/<remote>/HEAD` or a branch the user tracks.
+    #[test]
+    fn test_a_refspec_may_only_fetch_a_pull_request_into_its_own_ref() {
+        let refspec = |remote: &str, source: &str, destination: &str| FetchOptions::Refspec {
+            remote: Remote {
+                name: remote.to_string().into(),
+            },
+            source: source.to_string().into(),
+            destination: destination.to_string().into(),
+        };
+        for (remote, source, destination) in [
+            ("upstream", "refs/heads/x", "refs/remotes/upstream/HEAD"),
+            ("upstream", "refs/heads/x", "refs/remotes/upstream/main"),
+            (
+                "upstream",
+                "refs/pull/7/head",
+                "refs/remotes/upstream/pull/8/head",
+            ),
+            (
+                "upstream",
+                "refs/pull/7/head",
+                "refs/remotes/upstream/pull/7/merge",
+            ),
+            (
+                "upstream",
+                "refs/pull/x/head",
+                "refs/remotes/upstream/pull/x/head",
+            ),
+            (
+                "upstream",
+                "refs/heads/main",
+                "refs/remotes/upstream/pull/7/head",
+            ),
+            (
+                "upstream",
+                "refs/pull/7/head",
+                "refs/remotes/upstream/pull/7/head.lock",
+            ),
+            (
+                "team/fork",
+                "refs/pull/7/head",
+                "refs/remotes/team/fork/HEAD",
+            ),
+            (
+                "up.lock",
+                "refs/pull/7/head",
+                "refs/remotes/up.lock/pull/7/head",
+            ),
+            (
+                "upstream.",
+                "refs/pull/7/head",
+                "refs/remotes/upstream./pull/7/head",
+            ),
+            (
+                "up/.hidden",
+                "refs/pull/7/head",
+                "refs/remotes/up/.hidden/pull/7/head",
+            ),
+        ] {
+            let options = refspec(remote, source, destination);
+            assert!(
+                options.validate().is_err(),
+                "{remote} {source}:{destination} must be refused"
+            );
+            assert!(
+                FetchOptions::from_proto(options.to_proto(), options.refspec_to_proto()).is_err(),
+                "{remote} {source}:{destination} must be refused over proto"
+            );
+        }
+        for (remote, number) in [("upstream", 7), ("team/fork", 12345)] {
+            let options = refspec(
+                remote,
+                &format!("refs/pull/{number}/head"),
+                &format!("refs/remotes/{remote}/pull/{number}/head"),
+            );
+            assert!(options.validate().is_ok(), "{remote} #{number}");
+        }
+    }
+
+    /// `git fetch -- <name>` takes a path or a URL as readily as a remote's
+    /// name, so a peer's "remote name" is held to the configured remotes.
+    #[gpui::test]
+    async fn test_a_fetch_names_a_configured_remote_not_a_path(cx: &mut TestAppContext) {
+        let (upstream_dir, _upstream, _) = repository_with_one_commit(cx).await;
+        let (local_dir, local, _) = repository_with_one_commit(cx).await;
+        git2::Repository::open(local_dir.path())
+            .unwrap()
+            .remote("upstream", upstream_dir.path().to_str().unwrap())
+            .unwrap();
+        let fetch = |options: FetchOptions, cx: &mut TestAppContext| {
+            local.fetch(
+                options,
+                AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {}),
+                Arc::new(HashMap::default()),
+                cx.to_async(),
+            )
+        };
+        let configured = fetch(
+            FetchOptions::Remote(Remote {
+                name: "upstream".into(),
+            }),
+            cx,
+        )
+        .await;
+        assert!(configured.is_ok(), "{configured:?}");
+
+        // A directory beside the working tree: git reads its name as a path.
+        let sibling = local_dir.path().join("vendored");
+        let sibling_git = git2::Repository::init(&sibling).unwrap();
+        let signature = git2::Signature::now("Author", "author@example.com").unwrap();
+        let tree = sibling_git
+            .find_tree(sibling_git.treebuilder(None).unwrap().write().unwrap())
+            .unwrap();
+        let commit = sibling_git
+            .commit(Some("HEAD"), &signature, &signature, "Vendored", &tree, &[])
+            .unwrap();
+        sibling_git
+            .reference("refs/pull/7/head", commit, true, "pull request")
+            .unwrap();
+
+        let by_path = fetch(
+            FetchOptions::Remote(Remote {
+                name: "vendored".into(),
+            }),
+            cx,
+        )
+        .await;
+        let error = by_path.expect_err("a path is not a configured remote");
+        assert!(
+            error.to_string().contains("not a configured remote"),
+            "{error:#}"
+        );
+        let refspec_by_path = fetch(
+            FetchOptions::Refspec {
+                remote: Remote {
+                    name: "vendored".into(),
+                },
+                source: "refs/pull/7/head".into(),
+                destination: "refs/remotes/vendored/pull/7/head".into(),
+            },
+            cx,
+        )
+        .await;
+        let error = refspec_by_path.expect_err("a path is not a configured remote");
+        assert!(
+            error.to_string().contains("not a configured remote"),
+            "{error:#}"
+        );
+        assert!(
+            git2::Repository::open(local_dir.path())
+                .unwrap()
+                .refname_to_id("refs/remotes/vendored/pull/7/head")
+                .is_err(),
+            "nothing was fetched from the directory"
+        );
+    }
+
+    /// A remote name that reads as an option would have git run it as the
+    /// upload-pack command against the default remote.
+    #[gpui::test]
+    async fn test_a_remote_name_that_reads_as_an_option_never_runs(cx: &mut TestAppContext) {
+        let (upstream_dir, _upstream, _) = repository_with_one_commit(cx).await;
+        let (local_dir, local, _) = repository_with_one_commit(cx).await;
+        git2::Repository::open(local_dir.path())
+            .unwrap()
+            .remote("origin", upstream_dir.path().to_str().unwrap())
+            .unwrap();
+        let marker = local_dir.path().join("pwned");
+        let options = FetchOptions::Remote(Remote {
+            name: format!("--upload-pack=touch {}", marker.display()).into(),
+        });
+        let result = local
+            .fetch(
+                options,
+                AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {}),
+                Arc::new(HashMap::default()),
+                cx.to_async(),
+            )
+            .await;
+        assert!(!marker.exists(), "git ran the remote name as a command");
+        let error = result.expect_err("the fetch is refused");
+        assert!(
+            error.to_string().contains("unsafe remote name"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn test_refspec_round_trips_through_proto_and_unsafe_ones_are_refused() {
+        let options = pull_request_refspec();
+        assert_eq!(
+            FetchOptions::from_proto(options.to_proto(), options.refspec_to_proto()).unwrap(),
+            options
+        );
+        assert_eq!(
+            FetchOptions::from_proto(Some("upstream".into()), None).unwrap(),
+            FetchOptions::Remote(Remote {
+                name: "upstream".into()
+            }),
+            "a peer that sends no refspec fetches the whole remote, as before"
+        );
+        for refspec in [
+            "refs/pull/7/head:refs/heads/main",
+            "refs/pull/7/head:refs/remotes/origin/pull/7/head",
+            "refs/pull/7/head:refs/remotes/upstream/",
+            "--upload-pack=x:refs/remotes/upstream/pull/7/head",
+            "refs/pull/*/head:refs/remotes/upstream/pull/*/head",
+            "refs/pull/7/head:refs/remotes/upstream/../../heads/main",
+            "refs/pull/7/head",
+        ] {
+            assert!(
+                FetchOptions::from_proto(Some("upstream".into()), Some(refspec.into())).is_err(),
+                "{refspec} must be refused"
+            );
+        }
+        assert!(
+            FetchOptions::from_proto(None, Some("refs/pull/7/head:refs/remotes/x/pr/7".into()))
+                .is_err()
+        );
+        assert!(
+            FetchOptions::from_proto(
+                Some("-oops".into()),
+                Some("refs/pull/7/head:refs/remotes/-oops/pr/7".into())
+            )
+            .is_err()
+        );
+    }
+
+    /// A fork's pull request is read from the base repository's
+    /// `refs/pull/<n>/head` into `refs/remotes/<remote>/pull/<n>/head`, follows the
+    /// author when they rewrite it, and a branch can start from it.
+    #[gpui::test]
+    async fn test_fetch_refspec_stores_the_pull_request_under_the_remote(cx: &mut TestAppContext) {
+        let (upstream_dir, _upstream, first) = repository_with_one_commit(cx).await;
+        let (local_dir, local, _) = repository_with_one_commit(cx).await;
+        let upstream_git = git2::Repository::open(upstream_dir.path()).unwrap();
+        let first = git2::Oid::from_str(&first.to_string()).unwrap();
+        upstream_git
+            .reference("refs/pull/7/head", first, true, "pull request")
+            .unwrap();
+        let local_git = git2::Repository::open(local_dir.path()).unwrap();
+        local_git
+            .remote("upstream", upstream_dir.path().to_str().unwrap())
+            .unwrap();
+
+        let fetch = |cx: &mut TestAppContext| {
+            local.fetch(
+                pull_request_refspec(),
+                AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {}),
+                Arc::new(HashMap::default()),
+                cx.to_async(),
+            )
+        };
+        fetch(cx).await.unwrap();
+        assert_eq!(
+            local_git
+                .refname_to_id("refs/remotes/upstream/pull/7/head")
+                .ok(),
+            Some(first),
+            "the pull request lands under the remote"
+        );
+        let fetched: Vec<String> = local_git
+            .references_glob("refs/remotes/upstream/*")
+            .unwrap()
+            .filter_map(|reference| Some(reference.ok()?.name()?.to_string()))
+            .collect();
+        assert_eq!(
+            fetched,
+            vec!["refs/remotes/upstream/pull/7/head".to_string()],
+            "only the pull request's ref is fetched"
+        );
+
+        let signature = git2::Signature::now("Author", "author@example.com").unwrap();
+        let tree = upstream_git.find_commit(first).unwrap().tree().unwrap();
+        let rewritten = upstream_git
+            .commit(None, &signature, &signature, "Rewritten", &tree, &[])
+            .unwrap();
+        upstream_git
+            .reference("refs/pull/7/head", rewritten, true, "force-pushed")
+            .unwrap();
+        fetch(cx).await.unwrap();
+        assert_eq!(
+            local_git
+                .refname_to_id("refs/remotes/upstream/pull/7/head")
+                .ok(),
+            Some(rewritten),
+            "a rewritten pull request replaces the fetched ref"
+        );
+
+        local
+            .create_branch(
+                "pr-7".to_string(),
+                Some("refs/remotes/upstream/pull/7/head".to_string()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            local_git.refname_to_id("refs/heads/pr-7").ok(),
+            Some(rewritten)
+        );
+        assert!(
+            local
+                .create_branch("other".to_string(), Some("--discard-changes".to_string()))
+                .await
+                .is_err(),
+            "a base that reads as an option is refused"
+        );
+        assert!(local_git.refname_to_id("refs/heads/other").is_err());
+    }
+
+    #[gpui::test]
+    async fn test_force_delete_removes_a_branch_nothing_merged(cx: &mut TestAppContext) {
+        let (repo_dir, repo, _) = repository_with_one_commit(cx).await;
+        let git = git2::Repository::open(repo_dir.path()).unwrap();
+        let head = git.head().unwrap().peel_to_commit().unwrap();
+        let signature = git2::Signature::now("Author", "author@example.com").unwrap();
+        let unmerged = git
+            .commit(
+                None,
+                &signature,
+                &signature,
+                "Not merged anywhere",
+                &head.tree().unwrap(),
+                &[&head],
+            )
+            .unwrap();
+        git.branch("pr-7", &git.find_commit(unmerged).unwrap(), false)
+            .unwrap();
+
+        assert!(
+            repo.delete_branch(false, "pr-7".to_string()).await.is_err(),
+            "a plain delete keeps an unmerged branch"
+        );
+        let forced = repo.force_delete_local_branch("pr-7".to_string()).await;
+        assert!(forced.is_ok(), "{forced:?}");
+        assert!(
+            git.find_branch("pr-7", git2::BranchType::Local).is_err(),
+            "the branch is gone"
+        );
+        assert!(
+            repo.force_delete_local_branch("-D".to_string())
+                .await
+                .is_err(),
+            "a name that reads as an option is refused"
+        );
     }
 
     async fn graph_shas(repo: &RealGitRepository, log_source: LogSource) -> Result<Vec<Oid>> {

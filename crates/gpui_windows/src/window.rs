@@ -509,6 +509,9 @@ impl WindowsWindow {
         register_drag_drop(&this)?;
         set_non_rude_hwnd(hwnd, true);
         configure_dwm_dark_mode(hwnd, appearance);
+        if params.kind == WindowKind::PopUp {
+            round_window_corners(hwnd);
+        }
         this.state.border_offset.update(hwnd)?;
         let placement = retrieve_window_placement(
             hwnd,
@@ -1249,7 +1252,7 @@ enum WindowOpenState {
     Windowed,
 }
 
-const WINDOW_CLASS_NAME: PCWSTR = w!("Zed::Window");
+const WINDOW_CLASS_NAME: PCWSTR = w!("Zode::Window");
 
 fn register_window_class(icon_handle: HICON) {
     static ONCE: Once = Once::new();

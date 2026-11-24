@@ -94,9 +94,9 @@ if ($Help) {
     exit 0
 }
 
-Push-Location -Path crates/zed
+Push-Location -Path crates/zode
 $channel = Get-Content "RELEASE_CHANNEL"
-$env:ZED_RELEASE_CHANNEL = $channel
+$env:ZODE_RELEASE_CHANNEL = $channel
 $env:RELEASE_CHANNEL = $channel
 Pop-Location
 
@@ -113,7 +113,7 @@ function CheckEnvironmentVariables {
         [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($Name))
     }
 
-    $requiredVars = @('ZED_WORKSPACE', 'RELEASE_VERSION', 'ZED_RELEASE_CHANNEL')
+    $requiredVars = @('ZODE_WORKSPACE', 'RELEASE_VERSION', 'ZODE_RELEASE_CHANNEL')
 
     foreach ($var in $requiredVars) {
         if (Test-EnvMissing $var) {
@@ -149,7 +149,7 @@ function PrepareForBundle {
         Remove-Item -Path "$innoDir" -Recurse -Force
     }
     New-Item -Path "$innoDir" -ItemType Directory -Force
-    Copy-Item -Path "$env:ZED_WORKSPACE\crates\zed\resources\windows\*" -Destination "$innoDir" -Recurse -Force
+    Copy-Item -Path "$env:ZODE_WORKSPACE\crates\zode\resources\windows\*" -Destination "$innoDir" -Recurse -Force
     New-Item -Path "$innoDir\make_appx" -ItemType Directory -Force
     New-Item -Path "$innoDir\appx" -ItemType Directory -Force
     New-Item -Path "$innoDir\bin" -ItemType Directory -Force
@@ -163,7 +163,7 @@ function GenerateLicenses {
 }
 
 function BuildZedAndItsFriends {
-    Write-Output "Building Zed and its friends, for channel: $channel"
+    Write-Output "Building Zode and its friends, for channel: $channel"
     # auto_update_helper is a separate binary on purpose: Windows will not let a running
     # .exe be overwritten, so the app hands off to the helper on quit and the helper is what
     # replaces the app and relaunches it. Without it in `tools`, an in-app update on Windows
@@ -207,7 +207,7 @@ function ZipZedAndItsFriendsDebug {
         return
     }
 
-    Compress-Archive -Path $items -DestinationPath ".\$CargoOutDir\zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip" -Force
+    Compress-Archive -Path $items -DestinationPath ".\$CargoOutDir\zode-$env:RELEASE_VERSION-$env:ZODE_RELEASE_CHANNEL.dbg.zip" -Force
 }
 
 
@@ -221,10 +221,14 @@ function UploadToSentry {
         Write-Output "missing SENTRY_AUTH_TOKEN. skipping sentry upload."
         return
     }
-    Write-Output "Uploading zed debug symbols to sentry..."
+    if (-not (Test-Path "env:SENTRY_ORG")) {
+        Write-Output "missing SENTRY_ORG. skipping sentry upload."
+        return
+    }
+    Write-Output "Uploading zode debug symbols to sentry..."
     for ($i = 1; $i -le 3; $i++) {
         try {
-            sentry-cli debug-files upload --include-sources --wait -p zode -o zed-dev $CargoOutDir
+            sentry-cli debug-files upload --include-sources --wait -p zode -o $env:SENTRY_ORG $CargoOutDir
             break
         }
         catch {
@@ -241,13 +245,13 @@ function UploadToSentry {
 function MakeAppx {
     switch ($channel) {
         "stable" {
-            $manifestFile = "$env:ZED_WORKSPACE\crates\explorer_command_injector\AppxManifest.xml"
+            $manifestFile = "$env:ZODE_WORKSPACE\crates\explorer_command_injector\AppxManifest.xml"
         }
         "preview" {
-            $manifestFile = "$env:ZED_WORKSPACE\crates\explorer_command_injector\AppxManifest-Preview.xml"
+            $manifestFile = "$env:ZODE_WORKSPACE\crates\explorer_command_injector\AppxManifest-Preview.xml"
         }
         default {
-            $manifestFile = "$env:ZED_WORKSPACE\crates\explorer_command_injector\AppxManifest-Nightly.xml"
+            $manifestFile = "$env:ZODE_WORKSPACE\crates\explorer_command_injector\AppxManifest-Nightly.xml"
         }
     }
     Copy-Item -Path "$manifestFile" -Destination "$innoDir\make_appx\AppxManifest.xml"
@@ -362,7 +366,7 @@ function CheckBundleLayout {
 }
 
 function BuildInstaller {
-    $issFilePath = "$innoDir\zed.iss"
+    $issFilePath = "$innoDir\zode.iss"
     switch ($channel) {
         "stable" {
             $appId = "{{2DB0DA96-CA55-49BB-AF4F-64AF36A86712}"
@@ -370,7 +374,7 @@ function BuildInstaller {
             $appName = "Zode"
             $appDisplayName = "Zode"
             $appSetupName = "Zode-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
+            # The mutex name here should match the mutex name in crates\zode\src\zode\windows_only_instance.rs
             $appMutex = "Zode-Editor-Stable-Instance-Mutex"
             $appExeName = "Zode"
             $regValueName = "Zode"
@@ -384,7 +388,7 @@ function BuildInstaller {
             $appName = "Zode Preview"
             $appDisplayName = "Zode Preview"
             $appSetupName = "Zode-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
+            # The mutex name here should match the mutex name in crates\zode\src\zode\windows_only_instance.rs
             $appMutex = "Zode-Editor-Preview-Instance-Mutex"
             $appExeName = "Zode"
             $regValueName = "ZodePreview"
@@ -398,7 +402,7 @@ function BuildInstaller {
             $appName = "Zode Nightly"
             $appDisplayName = "Zode Nightly"
             $appSetupName = "Zode-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
+            # The mutex name here should match the mutex name in crates\zode\src\zode\windows_only_instance.rs
             $appMutex = "Zode-Editor-Nightly-Instance-Mutex"
             $appExeName = "Zode"
             $regValueName = "ZodeNightly"
@@ -412,7 +416,7 @@ function BuildInstaller {
             $appName = "Zode"
             $appDisplayName = "Zode"
             $appSetupName = "Zode-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
+            # The mutex name here should match the mutex name in crates\zode\src\zode\windows_only_instance.rs
             $appMutex = "Zode-Editor-Dev-Instance-Mutex"
             $appExeName = "Zode"
             $regValueName = "ZodeDev"
@@ -443,7 +447,7 @@ function BuildInstaller {
     $definitions = @{
         "AppId"          = $appId
         "AppIconName"    = $appIconName
-        "OutputDir"      = "$env:ZED_WORKSPACE\target"
+        "OutputDir"      = "$env:ZODE_WORKSPACE\target"
         "AppSetupName"   = $appSetupName
         "AppName"        = $appName
         "AppDisplayName" = $appDisplayName
@@ -454,7 +458,7 @@ function BuildInstaller {
         "ShellNameShort" = $appShellNameShort
         "AppUserId"      = $appUserId
         "Version"        = "$env:RELEASE_VERSION"
-        "SourceDir"      = "$env:ZED_WORKSPACE"
+        "SourceDir"      = "$env:ZODE_WORKSPACE"
         "AppxFullName"   = $appAppxFullName
     }
 
@@ -465,7 +469,7 @@ function BuildInstaller {
 
     $innoArgs = @($issFilePath) + $defs
     if($script:canCodeSign) {
-        # zed.iss only declares `SignTool=Defaultsign` when this is set, so the directive
+        # zode.iss only declares `SignTool=Defaultsign` when this is set, so the directive
         # and the argument below always appear together or not at all.
         $env:ZODE_CODE_SIGN = "1"
         $signTool = "powershell.exe -ExecutionPolicy Bypass -File $innoDir\sign.ps1 `$f"
@@ -491,9 +495,9 @@ function BuildInstaller {
 }
 
 ParseZedWorkspace
-$innoDir = "$env:ZED_WORKSPACE\inno\$Architecture"
-$debugArchive = "$CargoOutDir\zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip"
-$debugStoreKey = "$env:ZED_RELEASE_CHANNEL/zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip"
+$innoDir = "$env:ZODE_WORKSPACE\inno\$Architecture"
+$debugArchive = "$CargoOutDir\zode-$env:RELEASE_VERSION-$env:ZODE_RELEASE_CHANNEL.dbg.zip"
+$debugStoreKey = "$env:ZODE_RELEASE_CHANNEL/zode-$env:RELEASE_VERSION-$env:ZODE_RELEASE_CHANNEL.dbg.zip"
 
 CheckEnvironmentVariables
 PrepareForBundle
@@ -516,8 +520,8 @@ if($env:CI) {
 if ($buildSuccess) {
     Write-Output "Build successful"
     if ($Install) {
-        Write-Output "Installing Zed..."
-        Start-Process -FilePath "$env:ZED_WORKSPACE/target/ZedEditorUserSetup-x64-$env:RELEASE_VERSION.exe"
+        Write-Output "Installing Zode..."
+        Start-Process -FilePath "$env:ZODE_WORKSPACE/target/Zode-$Architecture.exe"
     }
     exit 0
 }

@@ -13532,7 +13532,7 @@ const NAMED_DIRECTORY_ICONS: &[(&str, &str, &str)] = &[
         "icons/file_icons/material/folder-zeabur-open.svg",
     ),
     (
-        ".zed",
+        ".zode",
         "icons/file_icons/material/folder-zed.svg",
         "icons/file_icons/material/folder-zed-open.svg",
     ),

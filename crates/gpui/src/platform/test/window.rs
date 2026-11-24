@@ -34,6 +34,7 @@ pub(crate) struct TestWindowState {
     input_handler: Option<PlatformInputHandler>,
     is_fullscreen: bool,
     content_opacity: f32,
+    background_appearance: WindowBackgroundAppearance,
 }
 
 #[derive(Clone)]
@@ -86,6 +87,7 @@ impl TestWindow {
             input_handler: None,
             is_fullscreen: false,
             content_opacity: 1.0,
+            background_appearance: WindowBackgroundAppearance::Opaque,
         })))
     }
 
@@ -213,7 +215,7 @@ impl PlatformWindow for TestWindow {
     }
 
     fn background_appearance(&self) -> WindowBackgroundAppearance {
-        WindowBackgroundAppearance::Opaque
+        self.0.lock().background_appearance
     }
 
     fn is_subpixel_rendering_supported(&self) -> bool {
@@ -226,7 +228,9 @@ impl PlatformWindow for TestWindow {
 
     fn set_app_id(&mut self, _app_id: &str) {}
 
-    fn set_background_appearance(&self, _background: WindowBackgroundAppearance) {}
+    fn set_background_appearance(&self, background: WindowBackgroundAppearance) {
+        self.0.lock().background_appearance = background;
+    }
 
     fn set_content_opacity(&self, opacity: f32) {
         self.0.lock().content_opacity = opacity;

@@ -40,6 +40,7 @@
 
 # Customization
 
+- [Settings](./configuring-zode.md)
 - [Appearance](./appearance.md)
   - [Themes](./themes.md)
   - [Icon Themes](./icon-themes.md)
@@ -169,6 +170,10 @@
 - [Keeping the Display Awake](./keep-display-awake.md)
 - [Agent Finished Notifications](./agent-finished-notifications.md)
 - [Project Footprint Indicator](./project-footprint-indicator.md)
+- [Reminders and the Focus Timer](./reminders.md)
+- [Devices](./devices.md)
+- [Translate](./translate.md)
+- [GitHub](./github.md)
 
 # Developing Zode
 

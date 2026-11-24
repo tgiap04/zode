@@ -27,7 +27,7 @@ use terminal::Terminal;
 use terminal_view::TerminalView;
 use ui::{AgentTypingMark, CommonAnimationExt as _, Tooltip, prelude::*};
 use workspace::{Pane, Workspace};
-use zed_actions::agent::{AgentViewMode, PermissionPrompts};
+use zode_actions::agent::{AgentViewMode, PermissionPrompts};
 
 use std::process::ExitStatus;
 use std::sync::Arc;
@@ -5944,7 +5944,7 @@ mod tests {
         let file = opened.await.expect("a.rs is in the fake tree");
         cx.run_until_parked();
 
-        let toggle = zed_actions::agent::ToggleAgent {
+        let toggle = zode_actions::agent::ToggleAgent {
             agent: project::CLAUDE_CODE_AGENT_ID.to_string(),
         };
 
@@ -6020,7 +6020,7 @@ mod tests {
         for (opened, agent) in project::BUILTIN_AGENTS.iter().enumerate() {
             cx.update(|window, cx| {
                 window.dispatch_action(
-                    Box::new(zed_actions::agent::NewAgent {
+                    Box::new(zode_actions::agent::NewAgent {
                         agent: agent.id.to_string(),
                         mode: None,
                         permission_prompts: Default::default(),
@@ -6151,7 +6151,7 @@ mod tests {
 
         cx.update(|window, cx| {
             window.dispatch_action(
-                Box::new(zed_actions::agent::ToggleAgent {
+                Box::new(zode_actions::agent::ToggleAgent {
                     agent: project::CLAUDE_CODE_AGENT_ID.to_string(),
                 }),
                 cx,
@@ -6251,7 +6251,7 @@ mod tests {
     async fn a_pane_holding_only_the_agent_keeps_it_on_a_second_press(cx: &mut TestAppContext) {
         let (workspace, _project, cx) = workspace_with_agents(cx).await;
 
-        let toggle = zed_actions::agent::ToggleAgent {
+        let toggle = zode_actions::agent::ToggleAgent {
             agent: project::CLAUDE_CODE_AGENT_ID.to_string(),
         };
         cx.update(|window, cx| window.dispatch_action(Box::new(toggle.clone()), cx));

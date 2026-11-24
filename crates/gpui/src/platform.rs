@@ -86,7 +86,7 @@ pub use visual_test::VisualTestPlatform;
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 #[inline]
 pub fn guess_compositor() -> &'static str {
-    if std::env::var_os("ZED_HEADLESS").is_some() {
+    if std::env::var_os("ZODE_HEADLESS").is_some() {
         return "Headless";
     }
 
@@ -190,6 +190,24 @@ pub trait Platform: 'static {
 
     fn set_dock_menu(&self, menu: Vec<MenuItem>, keymap: &Keymap);
     fn perform_dock_menu_action(&self, _action: usize) {}
+    /// Shows `icon` in the system tray (the macOS menu bar), replaces the one shown, or
+    /// removes it with `None`.
+    fn set_tray_icon(&self, _icon: Option<TrayIcon>) {}
+    /// Called with where the tray icon is whenever it is clicked, left or right.
+    fn on_tray_icon_click(&self, _callback: Box<dyn FnMut(Option<TrayIconAnchor>)>) {}
+    /// Where the tray icon is now; `None` without one or where the platform cannot say.
+    fn tray_icon_anchor(&self) -> Option<TrayIconAnchor> {
+        None
+    }
+    /// Whether the tray icon can be seen right now: false behind a full-screen app, an
+    /// auto-hidden menu bar, or a tray that keeps it in an overflow.
+    fn tray_icon_visible(&self) -> bool {
+        false
+    }
+    /// Called on every mouse button press outside this app's pop-up windows -- in other
+    /// applications and in this one's ordinary windows alike -- until replaced or cleared
+    /// with `None`. For closing a panel that never takes keyboard focus.
+    fn on_outside_mouse_down(&self, _callback: Option<Box<dyn FnMut()>>) {}
     fn add_recent_document(&self, _path: &Path) {}
     fn update_jump_list(
         &self,
@@ -241,6 +259,12 @@ pub trait Platform: 'static {
     /// does not have one, and guessing the other way would silently disable
     /// battery-conditional behaviour on exactly those machines.
     fn on_battery(&self) -> Option<bool> {
+        None
+    }
+
+    /// How long since the last key press, click or pointer move anywhere on the
+    /// system, not just in this app. `None` where the platform cannot say.
+    fn system_idle_time(&self) -> Option<Duration> {
         None
     }
 
@@ -342,6 +366,43 @@ pub enum ThermalState {
     Serious,
     /// System is critically constrained, minimize all resource usage
     Critical,
+}
+
+/// An icon for the system tray.
+#[derive(Clone, Debug)]
+pub struct TrayIcon {
+    /// PNG data.
+    pub image: &'static [u8],
+    /// Drawn as a template: only the alpha matters and the system colors it for the bar.
+    /// Honored on macOS.
+    pub template: bool,
+    /// Shown when the pointer rests on the icon.
+    pub tooltip: SharedString,
+}
+
+/// Which screen edge the tray sits on, so a panel opens away from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrayEdge {
+    /// A bar along the top, like the macOS menu bar.
+    Top,
+    /// A bar along the bottom, like the default Windows taskbar.
+    Bottom,
+    /// A bar along the left.
+    Left,
+    /// A bar along the right.
+    Right,
+}
+
+/// Where the tray icon is: its bounds in the space a window's bounds use on this
+/// platform, so a window can be placed against it directly.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TrayIconAnchor {
+    /// The icon's bounds, in window-bounds space.
+    pub bounds: Bounds<Pixels>,
+    /// The display the icon is on; `None` for the primary one.
+    pub display_id: Option<DisplayId>,
+    /// The screen edge the tray sits on.
+    pub edge: TrayEdge,
 }
 
 /// A single OS notification, owned so it can cross into a background task
@@ -571,7 +632,7 @@ pub struct WindowButtonLayout {
 
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 impl WindowButtonLayout {
-    /// Returns Zed's built-in fallback button layout for Linux titlebars.
+    /// Returns Zode's built-in fallback button layout for Linux titlebars.
     pub fn linux_default() -> Self {
         Self {
             left: [None; MAX_BUTTONS_PER_SIDE],
@@ -1394,7 +1455,7 @@ pub struct UTF16Selection {
     pub reversed: bool,
 }
 
-/// Zed's interface for handling text input from the platform's IME system
+/// Zode's interface for handling text input from the platform's IME system
 /// This is currently a 1:1 exposure of the NSTextInputClient API:
 ///
 /// <https://developer.apple.com/documentation/appkit/nstextinputclient>

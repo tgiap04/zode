@@ -1,0 +1,54 @@
+query RepositoryPullRequests(
+  $owner: String!
+  $name: String!
+  $states: [PullRequestState!]
+  $after: String
+) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(
+      first: 50
+      after: $after
+      states: $states
+      orderBy: { field: UPDATED_AT, direction: DESC }
+    ) {
+      nodes {
+        ...PullRequestSummary
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}
+
+fragment PullRequestSummary on PullRequest {
+  id
+  number
+  title
+  state
+  isDraft
+  author {
+    login
+  }
+  headRefName
+  headRefOid
+  baseRefName
+  isCrossRepository
+  url
+  updatedAt
+  reviewDecision
+  statusCheckRollup {
+    state
+  }
+  reviewRequests(first: 20) {
+    nodes {
+      requestedReviewer {
+        __typename
+        ... on User {
+          login
+        }
+      }
+    }
+  }
+}

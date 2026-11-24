@@ -50,10 +50,10 @@ impl GitPanel {
                             div()
                                 // Room for the expand button parked in the top right corner.
                                 .pr_5()
-                                .on_action(|&zed_actions::editor::MoveUp, _, cx| {
+                                .on_action(|&zode_actions::editor::MoveUp, _, cx| {
                                     cx.stop_propagation();
                                 })
-                                .on_action(|&zed_actions::editor::MoveDown, _, cx| {
+                                .on_action(|&zode_actions::editor::MoveDown, _, cx| {
                                     cx.stop_propagation();
                                 })
                                 .child(EditorElement::new(&self.commit_editor, panel_editor_style)),

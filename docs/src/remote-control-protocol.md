@@ -222,6 +222,10 @@ in data frames on the `stream_id` the reply names.
 | `sessions_list_reply` | `request_id`, `sessions`: `[entry]`, `more`, optional `next`, `unavailable_hosts`   | Zode → browser    |
 | `session_resume`      | `request_id`, `session_id`, `fork`                                                  | browser → Zode    |
 | `session_resumed`     | `request_id`, optional `open_agent_id`                                              | Zode → browser    |
+| `push_subscribe`      | `p256dh`, `auth`                                                                    | browser → Zode    |
+| `push_unsubscribe`    | none                                                                                | browser → Zode    |
+| `page_visibility`     | `visible`, optional `agent_id`                                                      | browser → Zode    |
+| `push_status`         | `enabled`, optional `reason`                                                        | Zode → browser    |
 
 `status` is one of `working`, `waiting_for_input`, `idle`, `finished`,
 `failed`; a value a reader does not know is read as unknown rather than
@@ -235,7 +239,8 @@ agent. A tab opened as a fork has no `session_id`. A reader that does not know t
 fields ignores them.
 
 `capabilities` in `hello_ack` lists what the host serves: `terminal` always,
-then `files`, `ide` and `sessions` in that order, each only when it is served. A
+then `files`, `ide` and `sessions` in that order, each only when it is served,
+and `push` last, always. A
 request whose capability is missing is answered with `error` code
 `unsupported`.
 
@@ -597,6 +602,39 @@ Errors, in the `error` message with the `request_id`:
 
 A device that sends `sessions_list_reply` or `session_resumed` gets `malformed`:
 they are answers, not requests.
+
+### Push
+
+```
+→ {"t":"push_subscribe","p256dh":"BCVx…","auth":"BTBZ…"}
+← {"t":"push_status","enabled":true}
+→ {"t":"page_visibility","visible":true,"agent_id":"terminal-42"}
+```
+
+- **Capability.** The host always lists `push`. A browser lists `push` in its
+  own `hello` when it reads `push_status`; a host sends `push_status` only to
+  such a browser, because an older one refuses a type it does not know. A
+  browser sends the other three only to a host that lists `push`.
+- **Keys.** `push_subscribe` carries the browser's push subscription keys,
+  base64url as `PushSubscription.getKey()` returns them. They travel only on
+  this channel. The browser gives the server the subscription's endpoint, never
+  the keys, so the server cannot read a notification. The host accepts keys only
+  from a paired device and keeps them per device until `push_unsubscribe`, until
+  the device is forgotten or revoked, or until the server says the subscription
+  is gone.
+- **Notification.** For an agent that needs approval, finished answering, or
+  ended, the host encrypts
+  `{"v":1,"kind":"approval|answered|ended","agentId","title","host","at"}` to
+  each subscribed device (RFC 8291, `aes128gcm`) and asks the server to deliver
+  it. A device whose last `page_visibility` was visible and named that agent is
+  skipped.
+- **Status.** `push_status` says whether the host will push to this device.
+  `reason` is `not_in_plan` (the account's plan has no push) or `disabled` (the
+  user turned the events off on the host); a reader keeps a reason it does not
+  know. The host sends it after `hello`, after `push_subscribe`, and when it
+  changes.
+
+A device that sends `push_status` gets `malformed`.
 
 ### Errors
 

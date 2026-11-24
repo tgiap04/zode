@@ -1,0 +1,29 @@
+[package]
+name = "translate"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/translate.rs"
+
+[dependencies]
+anyhow.workspace = true
+credentials_provider.workspace = true
+futures.workspace = true
+gpui.workspace = true
+http_client.workspace = true
+serde_json.workspace = true
+settings.workspace = true
+thiserror.workspace = true
+url.workspace = true
+zode_credentials_provider.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+http_client = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }

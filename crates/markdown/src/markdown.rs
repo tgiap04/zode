@@ -236,6 +236,8 @@ pub struct Markdown {
     context_menu_selected_text: Option<String>,
     search_highlights: Vec<Range<usize>>,
     active_search_highlight: Option<usize>,
+    last_visible_bounds: Option<Bounds<Pixels>>,
+    last_rendered_text: Option<RenderedText>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -244,6 +246,20 @@ pub struct MarkdownOptions {
     pub parse_html: bool,
     pub render_mermaid_diagrams: bool,
     pub parse_heading_slugs: bool,
+    pub data_images: DataImages,
+}
+
+/// What happens to an image written inline as a `data:` URL. One that is not
+/// decoded shows its alt text instead.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DataImages {
+    #[default]
+    Decode,
+    /// Only images of at most this many bytes once decoded. The cap is on the
+    /// file, not its pixels: a small file can still declare a huge image, so
+    /// text from strangers wants [`DataImages::Off`].
+    DecodeUpTo(usize),
+    Off,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -408,6 +424,8 @@ impl Markdown {
             context_menu_selected_text: None,
             search_highlights: Vec::new(),
             active_search_highlight: None,
+            last_visible_bounds: None,
+            last_rendered_text: None,
         };
         this.parse(cx);
         this
@@ -573,6 +591,27 @@ impl Markdown {
         }
     }
 
+    /// The selection as it reads on screen, without markdown syntax: the text
+    /// `Copy` puts on the clipboard. `None` until the markdown has been painted
+    /// with the selection.
+    pub fn selected_rendered_text(&self) -> Option<String> {
+        self.rendered_selection(self.last_rendered_text.as_ref()?)
+    }
+
+    fn rendered_selection(&self, text: &RenderedText) -> Option<String> {
+        if self.selection.end <= self.selection.start {
+            None
+        } else {
+            Some(text.text_for_range(self.selection.start..self.selection.end))
+        }
+    }
+
+    /// The part of the last painted element that was on screen, in window
+    /// coordinates. `None` until the markdown has been painted.
+    pub fn last_visible_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.last_visible_bounds
+    }
+
     pub fn set_search_highlights(
         &mut self,
         highlights: Vec<Range<usize>>,
@@ -608,11 +647,9 @@ impl Markdown {
     }
 
     fn copy(&self, text: &RenderedText, _: &mut Window, cx: &mut Context<Self>) {
-        if self.selection.end <= self.selection.start {
-            return;
+        if let Some(text) = self.rendered_selection(text) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
-        let text = text.text_for_range(self.selection.start..self.selection.end);
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
     fn copy_as_markdown(&mut self, _: &mut Window, cx: &mut Context<Self>) {
@@ -669,6 +706,7 @@ impl Markdown {
         let should_parse_html = self.options.parse_html;
         let should_render_mermaid_diagrams = self.options.render_mermaid_diagrams;
         let should_parse_heading_slugs = self.options.parse_heading_slugs;
+        let data_images = self.options.data_images;
         let language_registry = self.language_registry.clone();
         let fallback = self.fallback_code_block_language.clone();
 
@@ -732,6 +770,9 @@ impl Markdown {
             }
 
             for (range, event) in &events {
+                if data_images == DataImages::Off {
+                    break;
+                }
                 if let MarkdownEvent::Start(MarkdownTag::Image { dest_url, .. }) = event
                     && let Some(data_url) = dest_url.strip_prefix("data:")
                 {
@@ -744,6 +785,11 @@ impl Markdown {
                     let Some(format) = ImageFormat::from_mime_type(mime_type) else {
                         continue;
                     };
+                    if let DataImages::DecodeUpTo(max_bytes) = data_images
+                        && base64::decoded_len_estimate(data.len()) > max_bytes
+                    {
+                        continue;
+                    }
                     let is_base64 = encoding == "base64";
                     if is_base64
                         && let Some(bytes) = base64::prelude::BASE64_STANDARD
@@ -2140,6 +2186,14 @@ impl Element for MarkdownElement {
         let focus_handle = self.markdown.read(cx).focus_handle.clone();
         window.set_focus_handle(&focus_handle, cx);
         window.set_view_id(self.markdown.entity_id());
+        let visible_bounds = bounds.intersect(&window.content_mask().bounds);
+        self.markdown.update(cx, |markdown, _| {
+            markdown.last_visible_bounds = Some(visible_bounds);
+            // Only a selection needs the text between frames; without one,
+            // a long document's text is not kept twice.
+            let has_selection = markdown.selection.end > markdown.selection.start;
+            markdown.last_rendered_text = has_selection.then(|| rendered_markdown.text.clone());
+        });
 
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         rendered_markdown.element.prepaint(window, cx);
@@ -3082,6 +3136,63 @@ mod tests {
     }
 
     #[gpui::test]
+    fn test_rendered_text_is_kept_only_while_something_is_selected(cx: &mut TestAppContext) {
+        struct TestWindow;
+
+        impl Render for TestWindow {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+            }
+        }
+
+        ensure_theme_initialized(cx);
+        let (_, cx) = cx.add_window_view(|_, _| TestWindow);
+        let markdown = cx.new(|cx| Markdown::new("Hello **world**".into(), None, None, cx));
+        cx.run_until_parked();
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.draw(
+                Default::default(),
+                size(px(600.0), px(600.0)),
+                |_window, _cx| MarkdownElement::new(markdown.clone(), MarkdownStyle::default()),
+            );
+        };
+
+        draw(cx);
+        markdown.read_with(cx, |markdown, _| {
+            assert!(
+                markdown.last_rendered_text.is_none(),
+                "nothing selected, nothing kept between frames"
+            );
+            assert_eq!(markdown.selected_rendered_text(), None);
+        });
+
+        markdown.update(cx, |markdown, _| {
+            markdown.selection = Selection {
+                start: 0,
+                end: "Hello **world**".len(),
+                reversed: false,
+                pending: false,
+                mode: SelectMode::Character,
+            };
+        });
+        draw(cx);
+        markdown.read_with(cx, |markdown, _| {
+            assert_eq!(
+                markdown.selected_rendered_text().as_deref(),
+                Some("Hello world")
+            );
+        });
+
+        markdown.update(cx, |markdown, _| {
+            markdown.selection = Selection::default();
+        });
+        draw(cx);
+        markdown.read_with(cx, |markdown, _| {
+            assert!(markdown.last_rendered_text.is_none());
+        });
+    }
+
+    #[gpui::test]
     fn test_surrounding_word_range(cx: &mut TestAppContext) {
         let rendered = render_markdown("Hello world tesεζ", cx);
 
@@ -3654,5 +3765,27 @@ mod tests {
             h3_line_height > body_line_height,
             "H3 line height ({h3_line_height:?}) should be greater than body text ({body_line_height:?})"
         );
+    }
+
+    const ONE_PIXEL_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+    fn decoded_data_images(data_images: DataImages, cx: &mut TestAppContext) -> usize {
+        let source = format!("![a pixel](data:image/png;base64,{ONE_PIXEL_PNG})");
+        let options = MarkdownOptions {
+            data_images,
+            ..Default::default()
+        };
+        let markdown =
+            cx.new(|cx| Markdown::new_with_options(source.into(), None, None, options, cx));
+        cx.run_until_parked();
+        markdown.read_with(cx, |markdown, _| markdown.images_by_source_offset.len())
+    }
+
+    #[gpui::test]
+    fn test_data_images_are_decoded_unless_turned_off_or_too_big(cx: &mut TestAppContext) {
+        assert_eq!(decoded_data_images(DataImages::default(), cx), 1);
+        assert_eq!(decoded_data_images(DataImages::Off, cx), 0);
+        assert_eq!(decoded_data_images(DataImages::DecodeUpTo(16), cx), 0);
+        assert_eq!(decoded_data_images(DataImages::DecodeUpTo(1024), cx), 1);
     }
 }

@@ -24,11 +24,11 @@ This opens the current directory in Zode.
 
 ## Import Settings from VS Code
 
-During setup, you have the option to import key settings from VS Code. Zode imports the following settings:
+Zode does not import settings from VS Code. The tables below map common VS Code settings to their Zode equivalents:
 
 ### Settings Imported from VS Code
 
-The following VS Code settings are automatically imported when you use **Import Settings from VS Code**:
+Copy the ones you use into your Zode settings file:
 
 **Editor**
 
@@ -163,24 +163,24 @@ The following VS Code settings are automatically imported when you use **Import 
 | `chat.agent.enabled`       | `agent.enabled`                                          |
 | `mcp`                      | `context_servers`                                        |
 
-Zode doesn’t import extensions or keybindings, but this import gets core editor behavior close to your VS Code setup. If you skip that step during setup, you can still import settings manually later via the command palette:
+Zode doesn’t import settings, extensions or keybindings from VS Code. To copy the settings above, open your settings file from the command palette:
 
-`Cmd+Shift+P → Zed: Import VS Code Settings`
+`Cmd+Shift+P → zode: open settings file`
 
 ## Set Up Editor Preferences
 
-You can configure most settings in the Settings Editor ({#kb zed::OpenSettings}). For advanced settings, run `zed: open settings file` from the Command Palette to edit your settings file directly.
+You can configure most settings in the Settings Editor ({#kb zode::OpenSettings}). For advanced settings, run `zode: open settings file` from the Command Palette to edit your settings file directly.
 
 Here’s how common VS Code settings translate:
 
-| VS Code             | Zode               | Notes                         |
-| ------------------- | ------------------ | ----------------------------- |
-| editor.fontFamily   | buffer_font_family | Zode uses Zed Mono by default |
-| editor.fontSize     | buffer_font_size   | Set in pixels                 |
-| editor.tabSize      | tab_size           | Can override per language     |
-| editor.insertSpaces | insert_spaces      | Boolean                       |
-| editor.formatOnSave | format_on_save     | Works with formatter enabled  |
-| editor.wordWrap     | soft_wrap          | Supports optional wrap column |
+| VS Code             | Zode               | Notes                                                |
+| ------------------- | ------------------ | ---------------------------------------------------- |
+| editor.fontFamily   | buffer_font_family | Zode uses SF Mono on macOS, JetBrains Mono elsewhere |
+| editor.fontSize     | buffer_font_size   | Set in pixels                                        |
+| editor.tabSize      | tab_size           | Can override per language                            |
+| editor.insertSpaces | insert_spaces      | Boolean                                              |
+| editor.formatOnSave | format_on_save     | Works with formatter enabled                         |
+| editor.wordWrap     | soft_wrap          | Supports optional wrap column                        |
 
 Zode also supports per-project settings. You can find these in the Settings Editor as well.
 
@@ -244,7 +244,7 @@ Here’s a quick reference for where keybindings match and where they differ.
 To edit your keybindings:
 
 - Open the command palette (`Cmd+Shift+P`)
-- Run `Zed: Open Keymap Editor`
+- Run `zode: open keymap`
 
 This opens a list of all available bindings. You can override individual shortcuts, remove conflicts, or build a layout that works better for your setup.
 
@@ -265,7 +265,7 @@ In Zode:
 
 - Most project-level behavior is scoped to the folder you open. Search, Git integration, tasks, and environment detection all treat the opened directory as the project root.
 
-- Per-project settings are optional. You can add a `.zed/settings.json` file inside a project to override global settings, but Zode does not use `.code-workspace` files and won’t import them.
+- Per-project settings are optional. You can add a `.zode/settings.json` file inside a project to override global settings, but Zode does not use `.code-workspace` files and won’t import them.
 
 - You can start from a single file or an empty window. Zode doesn’t require you to open a folder to begin editing.
 
@@ -306,16 +306,16 @@ You won’t find one-to-one replacements for every VS Code extension, especially
 Unlike VS Code, Zode doesn’t require an extension to collaborate. It’s built into the core experience.
 
 - Open the Collab Panel in the left dock.
-- Create a channel and [invite your collaborators](https://zed.dev/docs/collaboration#inviting-a-collaborator) to join.
-- [Share your screen or your codebase](https://zed.dev/docs/collaboration#share-a-project) directly.
+- Create a channel and [invite your collaborators](https://zodekit.com/docs/collaboration#inviting-a-collaborator) to join.
+- [Share your screen or your codebase](https://zodekit.com/docs/collaboration#share-a-project) directly.
 
 Once connected, you’ll see each other's cursors, selections, and edits in real time. Voice chat is included, so you can talk as you work. There’s no need for separate tools or third-party logins.
 
-Learn how [Zode uses Zode](https://zed.dev/blog/zed-is-our-office) to plan work and collaborate.
+Learn how [Zed uses Zed](https://zed.dev/blog/zed-is-our-office) to plan work and collaborate.
 
 ### Using AI in Zode
 
-If you’re used to GitHub Copilot in VS Code, you can do the same in Zode. You can also explore other agents through Zed Pro, or bring your own keys and connect without authentication. You can disable AI features entirely if you prefer.
+If you’re used to GitHub Copilot in VS Code, you can do the same in Zode. You can also bring your own keys or use an external agent, with no account needed. You can disable AI features entirely if you prefer.
 
 #### Configuring GitHub Copilot
 
@@ -330,9 +330,9 @@ Once signed in, just start typing. Zode will offer suggestions inline for you to
 
 To use other AI models in Zode, you have several options:
 
-- Use Zode’s hosted models, with higher rate limits. Requires [authentication](https://zed.dev/docs/authentication) and subscription to [Zed Pro](https://zed.dev/docs/ai/subscription.html).
-- Bring your own [API keys](https://zed.dev/docs/ai/llm-providers.html), no authentication needed
-- Use [external agents like Claude Agent](https://zed.dev/docs/ai/external-agents.html).
+- Zode has no hosted models or subscription: AI features use your own keys or agents.
+- Bring your own [API keys](https://zodekit.com/docs/ai/llm-providers.html), no authentication needed
+- Use [external agents like Claude Agent](https://zodekit.com/docs/ai/external-agents.html).
 
 ### Advanced Config and Productivity Tweaks
 
@@ -352,7 +352,7 @@ Here are a few useful tweaks:
 "load_direnv": "shell_hook"
 ```
 
-**Custom Tasks**: Define build or run commands in your `tasks.json` (accessed via command palette: `zed: open tasks`):
+**Custom Tasks**: Define build or run commands in your `tasks.json` (accessed via command palette: `zode: open tasks`):
 
 ```json
 [
@@ -364,4 +364,4 @@ Here are a few useful tweaks:
 ```
 
 **Bring over custom snippets**
-Copy your VS Code snippet JSON directly into Zode's snippets folder (`zed: configure snippets`).
+Copy your VS Code snippet JSON directly into Zode's snippets folder (`zode: configure snippets`).

@@ -10,7 +10,7 @@
 #
 #   script/build-remote-server-manifest <directory of release assets> <version>
 #
-# Reads `zed-remote-server-<os>-<arch>.gz` and writes
+# Reads `zode-remote-server-<os>-<arch>.gz` and writes
 # `remote-server-manifest.json` beside them. The URLs point at the release of
 # tag `v<version>` in `$GITHUB_REPOSITORY`. The shape is a contract with
 # `ReleaseManifest` in `crates/remote_connection/src/remote_server_release.rs`.
@@ -49,7 +49,7 @@ sha256_of() {
 }
 
 entries=()
-for asset_path in "${asset_directory}"/zed-remote-server-*-*.gz; do
+for asset_path in "${asset_directory}"/zode-remote-server-*-*.gz; do
     [[ -f "${asset_path}" ]] || continue
     asset=$(basename "${asset_path}")
     checksum=$(sha256_of "${asset_path}")

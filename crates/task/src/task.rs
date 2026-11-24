@@ -1,4 +1,4 @@
-//! Baseline interface of Tasks in Zed: all tasks in Zed are intended to use those for implementing their own logic.
+//! Baseline interface of Tasks in Zode: all tasks in Zode are intended to use those for implementing their own logic.
 
 mod adapter_schema;
 mod debug_format;
@@ -20,7 +20,7 @@ use std::sync::Arc;
 pub use adapter_schema::{AdapterSchema, AdapterSchemas};
 pub use debug_format::{
     AttachRequest, BuildTaskDefinition, DebugRequest, DebugScenario, DebugTaskFile, LaunchRequest,
-    Request, TcpArgumentsTemplate, ZedDebugConfig,
+    Request, TcpArgumentsTemplate, ZodeDebugConfig,
 };
 pub use task_template::{
     DebugArgsRequest, HideStrategy, RevealStrategy, SaveStrategy, TaskHook, TaskTemplate,
@@ -30,14 +30,14 @@ pub use util::shell::{Shell, ShellKind};
 pub use util::shell_builder::ShellBuilder;
 pub use vscode_debug_format::VsCodeDebugTaskFile;
 pub use vscode_format::VsCodeTaskFile;
-pub use zed_actions::RevealTarget;
+pub use zode_actions::RevealTarget;
 
 /// Task identifier, unique within the application.
 /// Based on it, task reruns and terminal tabs are managed.
 #[derive(Default, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Deserialize)]
 pub struct TaskId(pub String);
 
-/// Contains all information needed by Zed to spawn a new terminal tab for the given task.
+/// Contains all information needed by Zode to spawn a new terminal tab for the given task.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct SpawnInTerminal {
     /// Id of the task to use when determining task tab affinity.
@@ -146,7 +146,7 @@ impl ResolvedTask {
     }
 }
 
-/// Variables, available for use in [`TaskContext`] when a Zed's [`TaskTemplate`] gets resolved into a [`ResolvedTask`].
+/// Variables, available for use in [`TaskContext`] when a Zode's [`TaskTemplate`] gets resolved into a [`ResolvedTask`].
 /// Name of the variable must be a valid shell variable identifier, which generally means that it is
 /// a word  consisting only  of alphanumeric characters and underscores,
 /// and beginning with an alphabetic character or an  underscore.
@@ -205,7 +205,10 @@ impl FromStr for VariableName {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let without_prefix = s.strip_prefix(ZED_VARIABLE_NAME_PREFIX).ok_or(())?;
+        let canonical = canonical_variable_name(s);
+        let without_prefix = canonical
+            .strip_prefix(ZODE_VARIABLE_NAME_PREFIX)
+            .ok_or(())?;
         let value = match without_prefix {
             "FILE" => Self::File,
             "FILENAME" => Self::Filename,
@@ -223,7 +226,7 @@ impl FromStr for VariableName {
             "MAIN_GIT_WORKTREE" => Self::MainGitWorktree,
             _ => {
                 if let Some(custom_name) =
-                    without_prefix.strip_prefix(ZED_CUSTOM_VARIABLE_NAME_PREFIX)
+                    without_prefix.strip_prefix(ZODE_CUSTOM_VARIABLE_NAME_PREFIX)
                 {
                     Self::Custom(Cow::Owned(custom_name.to_owned()))
                 } else {
@@ -236,36 +239,50 @@ impl FromStr for VariableName {
 }
 
 /// A prefix that all [`VariableName`] variants are prefixed with when used in environment variables and similar template contexts.
-pub const ZED_VARIABLE_NAME_PREFIX: &str = "ZED_";
-const ZED_CUSTOM_VARIABLE_NAME_PREFIX: &str = "CUSTOM_";
+pub const ZODE_VARIABLE_NAME_PREFIX: &str = "ZODE_";
+const ZODE_CUSTOM_VARIABLE_NAME_PREFIX: &str = "CUSTOM_";
+
+/// The prefix task templates written for Zed use. Language extensions come from Zed's
+/// registry with `$ZED_FILE`, `$ZED_CUSTOM_*` and so on baked into their tasks, so
+/// templates still accept it. Nothing Zode emits — environment, labels, docs — uses it.
+const LEGACY_ZED_VARIABLE_NAME_PREFIX: &str = "ZED_";
+
+/// Maps a template variable name to the name Zode stores it under: `ZED_FILE` becomes
+/// `ZODE_FILE`, anything else is returned as is.
+pub fn canonical_variable_name(name: &str) -> Cow<'_, str> {
+    match name.strip_prefix(LEGACY_ZED_VARIABLE_NAME_PREFIX) {
+        Some(rest) => Cow::Owned(format!("{ZODE_VARIABLE_NAME_PREFIX}{rest}")),
+        None => Cow::Borrowed(name),
+    }
+}
 
 impl std::fmt::Display for VariableName {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::File => write!(f, "{ZED_VARIABLE_NAME_PREFIX}FILE"),
-            Self::Filename => write!(f, "{ZED_VARIABLE_NAME_PREFIX}FILENAME"),
-            Self::RelativeFile => write!(f, "{ZED_VARIABLE_NAME_PREFIX}RELATIVE_FILE"),
-            Self::RelativeDir => write!(f, "{ZED_VARIABLE_NAME_PREFIX}RELATIVE_DIR"),
-            Self::Dirname => write!(f, "{ZED_VARIABLE_NAME_PREFIX}DIRNAME"),
-            Self::Stem => write!(f, "{ZED_VARIABLE_NAME_PREFIX}STEM"),
-            Self::WorktreeRoot => write!(f, "{ZED_VARIABLE_NAME_PREFIX}WORKTREE_ROOT"),
-            Self::Symbol => write!(f, "{ZED_VARIABLE_NAME_PREFIX}SYMBOL"),
-            Self::Row => write!(f, "{ZED_VARIABLE_NAME_PREFIX}ROW"),
-            Self::Column => write!(f, "{ZED_VARIABLE_NAME_PREFIX}COLUMN"),
-            Self::SelectedText => write!(f, "{ZED_VARIABLE_NAME_PREFIX}SELECTED_TEXT"),
-            Self::Language => write!(f, "{ZED_VARIABLE_NAME_PREFIX}LANGUAGE"),
-            Self::RunnableSymbol => write!(f, "{ZED_VARIABLE_NAME_PREFIX}RUNNABLE_SYMBOL"),
-            Self::PickProcessId => write!(f, "{ZED_VARIABLE_NAME_PREFIX}PICK_PID"),
-            Self::MainGitWorktree => write!(f, "{ZED_VARIABLE_NAME_PREFIX}MAIN_GIT_WORKTREE"),
+            Self::File => write!(f, "{ZODE_VARIABLE_NAME_PREFIX}FILE"),
+            Self::Filename => write!(f, "{ZODE_VARIABLE_NAME_PREFIX}FILENAME"),
+            Self::RelativeFile => write!(f, "{ZODE_VARIABLE_NAME_PREFIX}RELATIVE_FILE"),
+            Self::RelativeDir => write!(f, "{ZODE_VARIABLE_NAME_PREFIX}RELATIVE_DIR"),
+            Self::Dirname => write!(f, "{ZODE_VARIABLE_NAME_PREFIX}DIRNAME"),
+            Self::Stem => write!(f, "{ZODE_VARIABLE_NAME_PREFIX}STEM"),
+            Self::WorktreeRoot => write!(f, "{ZODE_VARIABLE_NAME_PREFIX}WORKTREE_ROOT"),
+            Self::Symbol => write!(f, "{ZODE_VARIABLE_NAME_PREFIX}SYMBOL"),
+            Self::Row => write!(f, "{ZODE_VARIABLE_NAME_PREFIX}ROW"),
+            Self::Column => write!(f, "{ZODE_VARIABLE_NAME_PREFIX}COLUMN"),
+            Self::SelectedText => write!(f, "{ZODE_VARIABLE_NAME_PREFIX}SELECTED_TEXT"),
+            Self::Language => write!(f, "{ZODE_VARIABLE_NAME_PREFIX}LANGUAGE"),
+            Self::RunnableSymbol => write!(f, "{ZODE_VARIABLE_NAME_PREFIX}RUNNABLE_SYMBOL"),
+            Self::PickProcessId => write!(f, "{ZODE_VARIABLE_NAME_PREFIX}PICK_PID"),
+            Self::MainGitWorktree => write!(f, "{ZODE_VARIABLE_NAME_PREFIX}MAIN_GIT_WORKTREE"),
             Self::Custom(s) => write!(
                 f,
-                "{ZED_VARIABLE_NAME_PREFIX}{ZED_CUSTOM_VARIABLE_NAME_PREFIX}{s}"
+                "{ZODE_VARIABLE_NAME_PREFIX}{ZODE_CUSTOM_VARIABLE_NAME_PREFIX}{s}"
             ),
         }
     }
 }
 
-/// Container for predefined environment variables that describe state of Zed at the time the task was spawned.
+/// Container for predefined environment variables that describe state of Zode at the time the task was spawned.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct TaskVariables(HashMap<VariableName, String>);
 
@@ -316,14 +333,14 @@ impl IntoIterator for TaskVariables {
 }
 
 /// Keeps track of the file associated with a task and context of tasks execution (i.e. current file or current function).
-/// Keeps all Zed-related state inside, used to produce a resolved task out of its template.
+/// Keeps all Zode-related state inside, used to produce a resolved task out of its template.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TaskContext {
     /// A path to a directory in which the task should be executed.
     pub cwd: Option<PathBuf>,
     /// Additional environment variables associated with a given task.
     pub task_variables: TaskVariables,
-    /// Environment variables obtained when loading the project into Zed.
+    /// Environment variables obtained when loading the project into Zode.
     /// This is the environment one would get when `cd`ing in a terminal
     /// into the project's root directory.
     pub project_env: HashMap<String, String>,
@@ -382,15 +399,15 @@ pub fn shell_to_proto(shell: Shell) -> proto::Shell {
 
 type VsCodeEnvVariable = String;
 type VsCodeCommand = String;
-type ZedEnvVariable = String;
+type ZodeEnvVariable = String;
 
 struct EnvVariableReplacer {
-    variables: HashMap<VsCodeEnvVariable, ZedEnvVariable>,
-    commands: HashMap<VsCodeCommand, ZedEnvVariable>,
+    variables: HashMap<VsCodeEnvVariable, ZodeEnvVariable>,
+    commands: HashMap<VsCodeCommand, ZodeEnvVariable>,
 }
 
 impl EnvVariableReplacer {
-    fn new(variables: HashMap<VsCodeEnvVariable, ZedEnvVariable>) -> Self {
+    fn new(variables: HashMap<VsCodeEnvVariable, ZodeEnvVariable>) -> Self {
         Self {
             variables,
             commands: HashMap::default(),
@@ -399,7 +416,7 @@ impl EnvVariableReplacer {
 
     fn with_commands(
         mut self,
-        commands: impl IntoIterator<Item = (VsCodeCommand, ZedEnvVariable)>,
+        commands: impl IntoIterator<Item = (VsCodeCommand, ZodeEnvVariable)>,
     ) -> Self {
         self.commands = commands.into_iter().collect();
         self

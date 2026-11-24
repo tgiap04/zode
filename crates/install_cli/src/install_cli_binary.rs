@@ -1,4 +1,4 @@
-use super::register_zed_scheme;
+use super::register_zode_scheme;
 use anyhow::{Context as _, Result};
 use gpui::{AppContext as _, AsyncApp, Context, PromptLevel, Window, actions};
 use release_channel::ReleaseChannel;
@@ -94,7 +94,7 @@ pub fn install_cli_binary(window: &mut Window, cx: &mut Context<Workspace>) {
                 cx,
             )
         })?;
-        register_zed_scheme(cx).await.log_err();
+        register_zode_scheme(cx).await.log_err();
         Ok(())
     })
     .detach_and_prompt_err("Error installing zode CLI", window, cx, |_, _, _| None);

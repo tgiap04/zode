@@ -1,13 +1,13 @@
 ---
 title: Building Zode for Linux
-description: "Guide to building zed for linux for Zode development."
+description: "Guide to building Zode for linux for Zode development."
 ---
 
 # Building Zode for Linux
 
 ## Repository
 
-Clone the [Zode repository](https://github.com/zed-industries/zed).
+Clone the [Zode repository](https://github.com/tgiap04/zode).
 
 ## Dependencies
 
@@ -91,12 +91,12 @@ This section is for distribution maintainers packaging Zode.
 Zode has two main binaries:
 
 - You will need to build `crates/cli` and make its binary available in `$PATH` with the name `zode`.
-- You will need to build `crates/zed` and put it at `$PATH/to/cli/../../libexec/zode-editor`. For example, if you are going to put the cli at `~/.local/bin/zode` put the editor at `~/.local/libexec/zode-editor`. As some linux distributions (notably Arch) discourage the use of `libexec`, you can also put this binary at `$PATH/to/cli/../../lib/zed/zed-editor` (e.g. `~/.local/lib/zed/zed-editor`) instead.
-- If you are going to provide a `.desktop` file you can find a template in `crates/zed/resources/zed.desktop.in`, and use `envsubst` to populate it with the values required. This file should also be renamed to `$APP_ID.desktop` so that the file [follows the FreeDesktop standards](https://github.com/zed-industries/zed/issues/12707#issuecomment-2168742761). You should also make this desktop file executable (`chmod 755`).
+- You will need to build `crates/zode` and put it at `$PATH/to/cli/../../libexec/zode-editor`. For example, if you are going to put the cli at `~/.local/bin/zode` put the editor at `~/.local/libexec/zode-editor`. As some linux distributions (notably Arch) discourage the use of `libexec`, you can also put this binary at `$PATH/to/cli/../../lib/zode/zode-editor` (e.g. `~/.local/lib/zode/zode-editor`) instead.
+- If you are going to provide a `.desktop` file you can find a template in `crates/zode/resources/zode.desktop.in`, and use `envsubst` to populate it with the values required. This file should also be renamed to `$APP_ID.desktop` so that the file [follows the FreeDesktop standards](https://github.com/zed-industries/zed/issues/12707#issuecomment-2168742761). You should also make this desktop file executable (`chmod 755`).
 - You will need to ensure that the necessary libraries are installed. You can get the current list by [inspecting the built binary](https://github.com/zed-industries/zed/blob/935cf542aebf55122ce6ed1c91d0fe8711970c82/script/bundle-linux#L65-L67) on your system.
 - For an example of a complete build script, see [script/bundle-linux](https://github.com/zed-industries/zed/blob/935cf542aebf55122ce6ed1c91d0fe8711970c82/script/bundle-linux).
-- You can disable Zode's auto updates and provide instructions for users who try to update Zode manually by building (or running) Zode with the environment variable `ZED_UPDATE_EXPLANATION`. For example: `ZED_UPDATE_EXPLANATION="Please use flatpak to update zed."`.
-- Make sure to update the contents of the `crates/zed/RELEASE_CHANNEL` file to 'nightly', 'preview', or 'stable', with no newline. This will cause Zode to use the credentials manager to remember a user's login.
+- You can disable Zode's auto updates and provide instructions for users who try to update Zode manually by building (or running) Zode with the environment variable `ZODE_UPDATE_EXPLANATION`. For example: `ZODE_UPDATE_EXPLANATION="Please use flatpak to update Zode."`.
+- Make sure to update the contents of the `crates/zode/RELEASE_CHANNEL` file to 'nightly', 'preview', or 'stable', with no newline. This will cause Zode to use the credentials manager to remember a user's login.
 
 ### Other things to note
 
@@ -105,7 +105,7 @@ Zode moves quickly, and distribution maintainers often have different constraint
 - Zode is a fast-moving project. We typically publish 2-3 builds per week to address reported issues and ship larger changes.
 - Zode automatically installs versions of common developer tools, similar to rustup/rbenv/pyenv. This behavior is discussed [here](https://github.com/zed-industries/zed/issues/12589).
 - Users can install extensions locally and from [zed-industries/extensions](https://github.com/zed-industries/extensions). Extensions may install additional tools such as language servers. Planned safety improvements are tracked [here](https://github.com/zed-industries/zed/issues/12358).
-- Zode connects to several online services by default (AI, telemetry, collaboration). AI and our telemetry can be disabled by your users with their zed settings or by patching our [default settings file](https://github.com/zed-industries/zed/blob/main/assets/settings/default.json).
+- Zode connects to several online services by default (AI, telemetry, collaboration). AI and our telemetry can be disabled by your users with their Zode settings or by patching our [default settings file](https://github.com/tgiap04/zode/blob/develop/assets/settings/default.json).
 - Because of the points above, Zode currently does not work well with sandboxes. See [this discussion](https://github.com/zed-industries/zed/pull/12006#issuecomment-2130421220).
 
 ## Flatpak
@@ -131,10 +131,10 @@ $ cargo install cargo-heaptrack
 Then, to build and run Zode with the profiler attached:
 
 ```sh
-$ cargo heaptrack -b zed
+$ cargo heaptrack -b zode
 ```
 
-When this zed instance is exited, terminal output will include a command to run `heaptrack_interpret` to convert the `*.raw.zst` profile to a `*.zst` file which can be passed to `heaptrack_gui` for viewing.
+When this Zode instance is exited, terminal output will include a command to run `heaptrack_interpret` to convert the `*.raw.zst` profile to a `*.zst` file which can be passed to `heaptrack_gui` for viewing.
 
 ## Perf recording
 
@@ -158,13 +158,13 @@ Use this when Zode is using a lot of CPU. It is not useful for hangs.
   run `sudo chown $USER:$USER perf.data`
 
 - Get build info:
-  Run Zode again and type `zed: about` in the command pallet to get the exact commit.
+  Run Zode again and type `zode: about` in the command pallet to get the exact commit.
 
 The `perf.data` file can be sent to Zode together with the exact commit.
 
 ### Later
 
-This can be done by Zode staff.
+This can be done by the Zode maintainers.
 
 - Build Zode with symbols:
   Check out the commit found previously and modify `Cargo.toml`.
@@ -177,7 +177,7 @@ This can be done by Zode staff.
 ```
 
 - Add the symbols to the perf database:
-  `perf buildid-cache -v -a <path to release zed binary>`
+  `perf buildid-cache -v -a <path to release zode binary>`
 
 - Resolve the symbols from the db:
   `perf inject -i perf.data -o perf_with_symbols.data`

@@ -58,15 +58,18 @@ install_sccache() {
 }
 
 configure_sccache() {
-    if [[ -z "${R2_ACCOUNT_ID:-}" ]]; then
-        echo "R2_ACCOUNT_ID not set, skipping sccache configuration"
+    # The objects live in this repository's GitHub Actions cache, which is free.
+    # The `expose_actions_cache` step before this one hands its URL and token to
+    # `run:` steps; without them (a local run, or a job that lacks that step)
+    # the build simply compiles without a cache. There is deliberately no other
+    # backend: the R2 bucket this used before was paid for by the gigabyte.
+    if [[ -z "${ACTIONS_RESULTS_URL:-}" || -z "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
+        echo "The GitHub Actions cache is not reachable from this step, compiling without sccache"
         return
     fi
 
-    echo "Configuring sccache with Cloudflare R2..."
+    echo "Configuring sccache with the GitHub Actions cache..."
 
-    local bucket="${SCCACHE_BUCKET:-sccache-zed}"
-    local key_prefix="${SCCACHE_KEY_PREFIX:-sccache/}"
     local base_dir="${GITHUB_WORKSPACE:-$(pwd)}"
 
     # Use the absolute path to sccache binary for RUSTC_WRAPPER to avoid
@@ -74,51 +77,32 @@ configure_sccache() {
     local sccache_bin="${SCCACHE_DIR}/sccache"
 
     # Set in current process
-    export SCCACHE_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-    export SCCACHE_BUCKET="${bucket}"
-    export SCCACHE_REGION="auto"
-    export SCCACHE_S3_KEY_PREFIX="${key_prefix}"
+    export SCCACHE_GHA_ENABLED="true"
+    # A cache that cannot be reached must cost a slower build, never a red one:
+    # on a server error the wrapper runs rustc itself.
+    export SCCACHE_IGNORE_SERVER_IO_ERROR="1"
     export SCCACHE_BASEDIR="${base_dir}"
-    export AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID}"
-    export AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY}"
     export RUSTC_WRAPPER="${sccache_bin}"
 
     # Also write to GITHUB_ENV for subsequent steps
     if [[ -n "${GITHUB_ENV:-}" ]]; then
         {
-            echo "SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT}"
-            echo "SCCACHE_BUCKET=${SCCACHE_BUCKET}"
-            echo "SCCACHE_REGION=${SCCACHE_REGION}"
-            echo "SCCACHE_S3_KEY_PREFIX=${SCCACHE_S3_KEY_PREFIX}"
+            echo "SCCACHE_GHA_ENABLED=${SCCACHE_GHA_ENABLED}"
+            echo "SCCACHE_IGNORE_SERVER_IO_ERROR=${SCCACHE_IGNORE_SERVER_IO_ERROR}"
             echo "SCCACHE_BASEDIR=${SCCACHE_BASEDIR}"
-            echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
-            echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
             echo "RUSTC_WRAPPER=${RUSTC_WRAPPER}"
         } >> "$GITHUB_ENV"
     fi
 
-    echo "✓ sccache configured with Cloudflare R2 (bucket: ${bucket})"
+    echo "✓ sccache configured with the GitHub Actions cache"
 }
 
 show_config() {
     echo "=== sccache configuration ==="
     echo "sccache version: $(sccache --version)"
     echo "RUSTC_WRAPPER: ${RUSTC_WRAPPER:-<not set>}"
-    echo "SCCACHE_BUCKET: ${SCCACHE_BUCKET:-<not set>}"
-    echo "SCCACHE_ENDPOINT: ${SCCACHE_ENDPOINT:-<not set>}"
-    echo "SCCACHE_REGION: ${SCCACHE_REGION:-<not set>}"
-    echo "SCCACHE_S3_KEY_PREFIX: ${SCCACHE_S3_KEY_PREFIX:-<not set>}"
+    echo "SCCACHE_GHA_ENABLED: ${SCCACHE_GHA_ENABLED:-<not set>}"
     echo "SCCACHE_BASEDIR: ${SCCACHE_BASEDIR:-<not set>}"
-    if [[ -n "${AWS_ACCESS_KEY_ID:-}" ]]; then
-        echo "AWS_ACCESS_KEY_ID: <set, length=${#AWS_ACCESS_KEY_ID}>"
-    else
-        echo "AWS_ACCESS_KEY_ID: <not set>"
-    fi
-    if [[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
-        echo "AWS_SECRET_ACCESS_KEY: <set>"
-    else
-        echo "AWS_SECRET_ACCESS_KEY: <not set>"
-    fi
     echo "=== sccache stats ==="
     sccache --show-stats || true
 }

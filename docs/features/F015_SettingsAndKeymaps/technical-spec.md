@@ -14,7 +14,7 @@ here for lack of a better home. It spans `crates/settings` (the `SettingsStore` 
 file-watch plumbing), `crates/settings_ui` (the settings editor window), `crates/keymap_editor`
 (the keybinding editor and keystroke recorder), `crates/theme`/`crates/theme_selector` (theme
 data model and picker), `crates/onboarding` (base-keymap picker), `crates/feature_flags`, and
-`crates/zed/src/zed/migrate.rs` (the migration banner/writer).
+`crates/zode/src/zode/migrate.rs` (the migration banner/writer).
 
 ## Polymorphic Behavior
 
@@ -53,8 +53,8 @@ enum referenced in `permissions-matrix.md`/`data-model.md` DISC-010; write paths
 | FR-004 | Back up then rewrite `settings.json`/`keymap.json` when a deprecated-schema field is detected                              | `write_settings_migration`/`write_keymap_migration`                   | yes        |
 | FR-005 | Resolve a feature flag's on/off (or variant) value per staff/override/server precedence, and re-render observers on change | `FeatureFlagStore::try_flag_value`, `FeatureFlagAppExt::observe_flag` | yes        |
 
-**Source:** `crates/settings/src/settings_store.rs:350-401` (FR-001/002), `crates/zed/src/zed.rs`
-(`handle_keymap_file_changes`, FR-003), `crates/zed/src/zed/migrate.rs:278-326` (FR-004),
+**Source:** `crates/settings/src/settings_store.rs:350-401` (FR-001/002), `crates/zode/src/zode.rs`
+(`handle_keymap_file_changes`, FR-003), `crates/zode/src/zode/migrate.rs:278-326` (FR-004),
 `crates/feature_flags/src/store.rs:155-176` (FR-005)
 
 ### Business Rules
@@ -109,7 +109,7 @@ fn update_keybinding(op):
 ### BR-003_BackupWrittenBeforeLiveFileIsRewritten
 
 **Linked FR:** FR-004
-**Source:** `crates/zed/src/zed/migrate.rs:283-299` (`write_keymap_migration`), `:308-324`
+**Source:** `crates/zode/src/zode/migrate.rs:283-299` (`write_keymap_migration`), `:308-324`
 (`write_settings_migration`)
 **Applies to:** "Backup and Update" click handler in `MigrationBanner`
 **Rule:** For both keymap and settings migration, the ordering is fixed: load current text →
@@ -141,7 +141,7 @@ fn write_X_migration(fs):
 **Applies to:** every `impl FeatureFlag` type in `crates/feature_flags/src/flags.rs`
 **Rule:** A flag resolves in strict precedence: `enabled_for_all()` (default `false`) always wins
 if true; else a per-flag user override read from `FeatureFlagsSettings`; else "on" if the account
-is staff (or a debug build) and `ZED_DISABLE_STAFF` is not set and `enabled_for_staff()` (default
+is staff (or a debug build) and `ZODE_DISABLE_STAFF` is not set and `enabled_for_staff()` (default
 `true`) holds; else a server-pushed flag value; else `None`/off.
 
 **Pseudocode:**
@@ -150,7 +150,7 @@ is staff (or a debug build) and `ZED_DISABLE_STAFF` is not set and `enabled_for_
 fn try_flag_value(flag):
     if flag.enabled_for_all(): return on_variant
     if override = settings.overrides.get(flag.NAME): return variant_from_key(override)
-    if (debug_build or store.staff) and !ZED_DISABLE_STAFF and flag.enabled_for_staff():
+    if (debug_build or store.staff) and !ZODE_DISABLE_STAFF and flag.enabled_for_staff():
         return on_variant
     if wire = store.server_flags.get(flag.NAME): return from_wire(wire)
     return None
@@ -210,7 +210,7 @@ _(See itemized entries below.)_
 
 **Linked FR:** FR-002, FR-003
 **Source:** `crates/settings/src/settings_file.rs:165` (`watch_config_file`, BL137),
-`crates/zed/src/main.rs` (`watch_themes`, BL206), `crates/zed/src/zed.rs`
+`crates/zode/src/main.rs` (`watch_themes`, BL206), `crates/zode/src/zode.rs`
 (`handle_keymap_file_changes`, BL143)
 **Type:** queue-worker / observer (local filesystem, not a network integration)
 **Target:** OS filesystem watch (`Fs::watch`) on `settings.json`, `global_settings.json`,
@@ -319,7 +319,7 @@ triggers Save and `Cmd-S` no longer does, without restarting Zode.
 **Requirements fulfilled:**
 
 - **FR-003** Watch the keymap file and hot-reload keybindings — via `handle_keymap_file_changes`
-  **Source:** `crates/zed/src/zed.rs` (`handle_keymap_file_changes`, symbol confirmed via
+  **Source:** `crates/zode/src/zode.rs` (`handle_keymap_file_changes`, symbol confirmed via
   `behavior-logic.md` BL143)
 
 **Rules enforced:** BR-002 (see Cross-Cutting Logic) — non-user bindings are never edited in
@@ -391,7 +391,7 @@ before the live file changes.
 **Requirements fulfilled:**
 
 - **FR-004** (see Cross-Cutting Logic) — via `write_settings_migration`/`write_keymap_migration`
-  **Source:** `crates/zed/src/zed/migrate.rs:278-326`
+  **Source:** `crates/zode/src/zode/migrate.rs:278-326`
 
 **Rules enforced:** BR-003 (see Cross-Cutting Logic).
 
@@ -422,7 +422,7 @@ confirm the live `settings.json` parses successfully under the current schema af
 **Requirements fulfilled:**
 
 - **FR-004** (see US061) — via `write_settings_migration`/`write_keymap_migration`
-  **Source:** `crates/zed/src/zed/migrate.rs:288-299, 313-324`
+  **Source:** `crates/zode/src/zode/migrate.rs:288-299, 313-324`
 
 **Rules enforced:** BR-003 (see Cross-Cutting Logic) — migration write always follows the backup
 write within the same function call, never independently.
@@ -440,8 +440,8 @@ write within the same function call, never independently.
 | Settings file has a parse error after an external hand-edit    | Error recorded in `SettingsStore::file_errors` keyed by `SettingsFile`; watch loop keeps running rather than crashing (`crates/settings/src/settings_store.rs:443`)                                                                                 |
 | User edits a non-user-owned keybinding's keystrokes            | Treated as an `Add` (not `Replace`) plus a suppression unbind if keystrokes changed — original non-user source file is never rewritten (BR-002)                                                                                                     |
 | Backup write (`fs.atomic_write` to the backup path) fails      | `.with_context(...)` wraps the error ("Failed to create settings backup in home directory"); the function returns early via `?` — the live file write in the same call never executes, so the live config is never corrupted by a partial migration |
-| Live settings/keymap file does not exist yet at migration time | `fs.is_file` check is false, so no backup is written and the migrated text is written directly to the (new) live path (`crates/zed/src/zed/migrate.rs:295-299, 320-324`)                                                                            |
-| Staff account has `ZED_DISABLE_STAFF` set                      | Feature flags that default `enabled_for_staff() == true` resolve to off for that session, letting a developer verify the non-staff experience locally                                                                                               |
+| Live settings/keymap file does not exist yet at migration time | `fs.is_file` check is false, so no backup is written and the migrated text is written directly to the (new) live path (`crates/zode/src/zode/migrate.rs:295-299, 320-324`)                                                                          |
+| Staff account has `ZODE_DISABLE_STAFF` set                     | Feature flags that default `enabled_for_staff() == true` resolve to off for that session, letting a developer verify the non-staff experience locally                                                                                               |
 
 ## Key Entities
 
@@ -490,7 +490,7 @@ codebase — `ROUTE###`/`SCR###` references are intentionally omitted rather tha
 | 3     | `SettingsWindow`/`update_settings_file`                               | `crates/settings_ui/src/settings_ui.rs:720-859, 3862-3887, 1906-1983`                          | Settings UI entry point, write dispatch by file target, search  |
 | 4     | `KeymapEditor`/`save_keybinding_update`                               | `crates/keymap_editor/src/keymap_editor.rs:432-541, 3600-3672`                                 | Keymap editor UI + keybinding write path                        |
 | 5     | `KeymapFile::update_keybinding`                                       | `crates/settings/src/keymap_file.rs:867-905`                                                   | Replace-vs-add / suppression-unbind logic (BR-002)              |
-| 6     | `MigrationBanner`/`write_settings_migration`/`write_keymap_migration` | `crates/zed/src/zed/migrate.rs:25-137, 262-326`                                                | Backup-then-migrate flow (BR-003)                               |
+| 6     | `MigrationBanner`/`write_settings_migration`/`write_keymap_migration` | `crates/zode/src/zode/migrate.rs:25-137, 262-326`                                              | Backup-then-migrate flow (BR-003)                               |
 | 7     | `BaseKeymapSelectorDelegate::confirm`                                 | `crates/onboarding/src/base_keymap_picker.rs:174-199`                                          | Base keymap preset switch                                       |
 | 8     | `Theme`/`ThemeFamily`/`Appearance`                                    | `crates/theme/src/theme.rs:54-59, 192-220`                                                     | Theme data model + appearance discriminator                     |
 | 9     | `FeatureFlagStore`/`FeatureFlag` trait                                | `crates/feature_flags/src/feature_flags.rs:20-132`, `crates/feature_flags/src/store.rs:69-236` | Staff feature-flag resolution (PERM006, BR-004)                 |
@@ -498,7 +498,7 @@ codebase — `ROUTE###`/`SCR###` references are intentionally omitted rather tha
 ## Unresolved Questions
 
 1. **`handle_keymap_file_changes` exact line range**: the function's presence in
-   `crates/zed/src/zed.rs` is confirmed via `behavior-logic.md` (BL143) and by the base-keymap
+   `crates/zode/src/zode.rs` is confirmed via `behavior-logic.md` (BL143) and by the base-keymap
    picker's downstream effect, but its own precise line range was not independently re-verified
    with a fresh `grep`/`Read` pass in this session — treat the citation above as file-level, not
    line-verified.
@@ -519,7 +519,7 @@ codebase — `ROUTE###`/`SCR###` references are intentionally omitted rather tha
    keybinding-array Replace/Add logic).
 4. **File:** `crates/settings/src/keymap_file.rs:867-905` — next: `KeymapFile::update_keybinding`,
    the core replace-vs-add decision (BR-002) that the keymap editor write path delegates to.
-5. **File:** `crates/zed/src/zed/migrate.rs:262-326` — last: the backup-then-migrate functions
+5. **File:** `crates/zode/src/zode/migrate.rs:262-326` — last: the backup-then-migrate functions
    that tie settings and keymap files together under one safety guarantee (BR-003) when the app
    detects a deprecated schema field.
 
@@ -554,4 +554,4 @@ flow) goes through the `fs::Fs` trait's `atomic_write`/`write` methods against p
 disk (`settings.json`, `global_settings.json`, `keymap.json`, their `*_backup.json` siblings, and
 project `.zed/settings.json` files) — confirmed at `crates/settings/src/settings_store.rs:575-586`,
 `crates/keymap_editor/src/keymap_editor.rs:3658-3663`, and
-`crates/zed/src/zed/migrate.rs:285-323`. None of these paths touch Zode's SQLite `db` crate.
+`crates/zode/src/zode/migrate.rs:285-323`. None of these paths touch Zode's SQLite `db` crate.

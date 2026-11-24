@@ -82,7 +82,7 @@ See [gopls inlayHints documentation](https://github.com/golang/tools/blob/master
 
 Zode supports zero-configuration debugging of Go tests and entry points (`func main`) using Delve. Run {#action debugger::Start} ({#kb debugger::Start}) to see a contextual list of these preconfigured debug tasks.
 
-For more control, you can add debug configurations to `.zed/debug.json`. See below for examples.
+For more control, you can add debug configurations to `.zode/debug.json`. See below for examples.
 
 - [Delve configuration documentation](https://github.com/go-delve/delve/blob/master/Documentation/api/dap/README.md#launch-and-attach-configurations)
 
@@ -95,7 +95,7 @@ To debug a specific package, you can do so by setting the Delve mode to "debug".
   {
     "label": "Go (Delve)",
     "adapter": "Delve",
-    "program": "$ZED_FILE",
+    "program": "$ZODE_FILE",
     "request": "launch",
     "mode": "debug"
   },
@@ -127,7 +127,7 @@ The "program" is still the package name, and you can use the "buildFlags" to do 
     "program": ".",
     "buildFlags": ["-tags", "integration"]
     // To filter down to just the test your cursor is in:
-    // "args": ["-test.run", "$ZED_SYMBOL"]
+    // "args": ["-test.run", "$ZODE_SYMBOL"]
   }
 ]
 ```
@@ -144,8 +144,8 @@ and the "build" command should build that.
     "adapter": "Delve",
     "request": "launch",
     "mode": "exec",
-    "program": "${ZED_WORKTREE_ROOT}/__debug_unit",
-    "args": ["-test.v", "-test.run=${ZED_SYMBOL}"],
+    "program": "${ZODE_WORKTREE_ROOT}/__debug_unit",
+    "args": ["-test.v", "-test.run=${ZODE_SYMBOL}"],
     "build": {
       "command": "go",
       "args": [

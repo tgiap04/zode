@@ -12,7 +12,7 @@ use crate::tasks::workflows::{
     vars::{PathCondition, StepOutput, WorkflowInput, one_workflow_per_non_main_branch_and_token},
 };
 
-pub(crate) const ZED_EXTENSION_CLI_SHA: &str = "1fa7f1a3ec28ea1eae6db2e937d7a538fb10c0c7";
+pub(crate) const ZODE_EXTENSION_CLI_SHA: &str = "1fa7f1a3ec28ea1eae6db2e937d7a538fb10c0c7";
 
 // This should follow the set target in crates/extension/src/extension_builder.rs
 const EXTENSION_RUST_TARGET: &str = "wasm32-wasip2";
@@ -51,7 +51,7 @@ pub(crate) fn extension_tests() -> Workflow {
         .add_env(("CARGO_TERM_COLOR", "always"))
         .add_env(("RUST_BACKTRACE", 1))
         .add_env(("CARGO_INCREMENTAL", 0))
-        .add_env(("ZED_EXTENSION_CLI_SHA", ZED_EXTENSION_CLI_SHA))
+        .add_env(("ZODE_EXTENSION_CLI_SHA", ZODE_EXTENSION_CLI_SHA))
         .add_env(("RUSTUP_TOOLCHAIN", "stable"))
         .add_env(("CARGO_BUILD_TARGET", EXTENSION_RUST_TARGET))
         .map(|workflow| {
@@ -163,7 +163,7 @@ pub fn cache_zed_extension_cli() -> (Step<Use>, StepOutput) {
     .with(
         Input::default()
             .add("path", "zed-extension")
-            .add("key", "zed-extension-${{ env.ZED_EXTENSION_CLI_SHA }}"),
+            .add("key", "zed-extension-${{ env.ZODE_EXTENSION_CLI_SHA }}"),
     );
     let output = StepOutput::new(&step, "cache-hit");
     (step, output)
@@ -173,7 +173,7 @@ pub fn download_zed_extension_cli(cache_hit: StepOutput) -> Step<Run> {
     named::bash!(
     indoc! {
         r#"
-        wget --quiet "https://zed-extension-cli.nyc3.digitaloceanspaces.com/$ZED_EXTENSION_CLI_SHA/x86_64-unknown-linux-gnu/zed-extension" -O "$GITHUB_WORKSPACE/zed-extension"
+        wget --quiet "https://zed-extension-cli.nyc3.digitaloceanspaces.com/$ZODE_EXTENSION_CLI_SHA/x86_64-unknown-linux-gnu/zed-extension" -O "$GITHUB_WORKSPACE/zed-extension"
         chmod +x "$GITHUB_WORKSPACE/zed-extension"
         "#,
     }

@@ -123,7 +123,7 @@ with **Upgrade…** or **Manage Plan…** beside it. Both open the website in yo
 browser. Paying happens there, through Polar; the editor never sees a card or a
 payment.
 
-The editor reads the plan from `api.zodekit.site` at four moments only: when
+The editor reads the plan from `api.zodekit.com` at four moments only: when
 you sign in, once when the editor starts with a saved sign-in, when you open the
 account menu or a sync window, and right after a request your plan refused. Never
 on a timer, and never on a machine that has not signed in. The answer
@@ -137,8 +137,11 @@ to do instead of failing with a code:
   device on the web, or upgrade.
 - **`.env` sync on Free** uploads nothing. Files already stored stay readable
   and removable.
-- **Remote control** pauses when the day's relay allowance is used up. It resets
-  at 00:00 UTC; Pro raises it.
+- **Remote control** on Free pauses after 5 GiB through the relay in a day. It
+  resets at 00:00 UTC; Pro and Team have no daily limit.
+- **Push notifications** from remote control are on every plan, Free included.
+- **Shared team files** are read-only once the team's plan ends. A member past
+  the seats the team pays for is told to ask the owner to add one.
 
 Nothing in the editor is switched off because of the plan. The server decides,
 so a plan you changed a minute ago takes effect at once.

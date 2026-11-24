@@ -55,8 +55,14 @@ pub struct SyncDeviceUsage {
 pub struct PlanLimits {
     pub sync_devices: SyncDeviceUsage,
     pub env_sync: bool,
-    pub relay_daily_bytes: u64,
+    /// `None` is unlimited: paid plans, and everyone while the server
+    /// enforces no plan.
+    pub relay_daily_bytes: Option<u64>,
     pub team_vault: bool,
+    /// Whether the plan includes pushes to paired devices. A server from
+    /// before the field existed does not say, and is read as "yes": its 402
+    /// stays the truth, and "no" is only ever believed when it is stated.
+    pub push_notifications: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +113,7 @@ impl PlanSummary {
                 env_sync: wire.limits.env_sync,
                 relay_daily_bytes: wire.limits.relay_daily_bytes,
                 team_vault: wire.limits.team_vault,
+                push_notifications: wire.limits.push_notifications,
             },
             team: wire.team.map(|team| TeamSummary {
                 id: team.id.into(),
@@ -150,8 +157,14 @@ struct PlanResponse {
 struct LimitsResponse {
     sync_devices: SyncDevicesResponse,
     env_sync: bool,
-    relay_daily_bytes: u64,
+    relay_daily_bytes: Option<u64>,
     team_vault: bool,
+    #[serde(default = "pushes_unless_told_otherwise")]
+    push_notifications: bool,
+}
+
+fn pushes_unless_told_otherwise() -> bool {
+    true
 }
 
 #[derive(Deserialize)]
@@ -182,6 +195,8 @@ pub enum PlanLimitReason {
     EnvSyncNotInPlan,
     TeamVaultNotInPlan,
     TeamInactive,
+    /// A member past the paid seats of a team that is still live.
+    TeamSeatUnavailable,
     /// A reason added on the server after this build, carried as its slug.
     Other(String),
 }
@@ -223,6 +238,7 @@ impl PlanLimit {
             Some("env_sync_not_in_plan") => PlanLimitReason::EnvSyncNotInPlan,
             Some("team_vault_not_in_plan") => PlanLimitReason::TeamVaultNotInPlan,
             Some("team_inactive") => PlanLimitReason::TeamInactive,
+            Some("team_seat_unavailable") => PlanLimitReason::TeamSeatUnavailable,
             Some(other) => PlanLimitReason::Other(other.to_string()),
             None => PlanLimitReason::Other("http_402".into()),
         };
@@ -261,6 +277,9 @@ impl PlanLimit {
             PlanLimitReason::TeamInactive => {
                 "Your team's plan has ended. Shared files are read-only.".to_string()
             }
+            PlanLimitReason::TeamSeatUnavailable => {
+                "Your team has more members than paid seats, and you are past them. Ask the team owner to add a seat.".to_string()
+            }
             PlanLimitReason::Other(slug) => format!(
                 "Your plan does not cover this ({slug}). See your plan on the web."
             ),
@@ -276,8 +295,8 @@ impl std::fmt::Display for PlanLimit {
 
 /// Whether `candidate` is a page on the web app at `web_url`.
 ///
-/// A plain prefix test is not enough: `https://zodekit.site.example` starts
-/// with `https://zodekit.site`. The origin must end where the candidate's path,
+/// A plain prefix test is not enough: `https://zodekit.com.example` starts
+/// with `https://zodekit.com`. The origin must end where the candidate's path,
 /// query or fragment begins.
 pub fn on_web_origin(candidate: &str, web_url: &str) -> bool {
     let origin = web_url.trim_end_matches('/');
@@ -302,7 +321,7 @@ fn web_link(candidate: Option<String>, web_url: &str, path: &str) -> String {
 mod tests {
     use super::*;
 
-    const WEB: &str = "https://zodekit.site";
+    const WEB: &str = "https://zodekit.com";
 
     fn full_plan() -> serde_json::Value {
         serde_json::json!({
@@ -319,8 +338,8 @@ mod tests {
             },
             "team": { "id": "t1", "name": "Acme", "role": "admin", "keyVersion": 2 },
             "grandfather": null,
-            "upgradeUrl": "https://zodekit.site/pricing",
-            "manageUrl": "https://zodekit.site/account/billing"
+            "upgradeUrl": "https://zodekit.com/pricing",
+            "manageUrl": "https://zodekit.com/account/billing"
         })
     }
 
@@ -340,8 +359,9 @@ mod tests {
             PlanLimits {
                 sync_devices: SyncDeviceUsage { used: 3, max: None },
                 env_sync: true,
-                relay_daily_bytes: 21_474_836_480,
+                relay_daily_bytes: Some(21_474_836_480),
                 team_vault: true,
+                push_notifications: true,
             }
         );
         assert_eq!(
@@ -353,8 +373,8 @@ mod tests {
                 key_version: 2,
             })
         );
-        assert_eq!(plan.upgrade_url, "https://zodekit.site/pricing");
-        assert_eq!(plan.manage_url, "https://zodekit.site/account/billing");
+        assert_eq!(plan.upgrade_url, "https://zodekit.com/pricing");
+        assert_eq!(plan.manage_url, "https://zodekit.com/account/billing");
     }
 
     #[test]
@@ -379,8 +399,53 @@ mod tests {
             plan.grandfather_env_until.as_ref().map(|at| at.as_ref()),
             Some("2027-11-03T00:00:00.000Z")
         );
-        assert_eq!(plan.upgrade_url, "https://zodekit.site/pricing");
-        assert_eq!(plan.manage_url, "https://zodekit.site/account/billing");
+        assert_eq!(plan.upgrade_url, "https://zodekit.com/pricing");
+        assert_eq!(plan.manage_url, "https://zodekit.com/account/billing");
+    }
+
+    /// Paid plans, and everyone while the server enforces no plan, have no
+    /// relay cap; the server says so with `null`. Older servers send a number.
+    #[test]
+    fn an_unlimited_relay_is_null_and_does_not_lose_the_plan() {
+        let mut body = full_plan();
+        body["limits"]["relayDailyBytes"] = serde_json::Value::Null;
+        let plan = PlanSummary::parse(&body.to_string(), WEB).expect("a valid plan");
+        assert_eq!(plan.limits.relay_daily_bytes, None);
+        assert!(plan.limits.env_sync, "the other limits are kept");
+
+        body["limits"]["relayDailyBytes"] = 5_368_709_120u64.into();
+        let plan = PlanSummary::parse(&body.to_string(), WEB).expect("a valid plan");
+        assert_eq!(plan.limits.relay_daily_bytes, Some(5_368_709_120));
+    }
+
+    /// A member past the paid seats of a team that is still active: the plan has
+    /// not ended, and only the owner can fix it, by adding a seat.
+    #[test]
+    fn a_member_past_the_paid_seats_is_told_to_ask_the_owner() {
+        let limit = PlanLimit::from_body(r#"{"error":"team_seat_unavailable"}"#, WEB);
+        let sentence = limit.sentence();
+        assert!(sentence.contains("owner"), "{sentence}");
+        assert!(!sentence.contains("ended"), "{sentence}");
+    }
+
+    /// Pushes are in the plan unless the server says they are not: a server
+    /// from before the field must not switch them off here.
+    #[test]
+    fn push_notifications_are_read_when_stated_and_assumed_when_not() {
+        let mut body = full_plan();
+        let read = |body: &serde_json::Value| {
+            PlanSummary::parse(&body.to_string(), WEB)
+                .expect("a valid plan")
+                .limits
+                .push_notifications
+        };
+        assert!(read(&body), "a server that does not say");
+
+        body["limits"]["pushNotifications"] = false.into();
+        assert!(!read(&body));
+
+        body["limits"]["pushNotifications"] = true.into();
+        assert!(read(&body));
     }
 
     #[test]
@@ -403,30 +468,30 @@ mod tests {
     #[test]
     fn links_to_another_origin_are_replaced_with_the_web_pages() {
         let mut body = full_plan();
-        body["upgradeUrl"] = "https://zodekit.site.evil.example/pricing".into();
+        body["upgradeUrl"] = "https://zodekit.com.evil.example/pricing".into();
         body["manageUrl"] = "javascript:alert(1)".into();
         let plan = PlanSummary::parse(&body.to_string(), WEB).expect("a valid plan");
-        assert_eq!(plan.upgrade_url, "https://zodekit.site/pricing");
-        assert_eq!(plan.manage_url, "https://zodekit.site/account/billing");
+        assert_eq!(plan.upgrade_url, "https://zodekit.com/pricing");
+        assert_eq!(plan.manage_url, "https://zodekit.com/account/billing");
     }
 
     #[test]
     fn the_origin_check_ends_where_the_path_begins() {
-        assert!(on_web_origin("https://zodekit.site", WEB));
-        assert!(on_web_origin("https://zodekit.site/pricing", WEB));
-        assert!(on_web_origin("https://zodekit.site/pricing?plan=pro", WEB));
+        assert!(on_web_origin("https://zodekit.com", WEB));
+        assert!(on_web_origin("https://zodekit.com/pricing", WEB));
+        assert!(on_web_origin("https://zodekit.com/pricing?plan=pro", WEB));
         assert!(on_web_origin(
-            "https://zodekit.site/pricing",
-            "https://zodekit.site/"
+            "https://zodekit.com/pricing",
+            "https://zodekit.com/"
         ));
         assert!(!on_web_origin(
-            "https://zodekit.site.evil.example/pricing",
+            "https://zodekit.com.evil.example/pricing",
             WEB
         ));
-        assert!(!on_web_origin("https://zodekit.siteevil.example", WEB));
-        assert!(!on_web_origin("http://zodekit.site/pricing", WEB));
+        assert!(!on_web_origin("https://zodekit.comevil.example", WEB));
+        assert!(!on_web_origin("http://zodekit.com/pricing", WEB));
         assert!(!on_web_origin(
-            "https://evil.example/?https://zodekit.site",
+            "https://evil.example/?https://zodekit.com",
             WEB
         ));
         assert!(!on_web_origin("", WEB));
@@ -448,16 +513,13 @@ mod tests {
                 "limit": 2,
                 "used": 3,
                 "tier": "free",
-                "upgradeUrl": "https://zodekit.site/pricing?from=editor"
+                "upgradeUrl": "https://zodekit.com/pricing?from=editor"
             });
             let limit = PlanLimit::from_body(&body.to_string(), WEB);
             assert_eq!(limit.reason, reason, "{slug}");
             assert_eq!(limit.limit, Some(2));
             assert_eq!(limit.used, Some(3));
-            assert_eq!(
-                limit.upgrade_url,
-                "https://zodekit.site/pricing?from=editor"
-            );
+            assert_eq!(limit.upgrade_url, "https://zodekit.com/pricing?from=editor");
             assert!(!limit.sentence().is_empty(), "{slug} has nothing to say");
         }
     }
@@ -467,7 +529,7 @@ mod tests {
         let limit = PlanLimit::from_body(r#"{"error":"sync_device_limit"}"#, WEB);
         assert_eq!(limit.reason, PlanLimitReason::SyncDeviceLimit);
         assert_eq!(limit.limit, None);
-        assert_eq!(limit.upgrade_url, "https://zodekit.site/pricing");
+        assert_eq!(limit.upgrade_url, "https://zodekit.com/pricing");
     }
 
     #[test]
@@ -479,7 +541,7 @@ mod tests {
                 PlanLimitReason::Other("http_402".into()),
                 "{body:?}"
             );
-            assert_eq!(limit.upgrade_url, "https://zodekit.site/pricing");
+            assert_eq!(limit.upgrade_url, "https://zodekit.com/pricing");
         }
     }
 
@@ -496,7 +558,7 @@ mod tests {
             r#"{"error":"env_sync_not_in_plan","upgradeUrl":"https://evil.example/pricing"}"#,
             WEB,
         );
-        assert_eq!(limit.upgrade_url, "https://zodekit.site/pricing");
+        assert_eq!(limit.upgrade_url, "https://zodekit.com/pricing");
     }
 
     #[test]

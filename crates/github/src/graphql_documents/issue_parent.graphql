@@ -1,0 +1,16 @@
+query IssueParent($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) {
+      parent {
+        id
+        databaseId
+        number
+        title
+        state
+        repository {
+          nameWithOwner
+        }
+      }
+    }
+  }
+}

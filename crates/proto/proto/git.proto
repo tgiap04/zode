@@ -200,6 +200,8 @@ message GitCreateBranch {
   reserved 2;
   uint64 repository_id = 3;
   string branch_name = 4;
+  // The ref the branch starts at; HEAD when absent.
+  optional string base_branch = 5;
 }
 
 message GitChangeBranch {
@@ -458,6 +460,8 @@ message Fetch {
   uint64 repository_id = 3;
   uint64 askpass_id = 4;
   optional string remote = 5;
+  // `source:destination`; the destination stays under refs/remotes/<remote>/.
+  optional string refspec = 6;
 }
 
 message GetRemotes {

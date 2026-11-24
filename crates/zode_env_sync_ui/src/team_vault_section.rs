@@ -965,13 +965,20 @@ fn diff_of(before: &[u8], after: &[u8]) -> TextDiff {
     zode_sync::diff::between(&before, &after)
 }
 
+/// Whether a refusal is the user's own plan to change. A member past a live
+/// team's paid seats can only ask the owner for a seat; their plan is not it.
+fn offers_upgrade(status: &TeamVaultStatus) -> bool {
+    matches!(status, TeamVaultStatus::PlanLimited(limit)
+        if limit.reason != zode_account::PlanLimitReason::TeamSeatUnavailable)
+}
+
 impl Render for TeamVaultSection {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let state = self.state(cx);
         let actions = team_actions(&state.status, state.role, state.team_has_key);
         let notice = team_notice(&state.status, state.role, state.team_has_key);
         let working = matches!(state.status, TeamVaultStatus::Working);
-        let plan_limited = matches!(state.status, TeamVaultStatus::PlanLimited(_));
+        let plan_limited = offers_upgrade(&state.status);
         let failed = matches!(state.status, TeamVaultStatus::Failed(_));
         let role = state.role.map(|role| match role {
             TeamRole::Owner => "owner",
@@ -1227,7 +1234,7 @@ pub(crate) mod tests {
             assert!(!pull_needs_confirmation(plain), "{plain}");
         }
         for risky in [
-            ".zed/settings.json",
+            ".zode/settings.json",
             ".vscode/tasks.json",
             ".envrc",
             "package.json",
@@ -1287,6 +1294,22 @@ pub(crate) mod tests {
         assert!(!team_actions(&TeamVaultStatus::KeyPending, MEMBER, false).create_key);
         let (sentence, _) = team_notice(&TeamVaultStatus::KeyPending, ADMIN, false).expect("said");
         assert!(sentence.contains("no key yet"), "{sentence}");
+    }
+
+    #[test]
+    fn a_member_past_the_paid_seats_is_not_offered_an_upgrade() {
+        let web = zode_account::web_url();
+        let seat = TeamVaultStatus::PlanLimited(PlanLimit::from_body(
+            r#"{"error":"team_seat_unavailable"}"#,
+            &web,
+        ));
+        let plan = TeamVaultStatus::PlanLimited(PlanLimit::from_body(
+            r#"{"error":"team_vault_not_in_plan"}"#,
+            &web,
+        ));
+        assert!(!offers_upgrade(&seat));
+        assert!(offers_upgrade(&plan));
+        assert!(!offers_upgrade(&TeamVaultStatus::Ready));
     }
 
     #[test]

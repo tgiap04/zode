@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the remote server the app installs on a WSL or SSH host, as
-# `target/zed-remote-server-linux-<arch>.gz`.
+# `target/zode-remote-server-linux-<arch>.gz`.
 #
 # Statically linked against musl: the gnu `remote_server` in the Linux tarball
 # needs the glibc of the image it was built in, which older WSL distributions do
@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-channel=$(<crates/zed/RELEASE_CHANNEL)
+channel=$(<crates/zode/RELEASE_CHANNEL)
 target_dir="${CARGO_TARGET_DIR:-target}"
 
 # The same version `script/bundle-linux` builds the app with.
@@ -67,6 +67,6 @@ if [[ "${channel}" == "stable" || "${channel}" == "preview" ]] && [[ "${reported
 fi
 echo "remote_server ${musl_triple} on ${channel} reports ${reported}"
 
-archive="${target_dir}/zed-remote-server-linux-${arch}.gz"
+archive="${target_dir}/zode-remote-server-linux-${arch}.gz"
 gzip -9 --stdout "${binary}" > "${archive}"
 echo "wrote ${archive}"

@@ -1,0 +1,50 @@
+npm warn Unknown user config "python". This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.
+Usage: react-native run-ios [options]
+
+builds your app and starts it on iOS simulator
+
+Options:
+  --verbose                Increase logging verbosity
+  --no-packager            Do not launch packager while running the app
+  --port <number>           (default: 8081)
+  --terminal <string>      Launches the Metro Bundler in a new window using the
+                           specified terminal path.
+  --binary-path <string>   Path relative to project root where pre-built .app
+                           binary lives.
+  --list-devices           List all available iOS devices and simulators and
+                           let you choose one to run the app.
+  --udid <string>          Explicitly set the device to use by UDID
+  --simulator <string>     Explicitly set the simulator to use. Optionally set
+                           the iOS version between parentheses at the end to
+                           match an exact version: "iPhone 15 (17.0)"
+  --mode <string>          Explicitly set the scheme configuration to use. This
+                           option is case sensitive.
+  --scheme <string>        Explicitly set Xcode scheme to use
+  --destination <string>   Explicitly extend destination e.g. "arch=x86_64"
+  --verbose                Do not use xcbeautify or xcpretty even if installed
+  --xcconfig [string]      Explicitly set xcconfig to use
+  --buildFolder <string>   Location for iOS build artifacts. Corresponds to
+                           Xcode's "-derivedDataPath".
+  --extra-params <string>  Custom params that will be passed to xcodebuild
+                           command.
+  --target <string>        Explicitly set Xcode target to use.
+  -i --interactive         Explicitly select which scheme and configuration to
+                           use before running a build
+  --force-pods             Force CocoaPods installation
+  --only-pods              Only install Cocoapods, do not build the app
+  --device [string]        Explicitly set the device to use by name or by
+                           unique device identifier . If the value is not
+                           provided,the app will run on the first available
+                           physical device.
+  -h, --help               display help for command
+
+Example usage:
+  Run on a different simulator, e.g. iPhone SE (2nd generation): 
+  npx react-native run-ios --simulator "iPhone SE (2nd generation)"
+
+  Run on a connected device, e.g. Max's iPhone: 
+  npx react-native run-ios --device "Max's iPhone"
+
+  Run on the AppleTV simulator: 
+  npx react-native run-ios --simulator "Apple TV"  --scheme "helloworld-tvOS"
+

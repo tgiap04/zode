@@ -99,7 +99,7 @@ See [Clang-Format Style Options](https://clang.llvm.org/docs/ClangFormatStyleOpt
 
 You can trigger formatting via {#kb editor::Format} or the `editor: format` action from the command palette or by enabling format on save.
 
-Configure formatting in Settings ({#kb zed::OpenSettings}) under Languages > C++, or add to your settings file:
+Configure formatting in Settings ({#kb zode::OpenSettings}) under Languages > C++, or add to your settings file:
 
 ```json [settings]
   "languages": {
@@ -142,7 +142,7 @@ After building your project, CMake will generate the `compile_commands.json` fil
 
 ## Debugging
 
-You can use CodeLLDB or GDB to debug native binaries. (Make sure that your build process passes `-g` to the C++ compiler, so that debug information is included in the resulting binary.) See below for examples of debug configurations that you can add to `.zed/debug.json`.
+You can use CodeLLDB or GDB to debug native binaries. (Make sure that your build process passes `-g` to the C++ compiler, so that debug information is included in the resulting binary.) See below for examples of debug configurations that you can add to `.zode/debug.json`.
 
 - [CodeLLDB configuration documentation](https://github.com/vadimcn/codelldb/blob/master/MANUAL.md#starting-a-new-debug-session)
 - [GDB configuration documentation](https://sourceware.org/gdb/current/onlinedocs/gdb.html/Debugger-Adapter-Protocol.html)
@@ -157,9 +157,9 @@ You can use CodeLLDB or GDB to debug native binaries. (Make sure that your build
     "build": {
       "command": "make",
       "args": ["-j8"],
-      "cwd": "$ZED_WORKTREE_ROOT"
+      "cwd": "$ZODE_WORKTREE_ROOT"
     },
-    "program": "$ZED_WORKTREE_ROOT/build/prog",
+    "program": "$ZODE_WORKTREE_ROOT/build/prog",
     "request": "launch",
     "adapter": "CodeLLDB"
   }

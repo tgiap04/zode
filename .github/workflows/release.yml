@@ -45,13 +45,22 @@ jobs:
       uses: taiki-e/install-action@921e2c9f7148d7ba14cd819f417db338f63e733c
     - name: steps::clear_target_dir_if_large
       run: ./script/clear-target-dir-if-larger-than 350 200
+    - name: steps::expose_actions_cache
+      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+      with:
+        script: |
+          for (const name of [
+            'ACTIONS_CACHE_URL',
+            'ACTIONS_RESULTS_URL',
+            'ACTIONS_RUNTIME_TOKEN',
+            'ACTIONS_CACHE_SERVICE_V2',
+          ]) {
+            if (process.env[name]) {
+              core.exportVariable(name, process.env[name]);
+            }
+          }
     - name: steps::setup_sccache
       run: ./script/setup-sccache
-      env:
-        R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-        R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-        R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        SCCACHE_BUCKET: sccache-zed
     - name: steps::cargo_nextest
       run: cargo nextest run --workspace --no-fail-fast --no-tests=warn
     - name: steps::show_sccache_stats
@@ -97,13 +106,22 @@ jobs:
       timeout-minutes: 20
     - name: steps::download_wasi_sdk
       run: ./script/download-wasi-sdk
+    - name: steps::expose_actions_cache
+      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+      with:
+        script: |
+          for (const name of [
+            'ACTIONS_CACHE_URL',
+            'ACTIONS_RESULTS_URL',
+            'ACTIONS_RUNTIME_TOKEN',
+            'ACTIONS_CACHE_SERVICE_V2',
+          ]) {
+            if (process.env[name]) {
+              core.exportVariable(name, process.env[name]);
+            }
+          }
     - name: steps::setup_sccache
       run: ./script/setup-sccache
-      env:
-        R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-        R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-        R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        SCCACHE_BUCKET: sccache-zed
     - name: steps::clippy
       run: ./script/clippy
     - name: steps::show_sccache_stats
@@ -119,6 +137,8 @@ jobs:
         clean: false
     - name: run_tests::check_scripts::run_shellcheck
       run: ./script/shellcheck-scripts error
+    - name: run_tests::check_scripts::test_macos_signing
+      run: ./script/test-macos-signing
     - id: get_actionlint
       name: run_tests::check_scripts::download_actionlint
       run: bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
@@ -185,11 +205,11 @@ jobs:
     - name: release::create_draft_release::warn_on_version_divergence
       run: |
         # The first `version =` in the manifest is the one under [package].
-        manifest_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/zed/Cargo.toml | head -1)
+        manifest_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' crates/zode/Cargo.toml | head -1)
         if [ "$manifest_version" = "$RELEASE_VERSION" ]; then
-            echo "tag and crates/zed/Cargo.toml agree on ${RELEASE_VERSION}"
+            echo "tag and crates/zode/Cargo.toml agree on ${RELEASE_VERSION}"
         else
-            echo "::warning::tag ${GITHUB_REF_NAME} builds as ${RELEASE_VERSION} but crates/zed/Cargo.toml on this commit says ${manifest_version}; the binary reports the tag, and for a stable tag bump_manifest_on_develop moves develop's manifest up to it"
+            echo "::warning::tag ${GITHUB_REF_NAME} builds as ${RELEASE_VERSION} but crates/zode/Cargo.toml on this commit says ${manifest_version}; the binary reports the tag, and for a stable tag bump_manifest_on_develop moves develop's manifest up to it"
         fi
     - name: mkdir -p target/
       run: mkdir -p target/
@@ -239,7 +259,7 @@ jobs:
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git commit -m "chore: bump zode to $VERSION" -- crates/zed/Cargo.toml Cargo.lock
+        git commit -m "chore: bump zode to $VERSION" -- crates/zode/Cargo.toml Cargo.lock
         git push origin HEAD:refs/heads/develop
       env:
         VERSION: ${{ steps.sync.outputs.version }}
@@ -251,8 +271,8 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: none
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
       CARGO_PROFILE_RELEASE_LTO: 'false'
-      ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
-      ZED_MINIDUMP_ENDPOINT: ${{ secrets.ZED_SENTRY_MINIDUMP_ENDPOINT }}
+      ZODE_CLIENT_CHECKSUM_SEED: ${{ secrets.ZODE_CLIENT_CHECKSUM_SEED }}
+      ZODE_MINIDUMP_ENDPOINT: ${{ secrets.ZODE_SENTRY_MINIDUMP_ENDPOINT }}
       CC: clang
       CXX: clang++
       DEBIAN_FRONTEND: noninteractive
@@ -304,8 +324,8 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: none
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
       CARGO_PROFILE_RELEASE_LTO: 'false'
-      ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
-      ZED_MINIDUMP_ENDPOINT: ${{ secrets.ZED_SENTRY_MINIDUMP_ENDPOINT }}
+      ZODE_CLIENT_CHECKSUM_SEED: ${{ secrets.ZODE_CLIENT_CHECKSUM_SEED }}
+      ZODE_MINIDUMP_ENDPOINT: ${{ secrets.ZODE_SENTRY_MINIDUMP_ENDPOINT }}
       CC: clang
       CXX: clang++
       DEBIAN_FRONTEND: noninteractive
@@ -357,10 +377,11 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: none
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
       CARGO_PROFILE_RELEASE_LTO: 'false'
-      ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
-      ZED_MINIDUMP_ENDPOINT: ${{ secrets.ZED_SENTRY_MINIDUMP_ENDPOINT }}
+      ZODE_CLIENT_CHECKSUM_SEED: ${{ secrets.ZODE_CLIENT_CHECKSUM_SEED }}
+      ZODE_MINIDUMP_ENDPOINT: ${{ secrets.ZODE_SENTRY_MINIDUMP_ENDPOINT }}
       MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
       APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
       APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
       APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
@@ -401,10 +422,11 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: none
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
       CARGO_PROFILE_RELEASE_LTO: 'false'
-      ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
-      ZED_MINIDUMP_ENDPOINT: ${{ secrets.ZED_SENTRY_MINIDUMP_ENDPOINT }}
+      ZODE_CLIENT_CHECKSUM_SEED: ${{ secrets.ZODE_CLIENT_CHECKSUM_SEED }}
+      ZODE_MINIDUMP_ENDPOINT: ${{ secrets.ZODE_SENTRY_MINIDUMP_ENDPOINT }}
       MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
       APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
       APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
       APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
@@ -445,8 +467,8 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: none
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
       CARGO_PROFILE_RELEASE_LTO: 'false'
-      ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
-      ZED_MINIDUMP_ENDPOINT: ${{ secrets.ZED_SENTRY_MINIDUMP_ENDPOINT }}
+      ZODE_CLIENT_CHECKSUM_SEED: ${{ secrets.ZODE_CLIENT_CHECKSUM_SEED }}
+      ZODE_MINIDUMP_ENDPOINT: ${{ secrets.ZODE_SENTRY_MINIDUMP_ENDPOINT }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_SIGNING_TENANT_ID }}
       AZURE_CLIENT_ID: ${{ secrets.AZURE_SIGNING_CLIENT_ID }}
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_SIGNING_CLIENT_SECRET }}
@@ -464,7 +486,7 @@ jobs:
     - name: script/determine-release-channel.ps1
       run: script/determine-release-channel.ps1
       shell: pwsh
-      working-directory: ${{ env.ZED_WORKSPACE }}
+      working-directory: ${{ env.ZODE_WORKSPACE }}
     - name: steps::free_disk_space
       run: |
         Remove-Item -Recurse -Force "C:\Android" -ErrorAction SilentlyContinue
@@ -499,8 +521,8 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: none
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
       CARGO_PROFILE_RELEASE_LTO: 'false'
-      ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
-      ZED_MINIDUMP_ENDPOINT: ${{ secrets.ZED_SENTRY_MINIDUMP_ENDPOINT }}
+      ZODE_CLIENT_CHECKSUM_SEED: ${{ secrets.ZODE_CLIENT_CHECKSUM_SEED }}
+      ZODE_MINIDUMP_ENDPOINT: ${{ secrets.ZODE_SENTRY_MINIDUMP_ENDPOINT }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_SIGNING_TENANT_ID }}
       AZURE_CLIENT_ID: ${{ secrets.AZURE_SIGNING_CLIENT_ID }}
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_SIGNING_CLIENT_SECRET }}
@@ -518,7 +540,7 @@ jobs:
     - name: script/determine-release-channel.ps1
       run: script/determine-release-channel.ps1
       shell: pwsh
-      working-directory: ${{ env.ZED_WORKSPACE }}
+      working-directory: ${{ env.ZODE_WORKSPACE }}
     - name: steps::free_disk_space
       run: |
         Remove-Item -Recurse -Force "C:\Android" -ErrorAction SilentlyContinue
@@ -578,11 +600,11 @@ jobs:
       timeout-minutes: 20
     - name: ./script/bundle-remote-server-linux
       run: ./script/bundle-remote-server-linux
-    - name: '@actions/upload-artifact zed-remote-server-linux-x86_64.gz'
+    - name: '@actions/upload-artifact zode-remote-server-linux-x86_64.gz'
       uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
       with:
-        name: zed-remote-server-linux-x86_64.gz
-        path: target/zed-remote-server-linux-x86_64.gz
+        name: zode-remote-server-linux-x86_64.gz
+        path: target/zode-remote-server-linux-x86_64.gz
         if-no-files-found: error
     container:
       image: ubuntu:22.04
@@ -619,11 +641,11 @@ jobs:
       timeout-minutes: 20
     - name: ./script/bundle-remote-server-linux
       run: ./script/bundle-remote-server-linux
-    - name: '@actions/upload-artifact zed-remote-server-linux-aarch64.gz'
+    - name: '@actions/upload-artifact zode-remote-server-linux-aarch64.gz'
       uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
       with:
-        name: zed-remote-server-linux-aarch64.gz
-        path: target/zed-remote-server-linux-aarch64.gz
+        name: zode-remote-server-linux-aarch64.gz
+        path: target/zode-remote-server-linux-aarch64.gz
         if-no-files-found: error
     container:
       image: ubuntu:22.04
@@ -683,8 +705,8 @@ jobs:
         mv ./artifacts/database-drivers-x86_64-unknown-linux-gnu/* driver-artifacts/
         mv ./artifacts/database-drivers-aarch64-pc-windows-msvc/* driver-artifacts/
         mv ./artifacts/database-drivers-x86_64-pc-windows-msvc/* driver-artifacts/
-        mv ./artifacts/zed-remote-server-linux-x86_64.gz/zed-remote-server-linux-x86_64.gz release-artifacts/zed-remote-server-linux-x86_64.gz
-        mv ./artifacts/zed-remote-server-linux-aarch64.gz/zed-remote-server-linux-aarch64.gz release-artifacts/zed-remote-server-linux-aarch64.gz
+        mv ./artifacts/zode-remote-server-linux-x86_64.gz/zode-remote-server-linux-x86_64.gz release-artifacts/zode-remote-server-linux-x86_64.gz
+        mv ./artifacts/zode-remote-server-linux-aarch64.gz/zode-remote-server-linux-aarch64.gz release-artifacts/zode-remote-server-linux-aarch64.gz
     - name: release::build_driver_manifest
       run: script/build-driver-manifest driver-artifacts "${GITHUB_REF_NAME#v}"
     - name: release::build_remote_server_manifest
@@ -709,7 +731,7 @@ jobs:
     steps:
     - name: release::validate_release_assets
       run: |
-        EXPECTED_ASSETS='["Zode-aarch64.dmg", "Zode-x86_64.dmg", "zode-linux-aarch64.tar.gz", "zode-linux-x86_64.tar.gz", "Zode-x86_64.exe", "Zode-aarch64.exe", "zed-remote-server-linux-x86_64.gz", "zed-remote-server-linux-aarch64.gz", "remote-server-manifest.json"]'
+        EXPECTED_ASSETS='["Zode-aarch64.dmg", "Zode-x86_64.dmg", "zode-linux-aarch64.tar.gz", "zode-linux-x86_64.tar.gz", "Zode-x86_64.exe", "Zode-aarch64.exe", "zode-remote-server-linux-x86_64.gz", "zode-remote-server-linux-aarch64.gz", "remote-server-manifest.json"]'
         TAG="$GITHUB_REF_NAME"
 
         ACTUAL_ASSETS=$(gh release view "$TAG" --repo="$GITHUB_REPOSITORY" --json assets -q '[.assets[].name]')

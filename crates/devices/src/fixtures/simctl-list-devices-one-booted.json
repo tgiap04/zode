@@ -1,0 +1,118 @@
+{
+  "devices" : {
+    "com.apple.CoreSimulator.SimRuntime.iOS-26-4" : [
+      {
+        "dataPath" : "\/Users\/testuser\/Library\/Developer\/CoreSimulator\/Devices\/00000000-0000-4000-8000-000000000001\/data",
+        "dataPathSize" : 18337792,
+        "logPath" : "\/Users\/testuser\/Library\/Logs\/CoreSimulator\/00000000-0000-4000-8000-000000000001",
+        "udid" : "00000000-0000-4000-8000-000000000001",
+        "isAvailable" : true,
+        "deviceTypeIdentifier" : "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro",
+        "state" : "Shutdown",
+        "name" : "iPhone 17 Pro"
+      },
+      {
+        "dataPath" : "\/Users\/testuser\/Library\/Developer\/CoreSimulator\/Devices\/00000000-0000-4000-8000-000000000002\/data",
+        "dataPathSize" : 18337792,
+        "logPath" : "\/Users\/testuser\/Library\/Logs\/CoreSimulator\/00000000-0000-4000-8000-000000000002",
+        "udid" : "00000000-0000-4000-8000-000000000002",
+        "isAvailable" : true,
+        "deviceTypeIdentifier" : "com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro-Max",
+        "state" : "Shutdown",
+        "name" : "iPhone 17 Pro Max"
+      },
+      {
+        "dataPath" : "\/Users\/testuser\/Library\/Developer\/CoreSimulator\/Devices\/00000000-0000-4000-8000-000000000003\/data",
+        "dataPathSize" : 18337792,
+        "logPath" : "\/Users\/testuser\/Library\/Logs\/CoreSimulator\/00000000-0000-4000-8000-000000000003",
+        "udid" : "00000000-0000-4000-8000-000000000003",
+        "isAvailable" : true,
+        "deviceTypeIdentifier" : "com.apple.CoreSimulator.SimDeviceType.iPhone-17e",
+        "state" : "Shutdown",
+        "name" : "iPhone 17e"
+      },
+      {
+        "dataPath" : "\/Users\/testuser\/Library\/Developer\/CoreSimulator\/Devices\/00000000-0000-4000-8000-000000000004\/data",
+        "dataPathSize" : 18337792,
+        "logPath" : "\/Users\/testuser\/Library\/Logs\/CoreSimulator\/00000000-0000-4000-8000-000000000004",
+        "udid" : "00000000-0000-4000-8000-000000000004",
+        "isAvailable" : true,
+        "deviceTypeIdentifier" : "com.apple.CoreSimulator.SimDeviceType.iPhone-Air",
+        "state" : "Shutdown",
+        "name" : "iPhone Air"
+      },
+      {
+        "lastBootedAt" : "2026-11-22T17:17:34Z",
+        "dataPath" : "\/Users\/testuser\/Library\/Developer\/CoreSimulator\/Devices\/00000000-0000-4000-8000-000000000005\/data",
+        "dataPathSize" : 4416643072,
+        "logPath" : "\/Users\/testuser\/Library\/Logs\/CoreSimulator\/00000000-0000-4000-8000-000000000005",
+        "udid" : "00000000-0000-4000-8000-000000000005",
+        "isAvailable" : true,
+        "logPathSize" : 688128,
+        "deviceTypeIdentifier" : "com.apple.CoreSimulator.SimDeviceType.iPhone-17",
+        "state" : "Booted",
+        "name" : "iPhone 17"
+      },
+      {
+        "dataPath" : "\/Users\/testuser\/Library\/Developer\/CoreSimulator\/Devices\/00000000-0000-4000-8000-000000000006\/data",
+        "dataPathSize" : 18337792,
+        "logPath" : "\/Users\/testuser\/Library\/Logs\/CoreSimulator\/00000000-0000-4000-8000-000000000006",
+        "udid" : "00000000-0000-4000-8000-000000000006",
+        "isAvailable" : true,
+        "deviceTypeIdentifier" : "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-13-inch-M5-12GB",
+        "state" : "Shutdown",
+        "name" : "iPad Pro 13-inch (M5)"
+      },
+      {
+        "dataPath" : "\/Users\/testuser\/Library\/Developer\/CoreSimulator\/Devices\/00000000-0000-4000-8000-000000000007\/data",
+        "dataPathSize" : 18337792,
+        "logPath" : "\/Users\/testuser\/Library\/Logs\/CoreSimulator\/00000000-0000-4000-8000-000000000007",
+        "udid" : "00000000-0000-4000-8000-000000000007",
+        "isAvailable" : true,
+        "deviceTypeIdentifier" : "com.apple.CoreSimulator.SimDeviceType.iPad-Pro-11-inch-M5-12GB",
+        "state" : "Shutdown",
+        "name" : "iPad Pro 11-inch (M5)"
+      },
+      {
+        "dataPath" : "\/Users\/testuser\/Library\/Developer\/CoreSimulator\/Devices\/00000000-0000-4000-8000-000000000008\/data",
+        "dataPathSize" : 18337792,
+        "logPath" : "\/Users\/testuser\/Library\/Logs\/CoreSimulator\/00000000-0000-4000-8000-000000000008",
+        "udid" : "00000000-0000-4000-8000-000000000008",
+        "isAvailable" : true,
+        "deviceTypeIdentifier" : "com.apple.CoreSimulator.SimDeviceType.iPad-mini-A17-Pro",
+        "state" : "Shutdown",
+        "name" : "iPad mini (A17 Pro)"
+      },
+      {
+        "dataPath" : "\/Users\/testuser\/Library\/Developer\/CoreSimulator\/Devices\/00000000-0000-4000-8000-000000000009\/data",
+        "dataPathSize" : 18337792,
+        "logPath" : "\/Users\/testuser\/Library\/Logs\/CoreSimulator\/00000000-0000-4000-8000-000000000009",
+        "udid" : "00000000-0000-4000-8000-000000000009",
+        "isAvailable" : true,
+        "deviceTypeIdentifier" : "com.apple.CoreSimulator.SimDeviceType.iPad-Air-13-inch-M4",
+        "state" : "Shutdown",
+        "name" : "iPad Air 13-inch (M4)"
+      },
+      {
+        "dataPath" : "\/Users\/testuser\/Library\/Developer\/CoreSimulator\/Devices\/00000000-0000-4000-8000-000000000010\/data",
+        "dataPathSize" : 18337792,
+        "logPath" : "\/Users\/testuser\/Library\/Logs\/CoreSimulator\/00000000-0000-4000-8000-000000000010",
+        "udid" : "00000000-0000-4000-8000-000000000010",
+        "isAvailable" : true,
+        "deviceTypeIdentifier" : "com.apple.CoreSimulator.SimDeviceType.iPad-Air-11-inch-M4",
+        "state" : "Shutdown",
+        "name" : "iPad Air 11-inch (M4)"
+      },
+      {
+        "dataPath" : "\/Users\/testuser\/Library\/Developer\/CoreSimulator\/Devices\/00000000-0000-4000-8000-000000000011\/data",
+        "dataPathSize" : 18337792,
+        "logPath" : "\/Users\/testuser\/Library\/Logs\/CoreSimulator\/00000000-0000-4000-8000-000000000011",
+        "udid" : "00000000-0000-4000-8000-000000000011",
+        "isAvailable" : true,
+        "deviceTypeIdentifier" : "com.apple.CoreSimulator.SimDeviceType.iPad-A16",
+        "state" : "Shutdown",
+        "name" : "iPad (A16)"
+      }
+    ]
+  }
+}

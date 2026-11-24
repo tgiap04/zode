@@ -1,0 +1,77 @@
+query ProjectDetails($projectId: ID!) {
+  node(id: $projectId) {
+    ... on ProjectV2 {
+      fields(first: 50) {
+        nodes {
+          __typename
+          ... on ProjectV2FieldCommon {
+            id
+            name
+            dataType
+          }
+          ... on ProjectV2SingleSelectField {
+            options {
+              id
+              name
+              color
+            }
+          }
+          ... on ProjectV2IterationField {
+            configuration {
+              iterations {
+                id
+                title
+                startDate
+              }
+              completedIterations {
+                id
+                title
+                startDate
+              }
+            }
+          }
+        }
+      }
+      views(first: 50) {
+        nodes {
+          id
+          number
+          name
+          layout
+          filter
+          groupByFields(first: 5) {
+            nodes {
+              ... on ProjectV2FieldCommon {
+                id
+              }
+            }
+          }
+          verticalGroupByFields(first: 5) {
+            nodes {
+              ... on ProjectV2FieldCommon {
+                id
+              }
+            }
+          }
+          sortByFields(first: 10) {
+            nodes {
+              direction
+              field {
+                ... on ProjectV2FieldCommon {
+                  id
+                }
+              }
+            }
+          }
+          visibleFields(first: 50) {
+            nodes {
+              ... on ProjectV2FieldCommon {
+                id
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

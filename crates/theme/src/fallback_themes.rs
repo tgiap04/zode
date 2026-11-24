@@ -8,7 +8,7 @@ use crate::{
     ThemeFamily, ThemeStyles, default_color_scales,
 };
 
-/// The default theme family for Zed.
+/// The default theme family for Zode.
 ///
 /// This is used to construct the default theme fallback values, as well as to
 /// have a theme available at compile time for tests.

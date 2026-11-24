@@ -31,7 +31,7 @@ impl Sidebar {
                     .tooltip(move |_window, cx| {
                         Tooltip::with_meta(
                             summary.clone(),
-                            Some(&zed_actions::account::SignIn),
+                            Some(&zode_actions::account::SignIn),
                             "Optional — the editor works signed out",
                             cx,
                         )
@@ -42,7 +42,7 @@ impl Sidebar {
                     // `render_rail_container`, and the panel toggle that hit it
                     // before either of them existed.
                     .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(zed_actions::account::SignIn), cx)
+                        window.dispatch_action(Box::new(zode_actions::account::SignIn), cx)
                     })
                     .into_any_element()
             }
@@ -94,24 +94,24 @@ impl Sidebar {
                                 .separator();
                             menu.action(
                                 "Sync Settings\u{2026}",
-                                Box::new(zed_actions::account::SyncSettings),
+                                Box::new(zode_actions::account::SyncSettings),
                             )
                             .action(
                                 "Show Recovery Key",
-                                Box::new(zed_actions::account::ShowRecoveryKey),
+                                Box::new(zode_actions::account::ShowRecoveryKey),
                             )
                             .action(
                                 "Enter Recovery Key\u{2026}",
-                                Box::new(zed_actions::account::EnterRecoveryKey),
+                                Box::new(zode_actions::account::EnterRecoveryKey),
                             )
                             .action(
                                 "Rotate Recovery Key\u{2026}",
-                                Box::new(zed_actions::account::RotateRecoveryKey),
+                                Box::new(zode_actions::account::RotateRecoveryKey),
                             )
                             .separator()
                             .action(
                                 "Environment Files\u{2026}",
-                                Box::new(zed_actions::env_sync::OpenEnvVault),
+                                Box::new(zode_actions::env_sync::OpenEnvVault),
                             )
                             .separator()
                             .toggleable_entry(
@@ -136,19 +136,19 @@ impl Sidebar {
                             )
                             .action(
                                 "Open a Zode on Your Account\u{2026}",
-                                Box::new(zed_actions::OpenZodeOnAccount),
+                                Box::new(zode_actions::OpenZodeOnAccount),
                             )
                             .separator()
                             .action(
                                 "Account on the Web",
-                                Box::new(zed_actions::account::OpenAccountOnWeb),
+                                Box::new(zode_actions::account::OpenAccountOnWeb),
                             )
                             .separator()
-                            .action("Sign Out", Box::new(zed_actions::account::SignOut))
+                            .action("Sign Out", Box::new(zode_actions::account::SignOut))
                             .separator()
                             .action(
                                 format!("About Zode (v{})", AppVersion::display(cx)),
-                                Box::new(zed_actions::About),
+                                Box::new(zode_actions::About),
                             )
                         }))
                     })
@@ -225,8 +225,8 @@ mod tests {
         draw_rail_with(
             Some(AccountStatus::WaitingForApproval {
                 user_code: "A1B2-C3D4".into(),
-                verification_uri: "https://zodekit.site/activate".into(),
-                verification_uri_complete: "https://zodekit.site/activate?code=A1B2-C3D4".into(),
+                verification_uri: "https://zodekit.com/activate".into(),
+                verification_uri_complete: "https://zodekit.com/activate?code=A1B2-C3D4".into(),
             }),
             cx,
         )

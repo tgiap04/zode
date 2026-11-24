@@ -86,13 +86,22 @@ jobs:
       uses: taiki-e/install-action@921e2c9f7148d7ba14cd819f417db338f63e733c
     - name: steps::clear_target_dir_if_large
       run: ./script/clear-target-dir-if-larger-than 350 200
+    - name: steps::expose_actions_cache
+      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+      with:
+        script: |
+          for (const name of [
+            'ACTIONS_CACHE_URL',
+            'ACTIONS_RESULTS_URL',
+            'ACTIONS_RUNTIME_TOKEN',
+            'ACTIONS_CACHE_SERVICE_V2',
+          ]) {
+            if (process.env[name]) {
+              core.exportVariable(name, process.env[name]);
+            }
+          }
     - name: steps::setup_sccache
       run: ./script/setup-sccache
-      env:
-        R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-        R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-        R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        SCCACHE_BUCKET: sccache-zed
     - name: steps::cargo_nextest
       run: cargo nextest run --workspace --no-fail-fast --no-tests=warn
     - name: steps::show_sccache_stats
@@ -141,13 +150,22 @@ jobs:
       timeout-minutes: 20
     - name: steps::download_wasi_sdk
       run: ./script/download-wasi-sdk
+    - name: steps::expose_actions_cache
+      uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+      with:
+        script: |
+          for (const name of [
+            'ACTIONS_CACHE_URL',
+            'ACTIONS_RESULTS_URL',
+            'ACTIONS_RUNTIME_TOKEN',
+            'ACTIONS_CACHE_SERVICE_V2',
+          ]) {
+            if (process.env[name]) {
+              core.exportVariable(name, process.env[name]);
+            }
+          }
     - name: steps::setup_sccache
       run: ./script/setup-sccache
-      env:
-        R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-        R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-        R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-        SCCACHE_BUCKET: sccache-zed
     - name: steps::clippy
       run: ./script/clippy
     - name: steps::show_sccache_stats
@@ -164,8 +182,8 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: none
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
       CARGO_PROFILE_RELEASE_LTO: 'false'
-      ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
-      ZED_MINIDUMP_ENDPOINT: ${{ secrets.ZED_SENTRY_MINIDUMP_ENDPOINT }}
+      ZODE_CLIENT_CHECKSUM_SEED: ${{ secrets.ZODE_CLIENT_CHECKSUM_SEED }}
+      ZODE_MINIDUMP_ENDPOINT: ${{ secrets.ZODE_SENTRY_MINIDUMP_ENDPOINT }}
       CC: clang
       CXX: clang++
       DEBIAN_FRONTEND: noninteractive
@@ -186,7 +204,7 @@ jobs:
         set -eu
         version=$(git rev-parse --short HEAD)
         echo "Publishing version: ${version} on release channel nightly"
-        echo "nightly" > crates/zed/RELEASE_CHANNEL
+        echo "nightly" > crates/zode/RELEASE_CHANNEL
     - name: steps::free_disk_space
       run: |
         rm -rf /__t/CodeQL || true
@@ -226,8 +244,8 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: none
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
       CARGO_PROFILE_RELEASE_LTO: 'false'
-      ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
-      ZED_MINIDUMP_ENDPOINT: ${{ secrets.ZED_SENTRY_MINIDUMP_ENDPOINT }}
+      ZODE_CLIENT_CHECKSUM_SEED: ${{ secrets.ZODE_CLIENT_CHECKSUM_SEED }}
+      ZODE_MINIDUMP_ENDPOINT: ${{ secrets.ZODE_SENTRY_MINIDUMP_ENDPOINT }}
       CC: clang
       CXX: clang++
       DEBIAN_FRONTEND: noninteractive
@@ -248,7 +266,7 @@ jobs:
         set -eu
         version=$(git rev-parse --short HEAD)
         echo "Publishing version: ${version} on release channel nightly"
-        echo "nightly" > crates/zed/RELEASE_CHANNEL
+        echo "nightly" > crates/zode/RELEASE_CHANNEL
     - name: steps::free_disk_space
       run: |
         rm -rf /__t/CodeQL || true
@@ -288,10 +306,11 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: none
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
       CARGO_PROFILE_RELEASE_LTO: 'false'
-      ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
-      ZED_MINIDUMP_ENDPOINT: ${{ secrets.ZED_SENTRY_MINIDUMP_ENDPOINT }}
+      ZODE_CLIENT_CHECKSUM_SEED: ${{ secrets.ZODE_CLIENT_CHECKSUM_SEED }}
+      ZODE_MINIDUMP_ENDPOINT: ${{ secrets.ZODE_SENTRY_MINIDUMP_ENDPOINT }}
       MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
       APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
       APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
       APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
@@ -306,7 +325,7 @@ jobs:
         set -eu
         version=$(git rev-parse --short HEAD)
         echo "Publishing version: ${version} on release channel nightly"
-        echo "nightly" > crates/zed/RELEASE_CHANNEL
+        echo "nightly" > crates/zode/RELEASE_CHANNEL
     - name: steps::setup_node
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
       with:
@@ -341,10 +360,11 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: none
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
       CARGO_PROFILE_RELEASE_LTO: 'false'
-      ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
-      ZED_MINIDUMP_ENDPOINT: ${{ secrets.ZED_SENTRY_MINIDUMP_ENDPOINT }}
+      ZODE_CLIENT_CHECKSUM_SEED: ${{ secrets.ZODE_CLIENT_CHECKSUM_SEED }}
+      ZODE_MINIDUMP_ENDPOINT: ${{ secrets.ZODE_SENTRY_MINIDUMP_ENDPOINT }}
       MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
       MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+      MACOS_SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
       APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
       APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
       APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
@@ -359,7 +379,7 @@ jobs:
         set -eu
         version=$(git rev-parse --short HEAD)
         echo "Publishing version: ${version} on release channel nightly"
-        echo "nightly" > crates/zed/RELEASE_CHANNEL
+        echo "nightly" > crates/zode/RELEASE_CHANNEL
     - name: steps::setup_node
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
       with:
@@ -394,8 +414,8 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: none
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
       CARGO_PROFILE_RELEASE_LTO: 'false'
-      ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
-      ZED_MINIDUMP_ENDPOINT: ${{ secrets.ZED_SENTRY_MINIDUMP_ENDPOINT }}
+      ZODE_CLIENT_CHECKSUM_SEED: ${{ secrets.ZODE_CLIENT_CHECKSUM_SEED }}
+      ZODE_MINIDUMP_ENDPOINT: ${{ secrets.ZODE_SENTRY_MINIDUMP_ENDPOINT }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_SIGNING_TENANT_ID }}
       AZURE_CLIENT_ID: ${{ secrets.AZURE_SIGNING_CLIENT_ID }}
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_SIGNING_CLIENT_SECRET }}
@@ -416,9 +436,9 @@ jobs:
         $ErrorActionPreference = "Stop"
         $version = git rev-parse --short HEAD
         Write-Host "Publishing version: $version on release channel nightly"
-        "nightly" | Set-Content -Path "crates/zed/RELEASE_CHANNEL"
+        "nightly" | Set-Content -Path "crates/zode/RELEASE_CHANNEL"
       shell: pwsh
-      working-directory: ${{ env.ZED_WORKSPACE }}
+      working-directory: ${{ env.ZODE_WORKSPACE }}
     - name: steps::free_disk_space
       run: |
         Remove-Item -Recurse -Force "C:\Android" -ErrorAction SilentlyContinue
@@ -457,8 +477,8 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: none
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
       CARGO_PROFILE_RELEASE_LTO: 'false'
-      ZED_CLIENT_CHECKSUM_SEED: ${{ secrets.ZED_CLIENT_CHECKSUM_SEED }}
-      ZED_MINIDUMP_ENDPOINT: ${{ secrets.ZED_SENTRY_MINIDUMP_ENDPOINT }}
+      ZODE_CLIENT_CHECKSUM_SEED: ${{ secrets.ZODE_CLIENT_CHECKSUM_SEED }}
+      ZODE_MINIDUMP_ENDPOINT: ${{ secrets.ZODE_SENTRY_MINIDUMP_ENDPOINT }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_SIGNING_TENANT_ID }}
       AZURE_CLIENT_ID: ${{ secrets.AZURE_SIGNING_CLIENT_ID }}
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_SIGNING_CLIENT_SECRET }}
@@ -479,9 +499,9 @@ jobs:
         $ErrorActionPreference = "Stop"
         $version = git rev-parse --short HEAD
         Write-Host "Publishing version: $version on release channel nightly"
-        "nightly" | Set-Content -Path "crates/zed/RELEASE_CHANNEL"
+        "nightly" | Set-Content -Path "crates/zode/RELEASE_CHANNEL"
       shell: pwsh
-      working-directory: ${{ env.ZED_WORKSPACE }}
+      working-directory: ${{ env.ZODE_WORKSPACE }}
     - name: steps::free_disk_space
       run: |
         Remove-Item -Recurse -Force "C:\Android" -ErrorAction SilentlyContinue

@@ -39,7 +39,7 @@ To install the nightly build:
 curl -f https://raw.githubusercontent.com/tgiap04/zode/develop/script/install.sh | ZODE_CHANNEL=nightly sh
 ```
 
-Preview builds are not published. The older `ZED_VERSION` and `ZED_CHANNEL` variable names are still accepted.
+Preview builds are not published. The older `ZODE_VERSION` and `ZODE_CHANNEL` variable names are still accepted.
 
 If you installed Zode 0.1.5 on Linux, it cannot update itself to 0.1.6: run the installation script once more. See [Upgrading from Zode 0.1.5](./linux.md#upgrading-from-zode-015).
 

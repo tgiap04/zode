@@ -126,11 +126,11 @@ mod tests {
         let light = BrandColors::for_appearance(Appearance::Light);
         let dark = BrandColors::for_appearance(Appearance::Dark);
         for (role, light_value, dark_value) in [
+            // `solid` and `on_solid` are the same deep orange and white in both
+            // appearances on purpose; see `brand_answers_the_same_white_on_solid`.
             ("accent", light.accent, dark.accent),
-            ("solid", light.solid, dark.solid),
             ("solid_hovered", light.solid_hovered, dark.solid_hovered),
             ("solid_active", light.solid_active, dark.solid_active),
-            ("on_solid", light.on_solid, dark.on_solid),
         ] {
             assert_ne!(
                 light_value, dark_value,
@@ -139,15 +139,19 @@ mod tests {
         }
     }
 
-    /// A selected `Tinted(Accent)` button paints its tint from `brand_accent`; its
-    /// icon and label come through this conversion, so they must land on the same
-    /// source rather than on `Color::Accent`, which a user's `text.accent` override
-    /// can move.
+    /// A selected `Tinted(Accent)` button is the brand's solid fill; its icon comes
+    /// through this conversion, which has no `App` and so names white directly.
+    /// That is only right while the palette's label on the fill is white in both
+    /// appearances.
     #[test]
-    fn tinted_accent_draws_its_glyph_in_the_brand() {
+    fn brand_answers_the_same_white_on_solid() {
+        let white: Hsla = gpui::white();
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            assert_eq!(BrandColors::for_appearance(appearance).on_solid, white);
+        }
         assert_eq!(
             Color::from(ButtonStyle::Tinted(TintColor::Accent)),
-            Color::Selected
+            Color::Custom(white)
         );
     }
 }

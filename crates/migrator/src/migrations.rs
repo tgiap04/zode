@@ -370,3 +370,11 @@ pub(crate) mod m_2026_08_24 {
 
     pub(crate) use settings::remove_registry_and_extension_agent_servers;
 }
+
+pub(crate) mod m_2026_11_21 {
+    mod keymap;
+    mod settings;
+
+    pub(crate) use keymap::KEYMAP_PATTERNS;
+    pub(crate) use settings::rename_zed_names_to_zode;
+}

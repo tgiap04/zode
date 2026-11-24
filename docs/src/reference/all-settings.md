@@ -312,11 +312,11 @@ Note that a save will be triggered when an unsaved tab is closed, even if this i
 
 - Description: The name of a font to use for rendering text in the editor.
 - Setting: `buffer_font_family`
-- Default: `.ZedMono`. This currently aliases to [Lilex](https://lilex.myrt.co).
+- Default: `SF Mono` on macOS, part of the system; `JetBrains Mono`, which ships with Zode, elsewhere.
 
 **Options**
 
-The name of any font family installed on the user's system, or `".ZedMono"`.
+The name of any font family installed on the user's system, or `".ZodeMono"`.
 
 ## Buffer Font Features
 
@@ -1999,7 +1999,7 @@ Note, specifying `file_scan_exclusions` in settings.json will override the defau
 {
   "file_types": {
     "JSONC": [
-      "**/.zed/**/*.json",
+      "**/.zode/**/*.json",
       "**/zed/**/*.json",
       "**/Zode/**/*.json",
       "**/.vscode/**/*.json"
@@ -2433,7 +2433,12 @@ Example:
 {
   "remote_control": {
     "enabled": false,
-    "idle_timeout_minutes": 30
+    "idle_timeout_minutes": 30,
+    "push_notifications": {
+      "approval": true,
+      "answered": true,
+      "ended": true
+    }
   }
 }
 ```
@@ -2442,6 +2447,7 @@ Example:
 
 - `enabled`: `boolean`
 - `idle_timeout_minutes`: `integer` minutes a connected device may go unused before it is disconnected: typing in a terminal, browsing files, listing or resuming sessions, and requests from a project opened from another Zode count as use, while pings and that project's heartbeat do not; `0` turns the limit off. See [Remote control](../remote-control.md#turn-it-on)
+- `push_notifications`: `object` with `approval`, `answered` and `ended`, each a `boolean`: which agent events are pushed to paired phones and tablets that allowed notifications. Needs a plan that includes push notifications. See [Remote control](../remote-control.md#push-notifications)
 
 ## Project Footprint Indicator
 
@@ -2675,10 +2681,10 @@ At this point, the server may or may not return hints depending on its implement
 
 The following languages have inlay hints preconfigured by Zode:
 
-- [Go](https://docs.zed.dev/languages/go)
-- [Rust](https://docs.zed.dev/languages/rust)
-- [Svelte](https://docs.zed.dev/languages/svelte)
-- [TypeScript](https://docs.zed.dev/languages/typescript)
+- [Go](https://zodekit.com/docs/languages/go)
+- [Rust](https://zodekit.com/docs/languages/rust)
+- [Svelte](https://zodekit.com/docs/languages/svelte)
+- [TypeScript](https://zodekit.com/docs/languages/typescript)
 
 Use the `lsp` section for the server configuration. Examples are provided in the corresponding language documentation.
 
@@ -4179,7 +4185,7 @@ List of `integer` column numbers
 
 - Description: What font to use for the terminal. When not set, defaults to matching the editor's font.
 - Setting: `font_family`
-- Default: `null`
+- Default: `SF Mono` on macOS, `JetBrains Mono NL` elsewhere
 
 **Options**
 
@@ -5246,6 +5252,69 @@ You can define these in user or project settings; project settings are merged on
 }
 ```
 
+## Devices Panel
+
+- Description: Customize the Devices panel, which lists iOS simulators, Android emulators and physical devices. See [Devices](../devices.md).
+- Setting: `devices_panel`
+- Note: the panel always docks on the right side of the window; there is no `dock` setting for it.
+- Default:
+
+```json [settings]
+{
+  "devices_panel": {
+    "button": true,
+    "default_width": 320
+  }
+}
+```
+
+## GitHub Panel
+
+- Description: Customize the GitHub tab, which shows the issues, pull requests and projects of the project's GitHub repository. The sign-in is kept in the system keychain or comes from the GitHub CLI, so it is not a setting. See [GitHub](../github.md).
+- Setting: `github_panel`
+- Note: the GitHub tab opens in the middle of the window like a file, so there is no `dock` or `default_width` setting for it.
+- Default:
+
+```json [settings]
+{
+  "github_panel": {
+    "button": true
+  }
+}
+```
+
+**Options**
+
+- `button`: Whether to show the GitHub button in the sidebar rail
+
+## Translate {#translate}
+
+- Description: Translate the selected text with a keyboard shortcut. API keys are kept in the system keychain and the language pairs in your keymap, so neither is a setting. See [Translate](../translate.md).
+- Setting: `translate`
+- Default:
+
+```json [settings]
+{
+  "translate": {
+    "provider": "deepl",
+    "openai_compatible": {
+      "base_url": "http://localhost:11434/v1",
+      "model": ""
+    },
+    "max_characters": 2000,
+    "timeout_seconds": 20
+  }
+}
+```
+
+**Options**
+
+- `provider`: The service that translates: `"deepl"`, `"google"` (Google Cloud Translation), `"openai_compatible"` (any OpenAI-compatible chat completions API, such as OpenAI, Ollama or LM Studio) or `"google_free"` (Google Translate through its unofficial free endpoint: no key, may be rate limited or stop working, sends the text to Google)
+- `openai_compatible.base_url`: The API address up to and including the version segment. Plain `http` is only accepted for `localhost` and `127.0.0.1`
+- `openai_compatible.model`: The model that translates. Required when `provider` is `"openai_compatible"`
+- `max_characters`: The longest selection, in characters, that is sent. A longer one is refused with a warning rather than cut
+- `timeout_seconds`: How long to wait for a translation before giving up, in seconds
+
 ## Colorize Brackets
 
 - Description: Whether to use tree-sitter bracket queries to detect and colorize the brackets in the editor (also known as "rainbow brackets").
@@ -5334,11 +5403,11 @@ The path of an image file on this machine; `~/` is expanded. The image is read f
 
 - Description: The name of the font to use for text in the UI.
 - Setting: `ui_font_family`
-- Default: `Inter`. [Inter](https://rsms.me/inter/) ships with Zode, so this default works on a machine with no fonts installed.
+- Default: `SF Pro` on macOS, part of the system; elsewhere [Inter](https://rsms.me/inter/), which ships with Zode, so the default works on a machine with no fonts installed.
 
 **Options**
 
-The name of any font family installed on the system, `".ZedSans"` to follow whichever sans Zode ships with rather than naming it, or `".SystemUIFont"` to use the system's default UI font (on macOS and Windows).
+The name of any font family installed on the system, `".ZodeSans"` to follow whichever sans Zode ships with rather than naming it, or `".SystemUIFont"` to use the system's default UI font (on macOS and Windows).
 
 ## UI Font Features
 
@@ -5471,7 +5540,7 @@ To preview and enable a settings profile, open the command palette via {#kb comm
   "soft_wrap": "none",
 
   "buffer_font_size": 18,
-  "buffer_font_family": ".ZedMono",
+  "buffer_font_family": ".ZodeMono",
 
   "autosave": "on_focus_change",
   "format_on_save": "off",

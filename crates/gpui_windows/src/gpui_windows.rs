@@ -14,6 +14,7 @@ mod keyboard;
 mod notifications;
 mod platform;
 mod system_settings;
+mod tray;
 mod util;
 mod vsync;
 mod window;

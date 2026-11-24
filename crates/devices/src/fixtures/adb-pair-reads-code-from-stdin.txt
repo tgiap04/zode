@@ -1,0 +1,10 @@
+# printf '000000
+' | adb pair 127.0.0.1:9   (no pairing service; 000000 is a dummy code)
+# stdout: [Enter pairing code: ] (no trailing newline); stderr: 
+error: protocol fault (couldn't read status message): Undefined error: 0
+# exit 1
+
+# adb pair 127.0.0.1:9 < /dev/null
+# stdout: [Enter pairing code: ]; stderr: 
+adb: No pairing code provided
+# exit 1

@@ -2233,7 +2233,7 @@ mod single_delete {
             let view = cx.new(|cx| {
                 agent_ui::AgentView::test_new(
                     project::AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
-                    zed_actions::agent::AgentViewMode::Terminal,
+                    zode_actions::agent::AgentViewMode::Terminal,
                     project,
                     weak_workspace,
                     agent_ui::SessionOrigin::new(
@@ -2887,7 +2887,7 @@ mod panel_chrome {
         let switched = Rc::new(Cell::new(0usize));
         cx.update(|_, cx| {
             let switched = switched.clone();
-            cx.on_action(move |_: &zed_actions::SwitchWorktree, _| {
+            cx.on_action(move |_: &zode_actions::SwitchWorktree, _| {
                 switched.set(switched.get() + 1)
             });
         });
@@ -3455,7 +3455,7 @@ mod foreign_tabs {
             let view = cx.new(|cx| {
                 agent_ui::AgentView::test_new(
                     project::AgentId::new(project::CLAUDE_CODE_AGENT_ID.to_string()),
-                    zed_actions::agent::AgentViewMode::Terminal,
+                    zode_actions::agent::AgentViewMode::Terminal,
                     project,
                     weak_workspace,
                     agent_ui::SessionOrigin::new(intent, None),

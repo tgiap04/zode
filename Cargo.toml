@@ -43,6 +43,8 @@ members = [
     "crates/debugger_ui",
     "crates/denoise",
     "crates/dev_container",
+    "crates/devices",
+    "crates/devices_ui",
     "crates/diagnostics",
     "crates/docs_preprocessor",
     "crates/edit_prediction_types",
@@ -70,6 +72,8 @@ members = [
     "crates/git_graph",
     "crates/git_graph_core",
     "crates/git_hosting_providers",
+    "crates/github",
+    "crates/github_ui",
     "crates/git_ui",
     "crates/go_to_line",
     "crates/grammars",
@@ -138,6 +142,8 @@ members = [
     "crates/refineable",
     "crates/refineable/derive_refineable",
     "crates/release_channel",
+    "crates/reminders",
+    "crates/reminders_ui",
     "crates/remote",
     "crates/remote_connection",
     "crates/remote_control",
@@ -185,6 +191,10 @@ members = [
     "crates/time_format",
     "crates/title_bar",
     "crates/toolchain_selector",
+    "crates/translate",
+    "crates/translate_settings",
+    "crates/translate_ui",
+    "crates/tray_sni",
     "crates/ui",
     "crates/ui_input",
     "crates/ui_macros",
@@ -198,16 +208,16 @@ members = [
     "crates/workspace",
     "crates/worktree",
     "crates/worktree_benchmarks",
-    "crates/zed",
-    "crates/zed_actions",
-    "crates/zed_credentials_provider",
+    "crates/zode",
+    "crates/zode_actions",
+    "crates/zode_credentials_provider",
     "crates/zode_account",
     "crates/zode_account_ui",
     "crates/zode_env_sync",
     "crates/zode_env_sync_ui",
     "crates/zode_sync",
     "crates/zode_team_vault",
-    "crates/zed_env_vars",
+    "crates/zode_env_vars",
     "crates/zlog",
     "crates/zlog_settings",
     "crates/ztracing",
@@ -230,7 +240,7 @@ members = [
     "tooling/perf",
     "tooling/xtask",
 ]
-default-members = ["crates/zed"]
+default-members = ["crates/zode"]
 
 [workspace.package]
 publish = false
@@ -285,6 +295,8 @@ debugger_tools = { path = "crates/debugger_tools" }
 debugger_ui = { path = "crates/debugger_ui" }
 derive_refineable = { path = "crates/refineable/derive_refineable" }
 dev_container = { path = "crates/dev_container" }
+devices = { path = "crates/devices" }
+devices_ui = { path = "crates/devices_ui" }
 diagnostics = { path = "crates/diagnostics" }
 dialoguer = { version = "0.12", default-features = false }
 editor = { path = "crates/editor" }
@@ -307,6 +319,8 @@ git = { path = "crates/git" }
 git_graph = { path = "crates/git_graph" }
 git_graph_core = { path = "crates/git_graph_core" }
 git_hosting_providers = { path = "crates/git_hosting_providers" }
+github = { path = "crates/github" }
+github_ui = { path = "crates/github_ui" }
 git_ui = { path = "crates/git_ui" }
 go_to_line = { path = "crates/go_to_line" }
 grammars = { path = "crates/grammars" }
@@ -376,6 +390,8 @@ proto = { path = "crates/proto" }
 recent_projects = { path = "crates/recent_projects" }
 refineable = { path = "crates/refineable" }
 release_channel = { path = "crates/release_channel" }
+reminders = { path = "crates/reminders" }
+reminders_ui = { path = "crates/reminders_ui" }
 remote = { path = "crates/remote" }
 remote_connection = { path = "crates/remote_connection" }
 remote_control = { path = "crates/remote_control" }
@@ -421,6 +437,10 @@ time_format = { path = "crates/time_format" }
 platform_title_bar = { path = "crates/platform_title_bar" }
 title_bar = { path = "crates/title_bar" }
 toolchain_selector = { path = "crates/toolchain_selector" }
+translate = { path = "crates/translate" }
+translate_settings = { path = "crates/translate_settings" }
+translate_ui = { path = "crates/translate_ui" }
+tray_sni = { path = "crates/tray_sni" }
 ui = { path = "crates/ui" }
 ui_input = { path = "crates/ui_input" }
 ui_macros = { path = "crates/ui_macros" }
@@ -434,9 +454,9 @@ which_key = { path = "crates/which_key" }
 watch = { path = "crates/watch" }
 workspace = { path = "crates/workspace" }
 worktree = { path = "crates/worktree" }
-zode = { path = "crates/zed" }
-zed_actions = { path = "crates/zed_actions" }
-zed_credentials_provider = { path = "crates/zed_credentials_provider" }
+zode = { path = "crates/zode" }
+zode_actions = { path = "crates/zode_actions" }
+zode_credentials_provider = { path = "crates/zode_credentials_provider" }
 os_auth = { path = "crates/os_auth" }
 zode_account = { path = "crates/zode_account" }
 zode_account_ui = { path = "crates/zode_account_ui" }
@@ -444,7 +464,7 @@ zode_env_sync = { path = "crates/zode_env_sync" }
 zode_env_sync_ui = { path = "crates/zode_env_sync_ui" }
 zode_sync = { path = "crates/zode_sync" }
 zode_team_vault = { path = "crates/zode_team_vault" }
-zed_env_vars = { path = "crates/zed_env_vars" }
+zode_env_vars = { path = "crates/zode_env_vars" }
 zlog = { path = "crates/zlog" }
 zlog_settings = { path = "crates/zlog_settings" }
 ztracing = { path = "crates/ztracing" }
@@ -930,7 +950,7 @@ telemetry_events = { codegen-units = 1 }
 theme_selector = { codegen-units = 1 }
 time_format = { codegen-units = 1 }
 ui_input = { codegen-units = 1 }
-zed_actions = { codegen-units = 1 }
+zode_actions = { codegen-units = 1 }
 
 [profile.release]
 debug = "limited"

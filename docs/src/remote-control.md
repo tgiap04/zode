@@ -2,8 +2,8 @@
 
 Remote control lets you watch and type into the agents and terminals running in
 one Zode (call it **A**) from another device: a browser at
-`zodekit.site/remote`, or Zode on another machine. The two devices talk through
-the zodekit.site relay, and everything they exchange is end-to-end encrypted;
+`zodekit.com/remote`, or Zode on another machine. The two devices talk through
+the zodekit.com relay, and everything they exchange is end-to-end encrypted;
 the relay only forwards bytes it cannot read. For what that does and does not
 protect, see [Remote control security](./remote-control-security.md).
 
@@ -52,9 +52,13 @@ each side the other's key and makes the two people at the two screens check
 that nobody sits in between.
 
 1. On the controlling device, choose the Zode to pair with. In a browser, open
-   `zodekit.site/remote`, pick the Zode from the list (it must be online, with
+   `zodekit.com/remote`, pick the Zode from the list (it must be online, with
    remote control on and signed in to the same account) and choose **Pair**.
-2. A shows a prompt: "wants to control this Zode", with six digits.
+2. A shows a prompt: "wants to control this Zode", with six digits. It opens
+   by itself in the Zode window in front. If A is in the background, a system
+   notification asks you to switch to Zode; clicking it opens the prompt. While
+   the device waits, a **Pairing Request** button in A's status bar, and the
+   `remote_control: review pairing request` command, open it from any window.
 3. The controlling device shows six digits too. **If they are the same**, choose
    **The digits match** in the browser, then **The Digits Match: Trust It** on A.
    If they differ, choose **Digits differ** (browser) or **Reject** on A.
@@ -77,7 +81,7 @@ under the old key.
 
 ## Control A from a browser
 
-Open `zodekit.site/remote`, sign in, pick a paired Zode and choose **Connect**.
+Open `zodekit.com/remote`, sign in, pick a paired Zode and choose **Connect**.
 
 | You get                | Notes                                                                                          |
 | ---------------------- | ---------------------------------------------------------------------------------------------- |
@@ -117,6 +121,33 @@ supports it; with an older Zode it is not there and nothing else changes.
 - A session appears only if it ran in a folder open on A, and not under a path
   A keeps private or hides from the scan. See
   [What is not served](#what-is-not-served).
+
+### Push notifications
+
+A browser paired with A can get a push notification
+when an agent on A needs you, even with the page closed or the phone locked:
+
+| Event              | When                                                                                                    |
+| ------------------ | ------------------------------------------------------------------------------------------------------- |
+| Waiting for you    | A Claude Code tab asks for your approval.                                                               |
+| Finished answering | The agent finished its reply. For agents other than Claude Code, A waits for 60 seconds of quiet first. |
+| Session ended      | The agent's CLI exited.                                                                                 |
+
+1. Open `zodekit.com/remote`, connect to A, and choose **Turn on notifications**.
+   The browser asks for permission.
+2. On an iPhone or iPad (iOS 16.4 or later), first add the page to the Home
+   Screen (**Share**, then **Add to Home Screen**) and open it from there. Safari
+   gives push notifications only to a page opened that way.
+3. Tapping a notification opens that agent's tab.
+
+- A device that is showing that agent's tab right now is not notified.
+- Choose which events are pushed with `remote_control.push_notifications` in
+  your settings (all three are on by default). The desktop notifications of
+  `agent_finished_notification` are separate and are free.
+- A encrypts each notification with keys that only that browser holds. The
+  zodekit.com server, and Apple's or Google's push service, forward it without
+  being able to read the tab's name. They do see when a notification is sent.
+- Push notifications are on every plan, Free included.
 
 ## Control A from another Zode
 
@@ -182,11 +213,11 @@ remote control off or manage trusted devices.
 
 ## Revoke a device
 
-| Where                                                                                  | What it does                                                                                                                   |
-| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| On A: **Manage Trusted Devices…** then **Forget**                                      | Ends that device's session and removes its key; it cannot come back without pairing again.                                     |
-| The web devices page, `zodekit.site/account/devices` (**Browsers**, then **Sign out**) | Removes that browser from your account. A's connection to it is closed and the browser deletes its key.                        |
-| Signing the device out of your account (**Sign out** on the same devices page)         | The relay closes its connections as `device_revoked`; the device deletes its own key and every pairing, so it must pair again. |
+| Where                                                                                 | What it does                                                                                                                   |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| On A: **Manage Trusted Devices…** then **Forget**                                     | Ends that device's session and removes its key; it cannot come back without pairing again.                                     |
+| The web devices page, `zodekit.com/account/devices` (**Browsers**, then **Sign out**) | Removes that browser from your account. A's connection to it is closed and the browser deletes its key.                        |
+| Signing the device out of your account (**Sign out** on the same devices page)        | The relay closes its connections as `device_revoked`; the device deletes its own key and every pairing, so it must pair again. |
 
 If a device is lost or stolen, revoke it first and ask questions afterwards.
 
@@ -203,9 +234,10 @@ stops and asks you to sign in again, and the key and pairings stay.
 | Zodes online as hosts, per account         | 4                                                          |
 | Controlling devices connected, per account | 8                                                          |
 | Sessions open to one host                  | 4 (a fifth device is refused, see below)                   |
-| Bandwidth through the relay                | A daily byte quota per account (2 GiB by default)          |
+| Bandwidth through the relay                | Free: 5 GiB a day per account; Pro and Team: unlimited     |
 | File and session list requests, per device | 4 at once; past that, requests are answered `rate_limited` |
 | Session resumes, per device                | One at a time, 3 seconds apart; sooner is `rate_limited`   |
+| Push notifications                         | Every plan; at most 10 a minute and 60 an hour per host    |
 | Idle disconnect                            | `idle_timeout_minutes`, 30 by default                      |
 | Terminals in a project from another Zode   | 16 at once, counting ones that are still closing           |
 | Project servers being stopped at once      | 4; another project is refused with `rate_limited`          |

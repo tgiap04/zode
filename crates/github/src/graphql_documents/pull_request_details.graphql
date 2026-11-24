@@ -1,0 +1,110 @@
+query PullRequestDetails($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    id
+    mergeCommitAllowed
+    squashMergeAllowed
+    rebaseMergeAllowed
+    deleteBranchOnMerge
+    defaultBranchRef {
+      name
+    }
+    pullRequest(number: $number) {
+      ...PullRequestSummary
+      body
+      mergeable
+      mergeStateStatus
+      isInMergeQueue
+      isMergeQueueEnabled
+      viewerCanDeleteHeadRef
+      headRepository {
+        nameWithOwner
+      }
+      headRef {
+        name
+        target {
+          oid
+        }
+        branchProtectionRule {
+          id
+        }
+        refUpdateRule {
+          allowsDeletions
+        }
+        rules(first: 50) {
+          nodes {
+            type
+          }
+        }
+      }
+      statusCheckRollup {
+        state
+        contexts(first: 100) {
+          totalCount
+          nodes {
+            __typename
+            ... on CheckRun {
+              name
+              status
+              conclusion
+              detailsUrl
+            }
+            ... on StatusContext {
+              context
+              state
+              targetUrl
+            }
+          }
+        }
+      }
+      latestReviews(first: 50) {
+        nodes {
+          author {
+            login
+          }
+          state
+          submittedAt
+        }
+      }
+      files(first: 100) {
+        totalCount
+        nodes {
+          path
+          additions
+          deletions
+          changeType
+        }
+      }
+    }
+  }
+}
+
+fragment PullRequestSummary on PullRequest {
+  id
+  number
+  title
+  state
+  isDraft
+  author {
+    login
+  }
+  headRefName
+  headRefOid
+  baseRefName
+  isCrossRepository
+  url
+  updatedAt
+  reviewDecision
+  statusCheckRollup {
+    state
+  }
+  reviewRequests(first: 20) {
+    nodes {
+      requestedReviewer {
+        __typename
+        ... on User {
+          login
+        }
+      }
+    }
+  }
+}

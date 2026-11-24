@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Checks script/lib/macos-signing.sh: when a macOS bundle is signed, left unsigned, or refused.
+# BASH_UNDER_TEST=/bin/bash runs it under the bash 3.2 macOS ships.
+set -uo pipefail
+cd "$(dirname "$0")/.." || exit 1
+failures=0
+
+# Runs the decision in a clean environment holding only the given variables, and
+# prints "<exit code> <output>" with the first line of stderr after a `|`.
+decide() {
+    local channel=$1 target_dir=$2 output error status
+    shift 2
+    error=$(mktemp)
+    # shellcheck disable=SC2016 # expanded by the inner shell
+    output=$(env -i PATH="$PATH" "$@" "${BASH_UNDER_TEST:-bash}" -c 'source script/lib/macos-signing.sh; macos_signing_decision "$0" "$1"' "$channel" "$target_dir" 2>"$error")
+    status=$?
+    echo "${status} ${output}|$(head -n 1 "$error")"
+    rm -f "$error"
+}
+
+expect() {
+    local description=$1 expected=$2 actual=$3
+    # shellcheck disable=SC2053 # `expected` is a pattern on purpose
+    if [[ "$actual" != $expected ]]; then
+        echo "FAIL: ${description}: expected '${expected}', got '${actual}'"
+        failures=$((failures + 1))
+    else
+        echo "ok: ${description}"
+    fi
+}
+
+credentials=(MACOS_CERTIFICATE=c MACOS_CERTIFICATE_PASSWORD=p APPLE_NOTARIZATION_KEY=k APPLE_NOTARIZATION_KEY_ID=i APPLE_NOTARIZATION_ISSUER_ID=s)
+identity='MACOS_SIGNING_IDENTITY=Developer ID Application: A (T)'
+
+expect "every credential signs" "0 sign|" "$(decide stable release "${credentials[@]}" "$identity")"
+expect "every credential signs a debug build too" "0 sign|" "$(decide stable debug "${credentials[@]}" "$identity")"
+expect "a local build without credentials stays unsigned" "0 unsigned|" "$(decide stable release)"
+expect "a CI nightly without credentials stays unsigned" "0 unsigned|" "$(decide nightly release GITHUB_ACTIONS=true)"
+expect "a CI dev build (a PR) without credentials stays unsigned" "0 unsigned|" "$(decide dev release GITHUB_ACTIONS=true)"
+expect "a CI stable debug build without credentials stays unsigned" "0 unsigned|" "$(decide stable debug GITHUB_ACTIONS=true)"
+expect "a CI preview debug build without credentials stays unsigned" "0 unsigned|" "$(decide preview debug GITHUB_ACTIONS=true)"
+expect "an identity alone, as on a fork without the secrets, stays unsigned" "0 unsigned|" \
+    "$(decide nightly release GITHUB_ACTIONS=true "$identity")"
+expect "a CI stable release without credentials is refused" "1 |A stable release must be signed*APPLE_NOTARIZATION_ISSUER_ID*" \
+    "$(decide stable release GITHUB_ACTIONS=true)"
+expect "a CI preview release without credentials is refused" "1 |A preview release must be signed*" \
+    "$(decide preview release GITHUB_ACTIONS=true)"
+expect "some credentials but not all are refused, even locally" "1 |Code signing is partly configured. Missing: APPLE_NOTARIZATION_KEY *" \
+    "$(decide nightly release MACOS_CERTIFICATE=c MACOS_CERTIFICATE_PASSWORD=p)"
+expect "credentials without an identity are refused" "1 |MACOS_SIGNING_IDENTITY must name*" \
+    "$(decide stable release "${credentials[@]}")"
+expect "an empty credential counts as missing" "1 |Code signing is partly configured. Missing: APPLE_NOTARIZATION_KEY" \
+    "$(decide stable release "${credentials[@]/APPLE_NOTARIZATION_KEY=k/APPLE_NOTARIZATION_KEY=}" "$identity")"
+
+if (( failures > 0 )); then
+    echo "${failures} failed"
+    exit 1
+fi
+echo "all passed"

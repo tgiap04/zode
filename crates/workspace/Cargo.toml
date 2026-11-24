@@ -70,7 +70,7 @@ ui.workspace = true
 util.workspace = true
 uuid.workspace = true
 vim_mode_setting.workspace = true
-zed_actions.workspace = true
+zode_actions.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows.workspace = true

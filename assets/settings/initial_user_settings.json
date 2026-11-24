@@ -5,10 +5,8 @@
 // silently pin new installs to whatever was current the day the seed was
 // written, which is how the bundled theme and font size stopped taking effect.
 //
-// zode is a fork of Zed, so Zed's configuration documentation applies:
-// https://zed.dev/docs/configuring-zed
+// Configuration documentation: https://zodekit.com/docs/configuring-zode
 //
 // To read every default without touching this file, run
-// `zed: open default settings` from the command palette (cmd-shift-p).
-// The action namespace is still `zed:` — it is inherited from upstream.
+// `zode: open default settings` from the command palette (cmd-shift-p).
 {}

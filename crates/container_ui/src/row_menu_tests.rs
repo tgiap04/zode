@@ -894,17 +894,17 @@ mod keys {
                 KeyBinding::new("escape", menu::Cancel, Some("ContainerResults")),
                 KeyBinding::new(
                     "space",
-                    zed_actions::container::ToggleRowSelection,
+                    zode_actions::container::ToggleRowSelection,
                     Some("ContainerResults"),
                 ),
                 KeyBinding::new(
                     "delete",
-                    zed_actions::container::RemoveSelectedRows,
+                    zode_actions::container::RemoveSelectedRows,
                     Some("ContainerResults"),
                 ),
                 KeyBinding::new(
                     "cmd-a",
-                    zed_actions::container::SelectAllRows,
+                    zode_actions::container::SelectAllRows,
                     Some("ContainerResults"),
                 ),
             ]);

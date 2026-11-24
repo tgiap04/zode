@@ -1,6 +1,6 @@
 ---
 title: "Zode Development: Glossary"
-description: "Guide to zed development: glossary for Zode development."
+description: "Guide to Zode development: glossary for Zode development."
 ---
 
 # Zode Development: Glossary
@@ -14,7 +14,7 @@ TBD: Glossary Improvement
 
 Questions:
 
-- Can we generate this list from doc comments throughout zed?
+- Can we generate this list from doc comments throughout Zode?
 - We should have a section that shows the various UI parts and their names. (Can't do that in the channel.)
 -->
 
@@ -79,7 +79,7 @@ h_flex()
 - `Modal`: A UI element that floats on top of the rest of the UI
 - `Picker`: A struct representing a list of items floating on top of the UI (Modal). You can select an item and confirm. What happens on select or confirm is determined by the picker's delegate. (The 'Modal' in the image below is a picker.)
 - `PickerDelegate`: A trait used to specialize behavior for a `Picker`. The `Picker` stores the `PickerDelegate` in the field delegate.
-- `Center`: The middle of the zed window, the center is split into multiple `Pane`s. In the codebase this is a field on the `Workspace` struct. (see image below).
+- `Center`: The middle of the Zode window, the center is split into multiple `Pane`s. In the codebase this is a field on the `Workspace` struct. (see image below).
 - `Pane`: An area in the `Center` where we can place items, such as an editor, multi-buffer or terminal (see image below).
 - `Panel`: An `Entity` implementing the `Panel` trait. Panels can be placed in a `Dock`. In the image below: `ProjectPanel` is in the left dock, `DebugPanel` is in the bottom dock, and `GitPanel` is in the right dock (each panel's default dock side, see `assets/settings/default.json`). `Editor` does not implement `Panel`.
 - `Dock`: A UI element similar to a `Pane` that can be opened and hidden. Up to three docks can be open at once: left, right, and bottom. A dock contains one or more `Panel`s, not `Pane`s.
@@ -91,7 +91,7 @@ h_flex()
 
 <img width="552" height="auto" alt="Screenshot for the Worktree feature" src="https://github.com/user-attachments/assets/da5c58e4-b02e-4038-9736-27e3509fdbfa" />
 
-- [Multibuffer](https://zed.dev/docs/multibuffers): A list of Editors, a multi-buffer allows editing multiple files simultaneously. A multi-buffer opens when an operation in Zode returns multiple locations, examples: _search_ or _go to definition_. See project search in the image below.
+- [Multibuffer](https://zodekit.com/docs/multibuffers): A list of Editors, a multi-buffer allows editing multiple files simultaneously. A multi-buffer opens when an operation in Zode returns multiple locations, examples: _search_ or _go to definition_. See project search in the image below.
 
 <img width="800" height="auto" alt="Screenshot for the MultiBuffer feature" src="https://github.com/user-attachments/assets/d59dcecd-8ab6-4172-8fb6-b1fc3c3eaf9d" />
 
@@ -106,8 +106,8 @@ h_flex()
 ## Collab
 
 - `Collab session`: Multiple users working in a shared `Project`
-- `Upstream client`: The zed client which has shared their workspace
-- `Downstream client`: The zed client joining a shared workspace
+- `Upstream client`: The Zode client which has shared their workspace
+- `Downstream client`: The Zode client joining a shared workspace
 
 ## Debugger
 

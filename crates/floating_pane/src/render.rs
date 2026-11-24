@@ -387,7 +387,7 @@ impl FloatingPane {
                             .tooltip(|_window, cx| {
                                 Tooltip::for_action(
                                     "Minimise \u{2014} keeps its terminals running",
-                                    &zed_actions::floating_pane::ToggleFloatingPane,
+                                    &zode_actions::floating_pane::ToggleFloatingPane,
                                     cx,
                                 )
                             })
@@ -401,7 +401,7 @@ impl FloatingPane {
                             .tooltip(|_window, cx| {
                                 Tooltip::for_action(
                                     "Close \u{2014} ends its terminals and threads",
-                                    &zed_actions::floating_pane::CloseFloatingPane,
+                                    &zode_actions::floating_pane::CloseFloatingPane,
                                     cx,
                                 )
                             })
@@ -582,7 +582,7 @@ impl FloatingPane {
                             } else {
                                 "Open a Floating Window"
                             },
-                            &zed_actions::floating_pane::ToggleFloatingPane,
+                            &zode_actions::floating_pane::ToggleFloatingPane,
                             cx,
                         )
                     })

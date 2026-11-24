@@ -1,0 +1,147 @@
+query ProjectItems($projectId: ID!, $after: String) {
+  node(id: $projectId) {
+    ... on ProjectV2 {
+      items(first: 100, after: $after) {
+        nodes {
+          id
+          type
+          content {
+            __typename
+            ... on Issue {
+              number
+              title
+              state
+              stateReason
+              subIssuesSummary {
+                total
+                completed
+              }
+              repository {
+                nameWithOwner
+              }
+              assignees(first: 10) {
+                nodes {
+                  login
+                  avatarUrl
+                }
+              }
+              labels(first: 10) {
+                nodes {
+                  name
+                  color
+                  description
+                }
+              }
+            }
+            ... on PullRequest {
+              number
+              title
+              state
+              isDraft
+              repository {
+                nameWithOwner
+              }
+              assignees(first: 10) {
+                nodes {
+                  login
+                  avatarUrl
+                }
+              }
+              labels(first: 10) {
+                nodes {
+                  name
+                  color
+                  description
+                }
+              }
+            }
+            ... on DraftIssue {
+              title
+              assignees(first: 10) {
+                nodes {
+                  login
+                  avatarUrl
+                }
+              }
+            }
+          }
+          fieldValues(first: 30) {
+            nodes {
+              __typename
+              ... on ProjectV2ItemFieldTextValue {
+                text
+                field {
+                  ... on ProjectV2FieldCommon {
+                    id
+                  }
+                }
+              }
+              ... on ProjectV2ItemFieldNumberValue {
+                number
+                field {
+                  ... on ProjectV2FieldCommon {
+                    id
+                  }
+                }
+              }
+              ... on ProjectV2ItemFieldDateValue {
+                date
+                field {
+                  ... on ProjectV2FieldCommon {
+                    id
+                  }
+                }
+              }
+              ... on ProjectV2ItemFieldSingleSelectValue {
+                optionId
+                name
+                field {
+                  ... on ProjectV2FieldCommon {
+                    id
+                  }
+                }
+              }
+              ... on ProjectV2ItemFieldIterationValue {
+                iterationId
+                title
+                startDate
+                field {
+                  ... on ProjectV2FieldCommon {
+                    id
+                  }
+                }
+              }
+              ... on ProjectV2ItemFieldPullRequestValue {
+                pullRequests(first: 10) {
+                  totalCount
+                  nodes {
+                    number
+                  }
+                }
+                field {
+                  ... on ProjectV2FieldCommon {
+                    id
+                  }
+                }
+              }
+              ... on ProjectV2ItemFieldMilestoneValue {
+                milestone {
+                  title
+                }
+                field {
+                  ... on ProjectV2FieldCommon {
+                    id
+                  }
+                }
+              }
+            }
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}

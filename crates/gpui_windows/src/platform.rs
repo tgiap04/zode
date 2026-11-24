@@ -65,6 +65,8 @@ pub(crate) struct WindowsPlatformState {
     pub(crate) current_cursor: Cell<Option<HCURSOR>>,
     directx_devices: RefCell<Option<DirectXDevices>>,
     notifications: NotificationState,
+    tray: RefCell<Option<crate::tray::WindowsTray>>,
+    tray_click: crate::tray::ClickCallback,
 }
 
 #[derive(Default)]
@@ -92,6 +94,8 @@ impl WindowsPlatformState {
             directx_devices: RefCell::new(directx_devices),
             menus: RefCell::new(Vec::new()),
             notifications: NotificationState::new(),
+            tray: RefCell::new(None),
+            tray_click: Default::default(),
         }
     }
 }
@@ -436,6 +440,52 @@ impl Platform for WindowsPlatform {
                 log::warn!("could not restore the previous execution state");
             }
         }))
+    }
+
+    fn set_tray_icon(&self, icon: Option<gpui::TrayIcon>) {
+        let state = &self.inner.state;
+        // The old icon goes first, so the shell never shows two.
+        state.tray.borrow_mut().take();
+        let Some(icon) = icon else {
+            return;
+        };
+        match crate::tray::WindowsTray::new(&icon, state.tray_click.clone(), display_for_monitor) {
+            Ok(tray) => *state.tray.borrow_mut() = Some(tray),
+            Err(error) => log::error!("could not add the tray icon: {error:#}"),
+        }
+    }
+
+    fn on_tray_icon_click(&self, callback: Box<dyn FnMut(Option<gpui::TrayIconAnchor>)>) {
+        *self.inner.state.tray_click.borrow_mut() = Some(callback);
+    }
+
+    fn tray_icon_anchor(&self) -> Option<gpui::TrayIconAnchor> {
+        self.inner
+            .state
+            .tray
+            .borrow()
+            .as_ref()
+            .and_then(|tray| tray.anchor())
+    }
+
+    fn system_idle_time(&self) -> Option<std::time::Duration> {
+        let mut info = LASTINPUTINFO {
+            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+            dwTime: 0,
+        };
+        if !unsafe { GetLastInputInfo(&mut info) }.as_bool() {
+            return None;
+        }
+        Some(idle_since(unsafe { GetTickCount() }, info.dwTime))
+    }
+
+    fn tray_icon_visible(&self) -> bool {
+        self.inner
+            .state
+            .tray
+            .borrow()
+            .as_ref()
+            .is_some_and(|tray| tray.visible())
     }
 
     fn post_notification(&self, notification: Notification) {
@@ -1396,7 +1446,7 @@ fn handle_gpu_device_lost(
     Ok(())
 }
 
-const PLATFORM_WINDOW_CLASS_NAME: PCWSTR = w!("Zed::PlatformWindow");
+const PLATFORM_WINDOW_CLASS_NAME: PCWSTR = w!("Zode::PlatformWindow");
 
 fn register_platform_window_class() {
     let wc = WNDCLASSW {
@@ -1487,5 +1537,31 @@ mod tests {
         let item = ClipboardItem::new_string_with_json_metadata("abcdef".to_string(), vec![3, 4]);
         write_to_clipboard(item.clone());
         assert_eq!(read_from_clipboard(), Some(item));
+    }
+}
+
+/// The display id and scale factor the rest of the platform uses for `monitor`.
+fn display_for_monitor(monitor: HMONITOR) -> Option<(DisplayId, f32)> {
+    let display = WindowsDisplay::new_with_handle(monitor).ok()?;
+    Some((display.display_id, display.scale_factor()))
+}
+
+/// Time since `last_input`, both 32-bit millisecond tick counts. Subtracting
+/// in `u32` stays right when the count wraps, every 49.7 days of uptime.
+fn idle_since(now: u32, last_input: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(u64::from(now.wrapping_sub(last_input)))
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use std::time::Duration;
+
+    use super::idle_since;
+
+    #[test]
+    fn idle_time_survives_the_tick_count_wrapping() {
+        assert_eq!(idle_since(5_000, 2_000), Duration::from_secs(3));
+        assert_eq!(idle_since(1_000, u32::MAX - 999), Duration::from_secs(2));
+        assert_eq!(idle_since(7, 7), Duration::ZERO);
     }
 }

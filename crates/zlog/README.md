@@ -1,12 +1,12 @@
 # Zlog
 
-Use the `ZED_LOG` environment variable to control logging output for Zed
+Use the `ZODE_LOG` environment variable to control logging output for Zed
 applications and libraries. The variable accepts a comma-separated list of
 directives that specify logging levels for different modules (crates). The
 general format is for instance:
 
 ```
-ZED_LOG=info,project=debug,agent=off
+ZODE_LOG=info,project=debug,agent=off
 ```
 
 - Levels can be one of: `off`/`none`, `error`, `warn`, `info`, `debug`, or

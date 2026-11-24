@@ -110,7 +110,8 @@ async fn the_files_capability_is_advertised_when_the_host_can_serve_files(cx: &m
         matches!(
             &controls[0],
             Control::HelloAck { capabilities, .. }
-                if capabilities == &["terminal".to_string(), "files".to_string()]
+                if capabilities
+                    == &["terminal".to_string(), "files".to_string(), "push".to_string()]
         ),
         "{controls:?}"
     );

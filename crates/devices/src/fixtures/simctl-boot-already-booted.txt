@@ -1,0 +1,5 @@
+# xcrun simctl boot <udid> on a Booted device
+# exit code: 149
+# stderr:
+An error was encountered processing the command (domain=com.apple.CoreSimulator.SimError, code=405):
+Unable to boot device in current state: Booted

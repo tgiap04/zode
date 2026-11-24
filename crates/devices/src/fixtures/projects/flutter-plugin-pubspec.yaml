@@ -1,0 +1,21 @@
+name: battery_plugin
+description: "A Flutter plugin."
+version: 0.0.1
+
+environment:
+  sdk: ^3.9.0
+  flutter: '>=3.3.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  plugin_platform_interface: ^2.0.2
+
+flutter:
+  plugin:
+    platforms:
+      android:
+        package: com.example.battery_plugin
+        pluginClass: BatteryPlugin
+      ios:
+        pluginClass: BatteryPlugin

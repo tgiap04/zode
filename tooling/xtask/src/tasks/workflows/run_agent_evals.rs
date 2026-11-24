@@ -24,8 +24,8 @@ pub(crate) fn run_unit_evals() -> Workflow {
         .add_env(("CARGO_TERM_COLOR", "always"))
         .add_env(("CARGO_INCREMENTAL", 0))
         .add_env(("RUST_BACKTRACE", 1))
-        .add_env(("ZED_CLIENT_CHECKSUM_SEED", vars::ZED_CLIENT_CHECKSUM_SEED))
-        .add_env(("ZED_EVAL_TELEMETRY", 1))
+        .add_env(("ZODE_CLIENT_CHECKSUM_SEED", vars::ZODE_CLIENT_CHECKSUM_SEED))
+        .add_env(("ZODE_EVAL_TELEMETRY", 1))
         .add_env(("MODEL_NAME", model_name.to_string()))
         .add_job(unit_evals.name, unit_evals.job)
 }
@@ -52,7 +52,7 @@ pub(crate) fn run_cron_unit_evals() -> Workflow {
         .add_env(("CARGO_TERM_COLOR", "always"))
         .add_env(("CARGO_INCREMENTAL", 0))
         .add_env(("RUST_BACKTRACE", 1))
-        .add_env(("ZED_CLIENT_CHECKSUM_SEED", vars::ZED_CLIENT_CHECKSUM_SEED))
+        .add_env(("ZODE_CLIENT_CHECKSUM_SEED", vars::ZODE_CLIENT_CHECKSUM_SEED))
         .add_job(unit_evals.name, unit_evals.job)
 }
 
@@ -65,10 +65,10 @@ fn cron_unit_evals() -> NamedJob {
         )
         .if_condition(Expression::new("${{ failure() }}"))
         .add_with(("method", "chat.postMessage"))
-        .add_with(("token", vars::SLACK_APP_ZED_UNIT_EVALS_BOT_TOKEN))
+        .add_with(("token", vars::SLACK_APP_ZODE_UNIT_EVALS_BOT_TOKEN))
         .add_with(("payload", indoc::indoc!{r#"
             channel: C04UDRNNJFQ
-            text: "Unit Evals Failed: https://github.com/zed-industries/zed/actions/runs/${{ github.run_id }}"
+            text: "Unit Evals Failed: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
         "#}))
     }
 
@@ -82,9 +82,11 @@ const UNIT_EVAL_MODELS: &[&str] = &[
     "openai/gpt-5",
 ];
 
+// No sccache here: it needs `expose_actions_cache`, which puts ACTIONS_RUNTIME_TOKEN in the
+// environment of every later step, and these jobs run agent code next to the API keys.
 fn cron_unit_evals_job() -> Job {
     let script_step = add_api_keys(steps::script("./script/run-unit-evals"))
-        .add_env(("ZED_AGENT_MODEL", "${{ matrix.model }}"));
+        .add_env(("ZODE_AGENT_MODEL", "${{ matrix.model }}"));
 
     Job::default()
         .runs_on(runners::LINUX_DEFAULT)
@@ -97,9 +99,7 @@ fn cron_unit_evals_job() -> Job {
         .map(steps::install_linux_dependencies)
         .add_step(steps::cargo_install_nextest())
         .add_step(steps::clear_target_dir_if_large(Platform::Linux))
-        .add_step(steps::setup_sccache(Platform::Linux))
         .add_step(script_step)
-        .add_step(steps::show_sccache_stats(Platform::Linux))
         .add_step(steps::cleanup_cargo_config(Platform::Linux))
 }
 
@@ -114,11 +114,9 @@ fn unit_evals(commit: Option<&WorkflowInput>) -> Job {
         .map(steps::install_linux_dependencies)
         .add_step(steps::cargo_install_nextest())
         .add_step(steps::clear_target_dir_if_large(Platform::Linux))
-        .add_step(steps::setup_sccache(Platform::Linux))
         .add_step(match commit {
             Some(commit) => script_step.add_env(("UNIT_EVAL_COMMIT", commit)),
             None => script_step,
         })
-        .add_step(steps::show_sccache_stats(Platform::Linux))
         .add_step(steps::cleanup_cargo_config(Platform::Linux))
 }

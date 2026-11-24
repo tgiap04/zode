@@ -3,9 +3,9 @@
   flake.overlays.default =
     final: _:
     let
-      mkZed = import ../toolchain.nix { inherit inputs; };
+      mkZode = import ../toolchain.nix { inherit inputs; };
     in
     {
-      zed-editor = mkZed final;
+      zode-editor = mkZode final;
     };
 }

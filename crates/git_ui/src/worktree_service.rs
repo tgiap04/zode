@@ -12,7 +12,7 @@ use project::trusted_worktrees::{PathTrust, TrustedWorktrees};
 use remote::RemoteConnectionOptions;
 use settings::Settings;
 use workspace::{MultiWorkspace, OpenMode, PreviousWorkspaceState, Workspace, dock::DockPosition};
-use zed_actions::NewWorktreeBranchTarget;
+use zode_actions::NewWorktreeBranchTarget;
 
 use util::ResultExt as _;
 
@@ -388,7 +388,7 @@ fn maybe_propagate_worktree_trust(
 /// Creates a new git worktree, opens the workspace, restores layout and files.
 pub fn handle_create_worktree(
     workspace: &mut Workspace,
-    action: &zed_actions::CreateWorktree,
+    action: &zode_actions::CreateWorktree,
     window: &mut gpui::Window,
     fallback_focused_dock: Option<DockPosition>,
     cx: &mut gpui::Context<Workspace>,
@@ -514,7 +514,7 @@ pub fn handle_create_worktree(
 
 pub fn handle_switch_worktree(
     workspace: &mut Workspace,
-    action: &zed_actions::SwitchWorktree,
+    action: &zode_actions::SwitchWorktree,
     window: &mut gpui::Window,
     fallback_focused_dock: Option<DockPosition>,
     cx: &mut gpui::Context<Workspace>,
@@ -761,7 +761,7 @@ async fn do_switch_worktree(
 
 /// How long a worktree switch may take before it is worth saying so.
 ///
-/// Logged rather than measured behind `ZED_MEASUREMENTS`: this is a latency
+/// Logged rather than measured behind `ZODE_MEASUREMENTS`: this is a latency
 /// nobody could put a number on until it was instrumented -- the report that
 /// prompted it was "switching feels laggy", which is not something a bug
 /// report can act on. A line in the log when a switch runs long turns the next
@@ -1175,7 +1175,7 @@ mod rollback_tests {
 #[cfg(test)]
 mod branch_target_tests {
     use super::{new_branch_for_worktree, resolve_worktree_branch_target};
-    use zed_actions::NewWorktreeBranchTarget;
+    use zode_actions::NewWorktreeBranchTarget;
 
     /// The two questions a target answers are separate: what to base the
     /// checkout on, and whether to give it a branch. Confusing them is silent

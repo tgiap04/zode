@@ -7,7 +7,7 @@ description: "This guide covers how to uninstall Zode on different operating sys
 
 This guide covers how to uninstall Zode on different operating systems.
 
-> **Warning:** Do not run `--uninstall` from a leftover Zode 0.1.5 binary, such as `zed --uninstall`, `~/.local/bin/zed --uninstall` or `/usr/local/bin/zed --uninstall`. Zode 0.1.5 embeds the old uninstall script, which deletes `~/.local/share/zed`, `~/.config/zed` and `~/.zed_server`, and on macOS also `~/Library/Application Support/Zed` and `~/Library/Logs/Zed`. Those are the directories upstream Zed keeps its own data in. Remove Zode by hand with the steps below instead. The script that ships from 0.1.6 only touches Zode's own paths.
+> **Warning:** Do not run `--uninstall` from a leftover Zode 0.1.5 binary, such as `zed --uninstall`, `~/.local/bin/zed --uninstall` or `/usr/local/bin/zed --uninstall`. Zode 0.1.5 embeds the old uninstall script, which deletes `~/.local/share/zed`, `~/.config/zed` and `~/.zode_server`, and on macOS also `~/Library/Application Support/Zed` and `~/Library/Logs/Zed`. Those are the directories upstream Zed keeps its own data in. Remove Zode by hand with the steps below instead. The script that ships from 0.1.6 only touches Zode's own paths.
 
 ## macOS
 
@@ -110,4 +110,4 @@ If you encounter issues during uninstallation:
 - **Linux**: If the uninstall script fails, check the error message and consider manual removal of the directories listed above.
 - **All platforms**: If you want to start fresh while keeping Zode installed, you can delete the configuration directories instead of uninstalling the application entirely.
 
-For additional help, see our [Linux-specific documentation](./linux.md) or visit the [Zode community](https://zed.dev/community-links).
+For additional help, see our [Linux-specific documentation](./linux.md) or open an issue on [GitHub](https://github.com/tgiap04/zode/issues).

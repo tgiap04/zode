@@ -34,6 +34,6 @@ Write-Output `
 	"DEV_DRIVE=$($Drive)" `
 	"RUSTUP_HOME=$($Drive)/.rustup" `
 	"CARGO_HOME=$($Drive)/.cargo" `
-	"ZED_WORKSPACE=$($Drive)/zed" `
+	"ZODE_WORKSPACE=$($Drive)/zed" `
 	"PATH=$($Drive)/.cargo/bin;$env:PATH" `
 	>> $env:GITHUB_ENV

@@ -215,10 +215,23 @@ impl RenderOnce for IconButton {
             .filter(|_| is_selected)
             .unwrap_or(self.icon);
 
+        // An icon on the brand's solid fill is white, whether the fill is the
+        // button's own style or the one it takes when selected.
+        let effective_style = self
+            .selected_style
+            .filter(|_| is_selected)
+            .unwrap_or(self.base.style);
+        let on_brand_fill = matches!(
+            effective_style,
+            ButtonStyle::Brand | ButtonStyle::Tinted(TintColor::Accent)
+        );
+
         let icon_color = if is_disabled {
             Color::Disabled
-        } else if self.selected_style.is_some() && is_selected {
-            self.selected_style.unwrap().into()
+        } else if on_brand_fill {
+            Color::Custom(crate::brand_on_solid(cx))
+        } else if let Some(selected_style) = self.selected_style.filter(|_| is_selected) {
+            selected_style.into()
         } else if is_selected {
             self.selected_icon_color.unwrap_or(Color::Selected)
         } else {

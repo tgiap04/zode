@@ -21,7 +21,7 @@ See [the configuration docs](../reference/all-settings.md) for more information.
 
 For example, if you have Prettier installed and on your `PATH`, you can use it to format JavaScript files.
 
-Configure formatting in Settings ({#kb zed::OpenSettings}) under Languages > JavaScript, or add to your settings file:
+Configure formatting in Settings ({#kb zode::OpenSettings}) under Languages > JavaScript, or add to your settings file:
 
 ```json [settings]
 {
@@ -53,7 +53,7 @@ Zode uses [tree-sitter/tree-sitter-jsdoc](https://github.com/tree-sitter/tree-si
 
 You can configure Zode to format code using `eslint --fix` by running the ESLint code action when formatting.
 
-Configure code actions on format in Settings ({#kb zed::OpenSettings}) under Languages > JavaScript, or add to your settings file:
+Configure code actions on format in Settings ({#kb zode::OpenSettings}) under Languages > JavaScript, or add to your settings file:
 
 ```json [settings]
 {
@@ -97,7 +97,7 @@ You can also only execute a single ESLint rule when using `fixAll`:
 
 If you **only** want to run ESLint on save, you can configure code actions as the formatter.
 
-Configure in Settings ({#kb zed::OpenSettings}) under Languages > JavaScript, or add to your settings file:
+Configure in Settings ({#kb zode::OpenSettings}) under Languages > JavaScript, or add to your settings file:
 
 ```json [settings]
 {
@@ -229,7 +229,7 @@ Run {#action debugger::Start} ({#kb debugger::Start}) to see a contextual list o
 
 As for all languages, configurations from `.vscode/launch.json` are also available for debugging in Zode.
 
-If your use-case isn't covered by any of these, you can take full control by adding debug configurations to `.zed/debug.json`. See below for example configurations.
+If your use-case isn't covered by any of these, you can take full control by adding debug configurations to `.zode/debug.json`. See below for example configurations.
 
 ### Configuring JavaScript debug tasks
 
@@ -246,7 +246,7 @@ JavaScript debugging is more complicated than other languages because there are 
     "label": "Debug JS file",
     "type": "node",
     "request": "launch",
-    "program": "$ZED_FILE",
+    "program": "$ZODE_FILE",
     "skipFiles": ["<node_internals>/**"]
   }
 ]
@@ -261,8 +261,8 @@ JavaScript debugging is more complicated than other languages because there are 
     "label": "Debug app in Chrome",
     "type": "chrome",
     "request": "launch",
-    "file": "$ZED_WORKTREE_ROOT/index.html",
-    "webRoot": "$ZED_WORKTREE_ROOT",
+    "file": "$ZODE_WORKTREE_ROOT/index.html",
+    "webRoot": "$ZODE_WORKTREE_ROOT",
     "console": "integratedTerminal",
     "skipFiles": ["<node_internals>/**"]
   }

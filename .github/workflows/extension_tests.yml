@@ -5,7 +5,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: '1'
   CARGO_INCREMENTAL: '0'
-  ZED_EXTENSION_CLI_SHA: 1fa7f1a3ec28ea1eae6db2e937d7a538fb10c0c7
+  ZODE_EXTENSION_CLI_SHA: 1fa7f1a3ec28ea1eae6db2e937d7a538fb10c0c7
   RUSTUP_TOOLCHAIN: stable
   CARGO_BUILD_TARGET: wasm32-wasip2
 on:
@@ -140,11 +140,11 @@ jobs:
       uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
       with:
         path: zed-extension
-        key: zed-extension-${{ env.ZED_EXTENSION_CLI_SHA }}
+        key: zed-extension-${{ env.ZODE_EXTENSION_CLI_SHA }}
     - name: extension_tests::download_zed_extension_cli
       if: steps.cache-zed-extension-cli.outputs.cache-hit != 'true'
       run: |
-        wget --quiet "https://zed-extension-cli.nyc3.digitaloceanspaces.com/$ZED_EXTENSION_CLI_SHA/x86_64-unknown-linux-gnu/zed-extension" -O "$GITHUB_WORKSPACE/zed-extension"
+        wget --quiet "https://zed-extension-cli.nyc3.digitaloceanspaces.com/$ZODE_EXTENSION_CLI_SHA/x86_64-unknown-linux-gnu/zed-extension" -O "$GITHUB_WORKSPACE/zed-extension"
         chmod +x "$GITHUB_WORKSPACE/zed-extension"
     - name: steps::cache_rust_dependencies_namespace
       uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830

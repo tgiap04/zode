@@ -1,4 +1,4 @@
-//! Fetching the `zed-remote-server` binary for SSH remote development.
+//! Fetching the `zode-remote-server` binary for SSH remote development.
 //!
 //! This replaces the `auto_update::AutoUpdater` path that this fork removed. The
 //! original brokered its download URL through Zed's authenticated cloud API and
@@ -39,8 +39,8 @@ const CACHE_LIMIT: usize = 5;
 /// {
 ///   "version": "0.1.6",
 ///   "assets": [
-///     { "name": "zed-remote-server-linux-x86_64.gz",
-///       "url": "https://github.com/tgiap04/zode/releases/download/v0.1.6/zed-remote-server-linux-x86_64.gz",
+///     { "name": "zode-remote-server-linux-x86_64.gz",
+///       "url": "https://github.com/tgiap04/zode/releases/download/v0.1.6/zode-remote-server-linux-x86_64.gz",
 ///       "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08" }
 ///   ]
 /// }
@@ -60,7 +60,7 @@ struct ReleaseAsset {
 }
 
 fn asset_name(os: &str, arch: &str) -> String {
-    format!("zed-remote-server-{os}-{arch}.gz")
+    format!("zode-remote-server-{os}-{arch}.gz")
 }
 
 fn manifest_url(version: Option<&Version>) -> String {
@@ -262,7 +262,7 @@ pub async fn download_remote_server_release(
 
     if smol::fs::metadata(&version_path).await.is_err() {
         log::info!(
-            "downloading zed-remote-server {os} {arch} version {}",
+            "downloading zode-remote-server {os} {arch} version {}",
             manifest.version
         );
         set_status("Downloading remote server", cx);
@@ -282,7 +282,7 @@ mod tests {
 
     fn asset(sha256: &str) -> ReleaseAsset {
         ReleaseAsset {
-            name: "zed-remote-server-macos-aarch64.gz".to_string(),
+            name: "zode-remote-server-macos-aarch64.gz".to_string(),
             url: "https://example.invalid/artifact.gz".to_string(),
             sha256: sha256.to_string(),
         }
@@ -373,8 +373,8 @@ mod tests {
         let aarch64 = "60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752";
         let json = format!(
             r#"{{"version":"0.1.6","assets":[
-                {{"name":"zed-remote-server-linux-aarch64.gz","url":"https://github.com/tgiap04/zode/releases/download/v0.1.6/zed-remote-server-linux-aarch64.gz","sha256":"{aarch64}"}},
-                {{"name":"zed-remote-server-linux-x86_64.gz","url":"https://github.com/tgiap04/zode/releases/download/v0.1.6/zed-remote-server-linux-x86_64.gz","sha256":"{x86_64}"}}
+                {{"name":"zode-remote-server-linux-aarch64.gz","url":"https://github.com/tgiap04/zode/releases/download/v0.1.6/zode-remote-server-linux-aarch64.gz","sha256":"{aarch64}"}},
+                {{"name":"zode-remote-server-linux-x86_64.gz","url":"https://github.com/tgiap04/zode/releases/download/v0.1.6/zode-remote-server-linux-x86_64.gz","sha256":"{x86_64}"}}
             ]}}"#
         );
         let manifest: ReleaseManifest = serde_json::from_str(&json).expect("manifest parses");
@@ -383,14 +383,14 @@ mod tests {
         let asset = find_asset(&manifest, "linux", "x86_64").expect("x86_64 is published");
         assert_eq!(
             asset.url,
-            "https://github.com/tgiap04/zode/releases/download/v0.1.6/zed-remote-server-linux-x86_64.gz"
+            "https://github.com/tgiap04/zode/releases/download/v0.1.6/zode-remote-server-linux-x86_64.gz"
         );
         assert_eq!(asset.sha256, x86_64);
 
         let missing =
             find_asset(&manifest, "macos", "aarch64").expect_err("no macOS server is published");
         assert!(
-            format!("{missing}").contains("zed-remote-server-macos-aarch64.gz"),
+            format!("{missing}").contains("zode-remote-server-macos-aarch64.gz"),
             "{missing}"
         );
     }
@@ -409,12 +409,12 @@ mod tests {
         let x86_64 = b"x86_64 remote server archive";
         let aarch64 = b"aarch64 remote server archive";
         std::fs::write(
-            directory.path().join("zed-remote-server-linux-x86_64.gz"),
+            directory.path().join("zode-remote-server-linux-x86_64.gz"),
             x86_64,
         )
         .expect("writing the x86_64 archive");
         std::fs::write(
-            directory.path().join("zed-remote-server-linux-aarch64.gz"),
+            directory.path().join("zode-remote-server-linux-aarch64.gz"),
             aarch64,
         )
         .expect("writing the aarch64 archive");
@@ -463,7 +463,7 @@ mod tests {
     fn asset_names_are_platform_scoped() {
         assert_eq!(
             asset_name("macos", "aarch64"),
-            "zed-remote-server-macos-aarch64.gz"
+            "zode-remote-server-macos-aarch64.gz"
         );
         assert_ne!(
             asset_name("macos", "aarch64"),

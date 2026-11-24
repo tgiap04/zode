@@ -197,7 +197,7 @@ pub(crate) fn bundle_windows(
     deps: &[&NamedJob],
 ) -> NamedJob {
     let platform = Platform::Windows;
-    // No `working_directory` override: upstream pointed it at `$ZED_WORKSPACE`, which is a
+    // No `working_directory` override: upstream pointed it at `$ZODE_WORKSPACE`, which is a
     // machine-level variable on their self-hosted runner and resolves to empty here. The
     // script derives that path itself via `ParseZedWorkspace`.
     pub fn bundle_windows(arch: Arch) -> Step<Run> {
@@ -234,7 +234,7 @@ fn set_release_channel(platform: Platform, release_channel: ReleaseChannel) -> S
     }
 }
 
-/// Writes the tag's channel into `crates/zed/RELEASE_CHANNEL` before bundling.
+/// Writes the tag's channel into `crates/zode/RELEASE_CHANNEL` before bundling.
 ///
 /// `determine-release-channel` already runs in `create_draft_release`, but a workflow
 /// job is its own checkout: the file it writes there is not the file the bundling job
@@ -243,7 +243,7 @@ fn set_release_channel_from_tag(platform: Platform) -> Step<Run> {
     match platform {
         Platform::Linux | Platform::Mac => steps::script("script/determine-release-channel"),
         Platform::Windows => steps::script("script/determine-release-channel.ps1")
-            .working_directory("${{ env.ZED_WORKSPACE }}"),
+            .working_directory("${{ env.ZODE_WORKSPACE }}"),
     }
 }
 
@@ -253,14 +253,14 @@ fn set_release_channel_to_nightly(platform: Platform) -> Step<Run> {
             set -eu
             version=$(git rev-parse --short HEAD)
             echo "Publishing version: ${version} on release channel nightly"
-            echo "nightly" > crates/zed/RELEASE_CHANNEL
+            echo "nightly" > crates/zode/RELEASE_CHANNEL
         "#}),
         Platform::Windows => named::pwsh!(indoc::indoc! {r#"
             $ErrorActionPreference = "Stop"
             $version = git rev-parse --short HEAD
             Write-Host "Publishing version: $version on release channel nightly"
-            "nightly" | Set-Content -Path "crates/zed/RELEASE_CHANNEL"
+            "nightly" | Set-Content -Path "crates/zode/RELEASE_CHANNEL"
         "#})
-        .working_directory("${{ env.ZED_WORKSPACE }}"),
+        .working_directory("${{ env.ZODE_WORKSPACE }}"),
     }
 }

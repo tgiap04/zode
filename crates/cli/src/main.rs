@@ -27,7 +27,7 @@ use walkdir::WalkDir;
 
 use std::io::IsTerminal;
 
-const URL_PREFIX: [&'static str; 5] = ["zed://", "http://", "https://", "file://", "ssh://"];
+const URL_PREFIX: [&'static str; 5] = ["zode://", "http://", "https://", "file://", "ssh://"];
 
 struct Detect;
 
@@ -102,9 +102,7 @@ struct Args {
     #[arg(long)]
     foreground: bool,
     /// Custom path to Zode.app or the zode binary
-    // `--zed` stays as a hidden alias: it is the spelling every existing script
-    // uses, and dropping it would break them for a rename.
-    #[arg(long = "zode", alias = "zed")]
+    #[arg(long = "zode")]
     zed: Option<PathBuf>,
     /// Run zode in dev-server mode
     #[arg(long)]
@@ -541,7 +539,7 @@ fn main() -> Result<()> {
 
     let (server, server_name) =
         IpcOneShotServer::<IpcHandshake>::new().context("Handshake before Zode spawn")?;
-    let url = format!("zed-cli://{server_name}");
+    let url = format!("zode-cli://{server_name}");
 
     let open_behavior = if args.new {
         cli::OpenBehavior::AlwaysNew
@@ -612,7 +610,7 @@ fn main() -> Result<()> {
     let (expanded_diff_paths, temp_dirs) = expand_directory_diff_pairs(diff_paths)?;
     diff_paths = expanded_diff_paths;
     // Prevent automatic cleanup of temp directories containing empty stub files
-    // for directory diffs. The CLI process may exit before Zed has read these
+    // for directory diffs. The CLI process may exit before Zode has read these
     // files (e.g., when RPC-ing into an already-running instance). The files
     // live in the OS temp directory and will be cleaned up on reboot.
     for temp_dir in temp_dirs {
@@ -646,7 +644,7 @@ fn main() -> Result<()> {
 
     anyhow::ensure!(
         args.dev_server_token.is_none(),
-        "Dev servers were removed in v0.157.x please upgrade to SSH remoting: https://zed.dev/docs/remote-development"
+        "Dev servers were removed in v0.157.x please upgrade to SSH remoting: https://zodekit.com/docs/remote-development"
     );
 
     rayon::ThreadPoolBuilder::new()
@@ -860,8 +858,11 @@ mod linux {
 
                 // libexec is the standard, lib/zed is for Arch (and other non-libexec distros),
                 // ./zode is for the target directory in development builds.
-                let possible_locations =
-                    ["../libexec/zode-editor", "../lib/zed/zed-editor", "./zode"];
+                let possible_locations = [
+                    "../libexec/zode-editor",
+                    "../lib/zode/zode-editor",
+                    "./zode",
+                ];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
@@ -884,7 +885,7 @@ mod linux {
                     format!("{} ", *release_channel::RELEASE_CHANNEL_NAME)
                 },
                 option_env!("RELEASE_VERSION").unwrap_or_default(),
-                match option_env!("ZED_COMMIT_SHA") {
+                match option_env!("ZODE_COMMIT_SHA") {
                     Some(commit_sha) => format!(" {commit_sha} "),
                     None => "".to_string(),
                 },
@@ -898,7 +899,7 @@ mod linux {
                 .unwrap_or_else(|| paths::data_dir().clone());
 
             let sock_path = data_dir.join(format!(
-                "zed-{}.sock",
+                "zode-{}.sock",
                 *release_channel::RELEASE_CHANNEL_NAME
             ));
             let sock = UnixDatagram::unbound()?;
@@ -985,8 +986,8 @@ mod flatpak {
     use std::process::Command;
     use std::{env, process};
 
-    const EXTRA_LIB_ENV_NAME: &str = "ZED_FLATPAK_LIB_PATH";
-    const NO_ESCAPE_ENV_NAME: &str = "ZED_FLATPAK_NO_ESCAPE";
+    const EXTRA_LIB_ENV_NAME: &str = "ZODE_FLATPAK_LIB_PATH";
+    const NO_ESCAPE_ENV_NAME: &str = "ZODE_FLATPAK_NO_ESCAPE";
 
     /// Adds bundled libraries to LD_LIBRARY_PATH if running under flatpak
     pub fn ld_extra_libs() {
@@ -1008,7 +1009,7 @@ mod flatpak {
         if let Some(flatpak_dir) = get_flatpak_dir() {
             let mut args = vec!["/usr/bin/flatpak-spawn".into(), "--host".into()];
             args.append(&mut get_xdg_env_args());
-            args.push("--env=ZED_UPDATE_EXPLANATION=Please use flatpak to update zed".into());
+            args.push("--env=ZODE_UPDATE_EXPLANATION=Please use flatpak to update Zode".into());
             args.push(
                 format!(
                     "--env={EXTRA_LIB_ENV_NAME}={}",
@@ -1016,20 +1017,17 @@ mod flatpak {
                 )
                 .into(),
             );
-            args.push(flatpak_dir.join("bin").join("zed").into());
+            args.push(flatpak_dir.join("bin").join("zode").into());
 
             let mut is_app_location_set = false;
             for arg in &env::args_os().collect::<Vec<_>>()[1..] {
                 args.push(arg.clone());
-                // Both spellings count: `--zode` is the flag now, `--zed` the
-                // alias kept for existing scripts. Missing one makes this append
-                // a second app location below and override what the user passed.
-                is_app_location_set |= arg == "--zode" || arg == "--zed";
+                is_app_location_set |= arg == "--zode";
             }
 
             if !is_app_location_set {
-                args.push("--zed".into());
-                args.push(flatpak_dir.join("libexec").join("zed-editor").into());
+                args.push("--zode".into());
+                args.push(flatpak_dir.join("libexec").join("zode-editor").into());
             }
 
             let error = exec::execvp("/usr/bin/flatpak-spawn", args);
@@ -1043,8 +1041,13 @@ mod flatpak {
             && env::var("FLATPAK_ID").is_ok_and(|id| id.starts_with("io.github.tgiap04.zode"))
             && args.zed.is_none()
         {
-            args.zed = Some("/app/libexec/zed-editor".into());
-            unsafe { env::set_var("ZED_UPDATE_EXPLANATION", "Please use flatpak to update zed") };
+            args.zed = Some("/app/libexec/zode-editor".into());
+            unsafe {
+                env::set_var(
+                    "ZODE_UPDATE_EXPLANATION",
+                    "Please use flatpak to update Zode",
+                )
+            };
         }
         args
     }
@@ -1134,7 +1137,7 @@ mod windows {
                     format!("{} ", *release_channel::RELEASE_CHANNEL_NAME)
                 },
                 option_env!("RELEASE_VERSION").unwrap_or_default(),
-                match option_env!("ZED_COMMIT_SHA") {
+                match option_env!("ZODE_COMMIT_SHA") {
                     Some(commit_sha) => format!(" {commit_sha} "),
                     None => "".to_string(),
                 },
@@ -1198,7 +1201,8 @@ mod windows {
 
                 // ../Zode.exe is the standard, lib/zed is for MSYS2, ./zode.exe is for the target
                 // directory in development builds.
-                let possible_locations = ["../Zode.exe", "../lib/zed/zed-editor.exe", "./zode.exe"];
+                let possible_locations =
+                    ["../Zode.exe", "../lib/zode/zode-editor.exe", "./zode.exe"];
                 possible_locations
                     .iter()
                     .find_map(|p| dir.join(p).canonicalize().ok().filter(|path| path != &cli))
@@ -1315,7 +1319,7 @@ mod mac_os {
                             kCFStringEncodingUTF8,
                             ptr::null(),
                         ));
-                        // equivalent to: open zed-cli:... -a /Applications/Zed\ Preview.app
+                        // equivalent to: open zode-cli:... -a /Applications/Zode\ Preview.app
                         let urls_to_open =
                             CFArray::from_copyable(&[url_to_open.as_concrete_TypeRef()]);
                         LSOpenFromURLSpec(

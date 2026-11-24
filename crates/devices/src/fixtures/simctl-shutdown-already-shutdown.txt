@@ -1,0 +1,5 @@
+# xcrun simctl shutdown <udid> on a Shutdown device
+# exit code: 149
+# stderr:
+An error was encountered processing the command (domain=com.apple.CoreSimulator.SimError, code=405):
+Unable to shutdown device in current state: Shutdown

@@ -1,0 +1,32 @@
+[package]
+name = "reminders_ui"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/reminders_ui.rs"
+doctest = false
+
+[dependencies]
+fs.workspace = true
+gpui.workspace = true
+log.workspace = true
+reminders.workspace = true
+settings.workspace = true
+theme_settings.workspace = true
+ui.workspace = true
+workspace.workspace = true
+zode_actions.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+settings = { workspace = true, features = ["test-support"] }
+fs = { workspace = true, features = ["test-support"] }
+paths.workspace = true
+theme = { workspace = true, features = ["test-support"] }
+theme_settings = { workspace = true, features = ["test-support"] }

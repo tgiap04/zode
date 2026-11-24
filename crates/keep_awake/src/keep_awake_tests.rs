@@ -355,7 +355,7 @@ fn the_status_names_why_the_display_is_not_held(cx: &mut TestAppContext) {
 /// A refused request is reported, not hidden: the setting is on, an agent is
 /// working, the machine is plugged in, and the platform still says no.
 ///
-/// This is no longer what Windows and Linux look like -- `crates/zed` asks
+/// This is no longer what Windows and Linux look like -- `crates/zode` asks
 /// `can_keep_display_awake` first and builds nothing where the answer is no. It
 /// is the narrower case of a platform that claims support and then fails, which
 /// still has to say something truthful.

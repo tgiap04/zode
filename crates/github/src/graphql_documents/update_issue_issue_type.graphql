@@ -1,0 +1,7 @@
+mutation UpdateIssueIssueType($issueId: ID!, $issueTypeId: ID) {
+  updateIssueIssueType(input: { issueId: $issueId, issueTypeId: $issueTypeId }) {
+    issue {
+      id
+    }
+  }
+}

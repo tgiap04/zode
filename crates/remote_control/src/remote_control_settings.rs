@@ -17,6 +17,27 @@ const DEFAULT_IDLE_TIMEOUT_MINUTES: u64 = 30;
 pub struct RemoteControlSettings {
     enabled: bool,
     idle_timeout: Option<Duration>,
+    push: PushPreferences,
+}
+
+/// Which agent events are pushed to paired devices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PushPreferences {
+    pub approval: bool,
+    pub answered: bool,
+    pub ended: bool,
+}
+
+impl PushPreferences {
+    pub const ALL: Self = Self {
+        approval: true,
+        answered: true,
+        ended: true,
+    };
+
+    pub fn any(&self) -> bool {
+        self.approval || self.answered || self.ended
+    }
 }
 
 impl Settings for RemoteControlSettings {
@@ -27,9 +48,15 @@ impl Settings for RemoteControlSettings {
         // was not followed, and this is meant to panic until it is fixed.
         let content = content.remote_control.as_ref().unwrap();
         let minutes = content.idle_timeout_minutes.unwrap();
+        let push = content.push_notifications.as_ref().unwrap();
         Self {
             enabled: content.enabled.unwrap(),
             idle_timeout: (minutes > 0).then(|| Duration::from_secs(minutes.saturating_mul(60))),
+            push: PushPreferences {
+                approval: push.approval.unwrap(),
+                answered: push.answered.unwrap(),
+                ended: push.ended.unwrap(),
+            },
         }
     }
 }
@@ -45,6 +72,11 @@ impl RemoteControlSettings {
             Some(Duration::from_secs(DEFAULT_IDLE_TIMEOUT_MINUTES * 60)),
             |setting| setting.idle_timeout,
         )
+    }
+
+    /// Without a settings store, everything the shipped defaults push.
+    pub fn push_preferences(cx: &App) -> PushPreferences {
+        Self::try_get(cx).map_or(PushPreferences::ALL, |setting| setting.push)
     }
 }
 
@@ -64,6 +96,38 @@ mod tests {
                 RemoteControlSettings::idle_timeout(cx),
                 Some(Duration::from_secs(30 * 60))
             );
+            assert_eq!(
+                RemoteControlSettings::push_preferences(cx),
+                PushPreferences::ALL
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn each_pushed_event_can_be_turned_off_alone(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            SettingsStore::update_global(cx, |store, cx| {
+                store.update_user_settings(cx, |content| {
+                    content
+                        .remote_control
+                        .get_or_insert_default()
+                        .push_notifications
+                        .get_or_insert_default()
+                        .answered = Some(false);
+                });
+            });
+            let preferences = RemoteControlSettings::push_preferences(cx);
+            assert_eq!(
+                preferences,
+                PushPreferences {
+                    approval: true,
+                    answered: false,
+                    ended: true,
+                }
+            );
+            assert!(preferences.any());
         });
     }
 

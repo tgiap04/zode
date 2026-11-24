@@ -275,6 +275,16 @@ impl AgentMirror {
             .map(|(_, listed_as)| listed_as)
     }
 
+    /// The id the tab `view` is listed under, as it reads now, or as it was
+    /// last listed if it has gone.
+    pub fn agent_id_of(&self, view: EntityId, cx: &App) -> Option<String> {
+        let tracked = self.agents.get(&view)?;
+        match tracked.view.upgrade() {
+            Some(entity) => Some(summarize(entity.read(cx), view, cx).id),
+            None => tracked.last.as_ref().map(|summary| summary.id.clone()),
+        }
+    }
+
     /// Every tab as it reads right now, in a stable order.
     pub fn summaries(&self, cx: &App) -> Vec<AgentSummary> {
         let mut summaries: Vec<(EntityId, AgentSummary)> = self

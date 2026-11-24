@@ -23,7 +23,7 @@ use ui::{
 };
 use ui_input::{ErasedEditorEvent, InputField};
 use workspace::{ModalView, Workspace};
-use zed_actions::NewWorktreeBranchTarget;
+use zode_actions::NewWorktreeBranchTarget;
 
 use crate::branch_panel::panel::BranchPanel;
 
@@ -341,7 +341,7 @@ impl CreateWorktreeModal {
             .update(cx, |workspace, cx| {
                 crate::worktree_service::handle_create_worktree(
                     workspace,
-                    &zed_actions::CreateWorktree {
+                    &zode_actions::CreateWorktree {
                         worktree_name,
                         branch_target,
                         agent: self.agent.map(|agent| agent.to_string()),
@@ -863,12 +863,12 @@ mod tests {
         );
         assert_eq!(branch_colliding_with(NameMode::Name, "", &branches), None);
     }
-    use zed_actions::NewWorktreeBranchTarget;
+    use zode_actions::NewWorktreeBranchTarget;
 
     /// A worktree with a branch of its own is the point: a detached checkout
     /// has nowhere to commit, so parallel feature work cannot happen in one.
-    fn existing(name: &str) -> zed_actions::NewWorktreeBranchTarget {
-        zed_actions::NewWorktreeBranchTarget::ExistingBranch {
+    fn existing(name: &str) -> zode_actions::NewWorktreeBranchTarget {
+        zode_actions::NewWorktreeBranchTarget::ExistingBranch {
             name: name.to_string(),
         }
     }

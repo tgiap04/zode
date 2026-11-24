@@ -11,18 +11,23 @@ pub const RAIL_WIDTH: Pixels = px(48.0);
 /// Every glyph in the column is drawn by this, so they cannot drift apart.
 ///
 /// `ButtonSize` and `IconSize` are rems against the UI font size, not pixels. On
-/// the shipped 15px font `Large` draws 30px and `Medium` 15px, just under the 32px
-/// project squares, while the column's own 48px width does not move.
+/// the shipped 15px font `Large` draws about 34px and `Medium` 15px, while the
+/// column's own 48px width does not move.
+///
+/// The width is pinned to the same `Large` length as the height: left to its
+/// content, a button is only as wide as its glyph plus padding, which matches
+/// the height only for one particular button scale.
 pub(crate) fn rail_button(id: impl Into<ElementId>, icon: IconName) -> IconButton {
     IconButton::new(id, icon)
         .size(ButtonSize::Large)
+        .width(ButtonSize::Large.rems())
         .icon_size(IconSize::Medium)
 }
 
 /// Absolute, not a spacing helper: those are rems against the UI font, and the
 /// column's width does not shrink with the font, so neither should the air
-/// between its buttons. Small because a 30px button already pads its 15px glyph
-/// by 7.5px on each side; this is added on top of that.
+/// between its buttons. Small because a `Large` button already pads its 15px
+/// glyph by about 9px on each side; this is added on top of that.
 pub(crate) const RAIL_ICON_GAP: Pixels = px(4.0);
 
 /// Between a block's first or last glyph and the rule that separates it from
@@ -169,7 +174,7 @@ impl Sidebar {
             .into_any_element()
     }
 
-    /// The buttons for the two tools that open as editor tabs.
+    /// The buttons for the tools that open as editor tabs.
     ///
     /// One block, because they are one group: both open a tab of their own the
     /// way the agent buttons below them do, and the person who asked for the
@@ -185,6 +190,9 @@ impl Sidebar {
             .border_color(cx.theme().colors().border)
             .child(self.render_rail_database(window, cx))
             .child(self.render_rail_container(window, cx))
+            .when(Self::shows_github_button(cx), |block| {
+                block.child(self.render_rail_github(window, cx))
+            })
             .into_any_element()
     }
 
@@ -252,7 +260,7 @@ impl Sidebar {
                 // the wrong one of the two.
                 rail_button("project-rail-open-settings", IconName::Settings)
                     .tooltip(move |_window, cx| {
-                        Tooltip::for_action("Open Settings", &zed_actions::OpenSettings, cx)
+                        Tooltip::for_action("Open Settings", &zode_actions::OpenSettings, cx)
                     })
                     // Dispatched rather than called, but not for the panel
                     // toggle's reason above: `on_click` hands out `&mut App`, so
@@ -261,7 +269,7 @@ impl Sidebar {
                     // into, and going through the action keeps the button on the
                     // same path as the command palette and any keybinding.
                     .on_click(|_, window, cx| {
-                        window.dispatch_action(Box::new(zed_actions::OpenSettings), cx);
+                        window.dispatch_action(Box::new(zode_actions::OpenSettings), cx);
                     }),
             )
             // Last, below the settings gear: every activity bar that has an
@@ -290,7 +298,7 @@ mod tests {
 
     /// Every glyph in the column is one size, whichever block draws it. A
     /// button drawn by hand with its own `IconButton::new` would leave the
-    /// default 22px box among 32px ones, and nothing but a measurement notices.
+    /// default-sized box among `Large` ones, and nothing but a measurement notices.
     #[gpui::test]
     async fn every_rail_glyph_button_is_large(cx: &mut TestAppContext) {
         let (TwoProjects { .. }, cx) = two_projects(cx).await;

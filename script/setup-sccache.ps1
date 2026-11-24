@@ -62,8 +62,13 @@ function Install-Sccache {
 }
 
 function Configure-Sccache {
-    if (-not $env:R2_ACCOUNT_ID) {
-        Write-Host "R2_ACCOUNT_ID not set, skipping sccache configuration"
+    # The objects live in this repository's GitHub Actions cache, which is free.
+    # The `expose_actions_cache` step before this one hands its URL and token to
+    # `run:` steps; without them the build simply compiles without a cache.
+    # There is deliberately no other backend: the R2 bucket this used before was
+    # paid for by the gigabyte.
+    if (-not $env:ACTIONS_RESULTS_URL -or -not $env:ACTIONS_RUNTIME_TOKEN) {
+        Write-Host "The GitHub Actions cache is not reachable from this step, compiling without sccache"
         return
     }
 
@@ -75,10 +80,8 @@ function Configure-Sccache {
         exit 1
     }
 
-    Write-Host "Configuring sccache with Cloudflare R2..."
+    Write-Host "Configuring sccache with the GitHub Actions cache..."
 
-    $bucket = if ($env:SCCACHE_BUCKET) { $env:SCCACHE_BUCKET } else { "sccache-zed" }
-    $keyPrefix = if ($env:SCCACHE_KEY_PREFIX) { $env:SCCACHE_KEY_PREFIX } else { "sccache/" }
     $baseDir = if ($env:GITHUB_WORKSPACE) { $env:GITHUB_WORKSPACE } else { (Get-Location).Path }
 
     # Use the absolute path to sccache binary for RUSTC_WRAPPER to avoid
@@ -86,30 +89,24 @@ function Configure-Sccache {
     $sccacheBin = (Get-Command sccache).Source
 
     # Set in current process
-    $env:SCCACHE_ENDPOINT = "https://$($env:R2_ACCOUNT_ID).r2.cloudflarestorage.com"
-    $env:SCCACHE_BUCKET = $bucket
-    $env:SCCACHE_REGION = "auto"
-    $env:SCCACHE_S3_KEY_PREFIX = $keyPrefix
+    $env:SCCACHE_GHA_ENABLED = "true"
+    # A cache that cannot be reached must cost a slower build, never a red one:
+    # on a server error the wrapper runs rustc itself.
+    $env:SCCACHE_IGNORE_SERVER_IO_ERROR = "1"
     $env:SCCACHE_BASEDIR = $baseDir
-    $env:AWS_ACCESS_KEY_ID = $env:R2_ACCESS_KEY_ID
-    $env:AWS_SECRET_ACCESS_KEY = $env:R2_SECRET_ACCESS_KEY
     $env:RUSTC_WRAPPER = $sccacheBin
 
     # Also write to GITHUB_ENV for subsequent steps
     if ($env:GITHUB_ENV) {
         @(
-            "SCCACHE_ENDPOINT=$($env:SCCACHE_ENDPOINT)"
-            "SCCACHE_BUCKET=$($env:SCCACHE_BUCKET)"
-            "SCCACHE_REGION=$($env:SCCACHE_REGION)"
-            "SCCACHE_S3_KEY_PREFIX=$($env:SCCACHE_S3_KEY_PREFIX)"
+            "SCCACHE_GHA_ENABLED=$($env:SCCACHE_GHA_ENABLED)"
+            "SCCACHE_IGNORE_SERVER_IO_ERROR=$($env:SCCACHE_IGNORE_SERVER_IO_ERROR)"
             "SCCACHE_BASEDIR=$($env:SCCACHE_BASEDIR)"
-            "AWS_ACCESS_KEY_ID=$($env:AWS_ACCESS_KEY_ID)"
-            "AWS_SECRET_ACCESS_KEY=$($env:AWS_SECRET_ACCESS_KEY)"
             "RUSTC_WRAPPER=$($env:RUSTC_WRAPPER)"
         ) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
     }
 
-    Write-Host "✓ sccache configured with Cloudflare R2 (bucket: $bucket)"
+    Write-Host "✓ sccache configured with the GitHub Actions cache"
 }
 
 function Show-Config {
@@ -117,25 +114,8 @@ function Show-Config {
     Write-Host "sccache version: $(sccache --version)"
     Write-Host "sccache path: $((Get-Command sccache).Source)"
     Write-Host "RUSTC_WRAPPER: $($env:RUSTC_WRAPPER ?? '<not set>')"
-    Write-Host "SCCACHE_BUCKET: $($env:SCCACHE_BUCKET ?? '<not set>')"
-    Write-Host "SCCACHE_ENDPOINT: $($env:SCCACHE_ENDPOINT ?? '<not set>')"
-    Write-Host "SCCACHE_REGION: $($env:SCCACHE_REGION ?? '<not set>')"
-    Write-Host "SCCACHE_S3_KEY_PREFIX: $($env:SCCACHE_S3_KEY_PREFIX ?? '<not set>')"
+    Write-Host "SCCACHE_GHA_ENABLED: $($env:SCCACHE_GHA_ENABLED ?? '<not set>')"
     Write-Host "SCCACHE_BASEDIR: $($env:SCCACHE_BASEDIR ?? '<not set>')"
-
-    if ($env:AWS_ACCESS_KEY_ID) {
-        Write-Host "AWS_ACCESS_KEY_ID: <set>"
-    }
-    else {
-        Write-Host "AWS_ACCESS_KEY_ID: <not set>"
-    }
-
-    if ($env:AWS_SECRET_ACCESS_KEY) {
-        Write-Host "AWS_SECRET_ACCESS_KEY: <set>"
-    }
-    else {
-        Write-Host "AWS_SECRET_ACCESS_KEY: <not set>"
-    }
 
     Write-Host "=== sccache stats ==="
     sccache --show-stats

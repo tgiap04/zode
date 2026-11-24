@@ -52,6 +52,8 @@ pub struct KeyBinding {
     vim_mode: bool,
     /// Indicates whether the keybinding is currently disabled.
     disabled: bool,
+    /// Overrides the keys' colour, for a binding drawn on a coloured fill.
+    color: Option<Color>,
 }
 
 struct VimStyle(bool);
@@ -99,6 +101,7 @@ impl KeyBinding {
             vim_mode: KeyBinding::is_vim_mode(cx),
             platform_style: PlatformStyle::platform(),
             disabled: false,
+            color: None,
         }
     }
 
@@ -109,6 +112,7 @@ impl KeyBinding {
             vim_mode,
             platform_style: PlatformStyle::platform(),
             disabled: false,
+            color: None,
         }
     }
 
@@ -128,6 +132,13 @@ impl KeyBinding {
     /// Disabled keybinds will be rendered in a dimmed state.
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Draws the keys in `color` instead of the muted default, for a binding on
+    /// a coloured fill such as a brand button. A disabled binding stays dimmed.
+    pub fn color(mut self, color: impl Into<Option<Color>>) -> Self {
+        self.color = color.into();
         self
     }
 }
@@ -151,7 +162,11 @@ fn render_key(
 impl RenderOnce for KeyBinding {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let render_keybinding = |keystrokes: &[KeybindingKeystroke]| {
-            let color = self.disabled.then_some(Color::Disabled);
+            let color = if self.disabled {
+                Some(Color::Disabled)
+            } else {
+                self.color
+            };
 
             h_flex()
                 .debug_selector(|| {
@@ -171,7 +186,9 @@ impl RenderOnce for KeyBinding {
                         .flex_none()
                         .py_0p5()
                         .rounded_xs()
-                        .text_color(cx.theme().colors().text_muted)
+                        .text_color(
+                            color.map_or(cx.theme().colors().text_muted, |color| color.color(cx)),
+                        )
                         .children(render_keybinding_keystroke(
                             keystroke,
                             color,

@@ -214,7 +214,7 @@ is the interactive prompt that lets the user grant or decline trust for a restri
 `FeatureFlagStore` (a `gpui::Global`) resolves each declared `FeatureFlag` type to on/off (or a
 richer `FeatureFlagValue` for multi-variant flags) per user session. Every flag defaults
 `enabled_for_staff() -> true` unless explicitly overridden to `false` (e.g.
-`DiffReviewFeatureFlag`); the `ZED_DISABLE_STAFF` env var forces the current session to be treated
+`DiffReviewFeatureFlag`); the `ZODE_DISABLE_STAFF` env var forces the current session to be treated
 as non-staff for local testing of the disabled state. `enabled_for_all()` (default `false`) is the
 override point for a flag that has been fully rolled out client-side without removing call sites.
 Flags are watched reactively (`FeatureFlag::watch`, `FeatureFlagAppExt::observe_flag`) so a
@@ -227,7 +227,7 @@ server-pushed change to staff status or flag values re-renders dependent views w
 | Zode staff account, flag has `enabled_for_staff() == true` (the default) | ✓                        | Feature visible/active                               |
 | Non-staff account, flag has `enabled_for_all() == true`                  | ✓                        | Feature visible/active for everyone                  |
 | Non-staff account, neither condition holds                               | ✗                        | Feature hidden/inactive                              |
-| Staff account with `ZED_DISABLE_STAFF` env var set                       | ✗ (treated as non-staff) | Used to locally test the disabled-for-non-staff path |
+| Staff account with `ZODE_DISABLE_STAFF` env var set                      | ✗ (treated as non-staff) | Used to locally test the disabled-for-non-staff path |
 
 ### Related Modules
 
@@ -238,7 +238,7 @@ server-pushed change to staff status or flag values re-renders dependent views w
 ## Summary
 
 - **Total Permission Items**: 6
-- **By Type**: route-guard: 0 (N/A), screen-permission: 0 (N/A), action-permission: 4, data-permission: 1, role-based: 0 (N/A — see corrected-stale-pass note above), resource-ownership: 0 (N/A), field-permission: 0 (N/A), api-scope: 0 (N/A), feature-flag: 1, experiment: 0 (N/A), env-gate: 0 (N/A — `ZED_DISABLE_STAFF` is a testing override of PERM006, not an independent env-gated behavior branch), locale-gate: 0 (N/A)
+- **By Type**: route-guard: 0 (N/A), screen-permission: 0 (N/A), action-permission: 4, data-permission: 1, role-based: 0 (N/A — see corrected-stale-pass note above), resource-ownership: 0 (N/A), field-permission: 0 (N/A), api-scope: 0 (N/A), feature-flag: 1, experiment: 0 (N/A), env-gate: 0 (N/A — `ZODE_DISABLE_STAFF` is a testing override of PERM006, not an independent env-gated behavior branch), locale-gate: 0 (N/A)
 
 ---
 
@@ -258,5 +258,5 @@ server-pushed change to staff status or flag values re-renders dependent views w
 
 Only `feature-flag` (PERM006) has matches. No `experiment`, `env-gate`, or `locale-gate` call
 sites were found in the Wave 0 scout inventory — no A/B variant-assignment code, no
-`process.env`/`std::env`-conditioned behavioral branch beyond the `ZED_DISABLE_STAFF` testing
+`process.env`/`std::env`-conditioned behavioral branch beyond the `ZODE_DISABLE_STAFF` testing
 override already captured under PERM006, and no locale-conditioned UI/access branch.

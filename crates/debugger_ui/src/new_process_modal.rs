@@ -21,7 +21,7 @@ use gpui::{
 use itertools::Itertools as _;
 use picker::{Picker, PickerDelegate, highlighted_match_with_paths::HighlightedMatch};
 use project::{DebugScenarioContext, Project, TaskContexts, TaskSourceKind, task_store::TaskStore};
-use task::{DebugScenario, RevealTarget, SharedTaskContext, VariableName, ZedDebugConfig};
+use task::{DebugScenario, RevealTarget, SharedTaskContext, VariableName, ZodeDebugConfig};
 use ui::{
     ContextMenu, DropdownMenu, IconWithIndicator, Indicator, KeyBinding, ListItem, ListItemSpacing,
     Switch, SwitchLabelPosition, ToggleButtonGroup, ToggleButtonSimple, ToggleState, Tooltip,
@@ -330,7 +330,7 @@ impl NewProcessModal {
             None
         };
 
-        let session_scenario = ZedDebugConfig {
+        let session_scenario = ZodeDebugConfig {
             adapter: debugger.to_owned().into(),
             label,
             request,
@@ -835,7 +835,7 @@ impl ConfigureMode {
         });
 
         let cwd = cx.new(|cx| {
-            InputField::new(window, cx, "Ex: $ZED_WORKTREE_ROOT")
+            InputField::new(window, cx, "Ex: $ZODE_WORKTREE_ROOT")
                 .label("Working Directory")
                 .tab_stop(true)
                 .tab_index(2)
@@ -959,7 +959,7 @@ impl ConfigureMode {
 
 #[derive(Clone)]
 pub(super) struct AttachMode {
-    pub(super) definition: ZedDebugConfig,
+    pub(super) definition: ZodeDebugConfig,
     pub(super) attach_picker: Entity<AttachModal>,
 }
 
@@ -971,7 +971,7 @@ impl AttachMode {
         window: &mut Window,
         cx: &mut Context<NewProcessModal>,
     ) -> Entity<Self> {
-        let definition = ZedDebugConfig {
+        let definition = ZodeDebugConfig {
             adapter: debugger.unwrap_or(DebugAdapterName("".into())).0,
             label: "Attach New Session Setup".into(),
             request: dap::DebugRequest::Attach(task::AttachRequest { process_id: None }),
@@ -1068,7 +1068,7 @@ impl DebugDelegate {
                     };
 
                     match path.components().next_back() {
-                        Some(".zed") => {
+                        Some(".zode") => {
                             path.push(RelPath::unix("debug.json").unwrap());
                         }
                         Some(".vscode") => {
@@ -1165,7 +1165,7 @@ impl DebugDelegate {
                         id: _,
                         directory_in_worktree: dir,
                         id_base: _,
-                    } => dir.ends_with(RelPath::unix(".zed").unwrap()),
+                    } => dir.ends_with(RelPath::unix(".zode").unwrap()),
                     _ => false,
                 });
 
@@ -1488,7 +1488,7 @@ impl PickerDelegate for DebugDelegate {
                     Button::new("edit-debug-json", "Edit debug.json").on_click(cx.listener(
                         |_picker, _, window, cx| {
                             window.dispatch_action(
-                                zed_actions::OpenProjectDebugTasks.boxed_clone(),
+                                zode_actions::OpenProjectDebugTasks.boxed_clone(),
                                 cx,
                             );
                             cx.emit(DismissEvent);
@@ -1609,7 +1609,7 @@ pub(crate) fn resolve_path(path: &mut String) {
         *path = trimmed_path.replacen('~', &home, 1);
     } else if let Some(strip_path) = path.strip_prefix(&format!(".{}", std::path::MAIN_SEPARATOR)) {
         *path = format!(
-            "$ZED_WORKTREE_ROOT{}{}",
+            "$ZODE_WORKTREE_ROOT{}{}",
             std::path::MAIN_SEPARATOR,
             &strip_path
         );

@@ -85,16 +85,16 @@ impl Render for EnvSyncToolbar {
                     // re-linking a checkout later.
                     menu.action(
                         "Send to Your Account\u{2026}",
-                        Box::new(zed_actions::env_sync::PushEnvFile),
+                        Box::new(zode_actions::env_sync::PushEnvFile),
                     )
                     .action(
                         "Fetch From Your Account\u{2026}",
-                        Box::new(zed_actions::env_sync::PullEnvFile),
+                        Box::new(zode_actions::env_sync::PullEnvFile),
                     )
                     .separator()
                     .action(
                         "Environment Files\u{2026}",
-                        Box::new(zed_actions::env_sync::OpenEnvVault),
+                        Box::new(zode_actions::env_sync::OpenEnvVault),
                     )
                 }))
             })

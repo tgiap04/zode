@@ -30,10 +30,10 @@ static CURRENT_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// On Windows, this is `%APPDATA%\Zode`.
 static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Returns the relative path to the zed_server directory on the ssh host.
+/// Returns the relative path to the zode_server directory on the ssh host.
 pub fn remote_server_dir_relative() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
-        LazyLock::new(|| RelPath::unix(".zed_server").unwrap());
+        LazyLock::new(|| RelPath::unix(".zode_server").unwrap());
     *CACHED
 }
 
@@ -41,7 +41,7 @@ pub fn remote_server_dir_relative() -> &'static RelPath {
 /// Returns the relative path to the zed_wsl_server directory on the wsl host.
 pub fn remote_wsl_server_dir_relative() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
-        LazyLock::new(|| RelPath::unix(".zed_wsl_server").unwrap());
+        LazyLock::new(|| RelPath::unix(".zode_wsl_server").unwrap());
     *CACHED
 }
 
@@ -199,7 +199,7 @@ pub fn logs_dir() -> &'static PathBuf {
     })
 }
 
-/// Returns the path to the Zed server directory on this SSH host.
+/// Returns the path to the Zode server directory on this SSH host.
 pub fn remote_server_state_dir() -> &'static PathBuf {
     static REMOTE_SERVER_STATE: OnceLock<PathBuf> = OnceLock::new();
     REMOTE_SERVER_STATE.get_or_init(|| data_dir().join("server_state"))
@@ -385,7 +385,7 @@ pub fn prompts_dir() -> &'static PathBuf {
 ///
 /// # Arguments
 ///
-/// * `dev_mode` - If true, assumes the current working directory is the Zed repository.
+/// * `dev_mode` - If true, assumes the current working directory is the Zode repository.
 pub fn prompt_overrides_dir(repo_path: Option<&Path>) -> PathBuf {
     if let Some(path) = repo_path {
         let dev_path = path.join("assets").join("prompts");
@@ -482,9 +482,9 @@ pub fn devcontainer_dir() -> &'static PathBuf {
     DEVCONTAINER_DIR.get_or_init(|| data_dir().join("devcontainer"))
 }
 
-/// Returns the relative path to a `.zed` folder within a project.
+/// Returns the relative path to a `.zode` folder within a project.
 pub fn local_settings_folder_name() -> &'static str {
-    ".zed"
+    ".zode"
 }
 
 /// Returns the relative path to a `.vscode` folder within a project.
@@ -495,14 +495,14 @@ pub fn local_vscode_folder_name() -> &'static str {
 /// Returns the relative path to a `settings.json` file within a project.
 pub fn local_settings_file_relative_path() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
-        LazyLock::new(|| RelPath::unix(".zed/settings.json").unwrap());
+        LazyLock::new(|| RelPath::unix(".zode/settings.json").unwrap());
     *CACHED
 }
 
 /// Returns the relative path to a `tasks.json` file within a project.
 pub fn local_tasks_file_relative_path() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
-        LazyLock::new(|| RelPath::unix(".zed/tasks.json").unwrap());
+        LazyLock::new(|| RelPath::unix(".zode/tasks.json").unwrap());
     *CACHED
 }
 
@@ -522,10 +522,10 @@ pub fn task_file_name() -> &'static str {
 }
 
 /// Returns the relative path to a `debug.json` file within a project.
-/// .zed/debug.json
+/// .zode/debug.json
 pub fn local_debug_file_relative_path() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
-        LazyLock::new(|| RelPath::unix(".zed/debug.json").unwrap());
+        LazyLock::new(|| RelPath::unix(".zode/debug.json").unwrap());
     *CACHED
 }
 

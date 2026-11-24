@@ -431,7 +431,7 @@ async fn test_extension_store(cx: &mut TestAppContext) {
     let prev_fs_metadata_call_count = fs.metadata_call_count();
     let prev_fs_read_dir_call_count = fs.read_dir_call_count();
 
-    // Create new extension store, as if Zed were restarting.
+    // Create new extension store, as if Zode were restarting.
     drop(store);
     let store = cx.new(|cx| {
         ExtensionStore::new(
@@ -681,7 +681,7 @@ async fn test_extension_store_with_test_extension(cx: &mut TestAppContext) {
     });
     let user_agent = cx.update(|cx| {
         format!(
-            "Zed/{} ({}; {})",
+            "Zode/{} ({}; {})",
             AppVersion::global(cx),
             std::env::consts::OS,
             std::env::consts::ARCH

@@ -150,7 +150,7 @@ Zode's default semantic token rules map standard LSP token types to common theme
 - `class` → `type.class`, `class`, or `type` style (first found)
 - `comment` with `documentation` modifier → `comment.documentation` or `comment.doc` style
 
-The full default configuration can be shown in Zode with the `zed: show default semantic token rules` command.
+The full default configuration can be shown in Zode with the `zode: show default semantic token rules` command.
 
 ## Standard Token Types
 

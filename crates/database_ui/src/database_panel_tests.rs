@@ -463,7 +463,7 @@ async fn dispatching_add_connection_opens_the_dialog_rather_than_aborting(cx: &m
     cx.run_until_parked();
 
     cx.update(|window, cx| {
-        window.dispatch_action(Box::new(zed_actions::database::AddConnection), cx);
+        window.dispatch_action(Box::new(zode_actions::database::AddConnection), cx);
     });
     cx.run_until_parked();
 
@@ -480,7 +480,7 @@ async fn dispatching_add_connection_opens_the_dialog_rather_than_aborting(cx: &m
     // what is being checked is that no handler reaches back through a workspace
     // handle, and that is a property of the whole set, not of one entry.
     cx.update(|window, cx| {
-        window.dispatch_action(Box::new(zed_actions::database::ToggleDatabase), cx);
+        window.dispatch_action(Box::new(zode_actions::database::ToggleDatabase), cx);
     });
     cx.run_until_parked();
 }
@@ -615,7 +615,7 @@ async fn opening_a_connection_in_a_remote_window_runs_the_hosts_driver(cx: &mut 
     let local_store = tempfile::tempdir().expect("a temporary directory");
     let service = std::rc::Rc::new(RecordingHost::with_postgres());
     cx.update(|_window, cx| {
-        cx.set_global(zed_credentials_provider::ZedCredentialsProvider(
+        cx.set_global(zode_credentials_provider::ZodeCredentialsProvider(
             std::sync::Arc::new(MemoryCredentials::default()),
         ));
         crate::driver_registry::set_installer_for_test(local_store.path().to_path_buf(), cx);
@@ -684,7 +684,7 @@ async fn a_wide_editor_tab_stands_the_table_list_beside_the_data(cx: &mut TestAp
         window.focus(&panel.focus_handle.clone(), cx);
     });
     cx.run_until_parked();
-    cx.dispatch_action(zed_actions::database::OpenInEditorTab);
+    cx.dispatch_action(zode_actions::database::OpenInEditorTab);
     cx.run_until_parked();
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
@@ -731,7 +731,7 @@ async fn opening_in_a_floating_window_adds_a_window_without_aborting(cx: &mut Te
         window.focus(&panel.focus_handle.clone(), cx);
     });
     cx.run_until_parked();
-    cx.dispatch_action(zed_actions::database::OpenInFloatingWindow);
+    cx.dispatch_action(zode_actions::database::OpenInFloatingWindow);
     cx.run_until_parked();
 
     let after = cx.update(|_window, cx| cx.windows().len());
@@ -765,7 +765,7 @@ async fn a_standalone_view_lays_its_regions_out_sideways(cx: &mut TestAppContext
         window.focus(&panel.focus_handle.clone(), cx);
     });
     cx.run_until_parked();
-    cx.dispatch_action(zed_actions::database::OpenInEditorTab);
+    cx.dispatch_action(zode_actions::database::OpenInEditorTab);
     cx.run_until_parked();
     cx.update(|window, _| window.refresh());
     cx.run_until_parked();
@@ -812,7 +812,7 @@ async fn the_toggle_action_opens_the_tab_and_puts_it_away(cx: &mut TestAppContex
     );
 
     cx.update(|window, cx| {
-        window.dispatch_action(Box::new(zed_actions::database::ToggleDatabase), cx)
+        window.dispatch_action(Box::new(zode_actions::database::ToggleDatabase), cx)
     });
     cx.run_until_parked();
 
@@ -827,7 +827,7 @@ async fn the_toggle_action_opens_the_tab_and_puts_it_away(cx: &mut TestAppContex
 
     // Pressed again with nothing else in the pane: put away, never closed.
     cx.update(|window, cx| {
-        window.dispatch_action(Box::new(zed_actions::database::ToggleDatabase), cx)
+        window.dispatch_action(Box::new(zode_actions::database::ToggleDatabase), cx)
     });
     cx.run_until_parked();
     assert_eq!(
@@ -856,7 +856,7 @@ async fn the_toggle_action_never_opens_a_second_tab(cx: &mut TestAppContext) {
 
     for _ in 0..3 {
         cx.update(|window, cx| {
-            window.dispatch_action(Box::new(zed_actions::database::ToggleDatabase), cx)
+            window.dispatch_action(Box::new(zode_actions::database::ToggleDatabase), cx)
         });
         cx.run_until_parked();
     }
@@ -1063,7 +1063,7 @@ async fn drawn_dialog(
 ) {
     let (workspace, _panel, cx) = workspace_with_panel(cx).await;
     cx.update(|window, cx| {
-        window.dispatch_action(Box::new(zed_actions::database::AddConnection), cx);
+        window.dispatch_action(Box::new(zode_actions::database::AddConnection), cx);
     });
     cx.run_until_parked();
     let modal = workspace
@@ -1437,7 +1437,7 @@ async fn pressing_connect_with_the_field_focused_saves_rather_than_dismisses(
     let (workspace, _panel, cx) = workspace_with_panel(cx).await;
     let store = std::sync::Arc::new(MemoryCredentials::default());
     cx.update(|_window, cx| {
-        cx.set_global(zed_credentials_provider::ZedCredentialsProvider(
+        cx.set_global(zode_credentials_provider::ZodeCredentialsProvider(
             store.clone(),
         ));
     });
@@ -1711,7 +1711,7 @@ async fn a_shared_password_is_stored_once_and_then_forgotten(cx: &mut TestAppCon
     let (_workspace, panel, cx) = workspace_with_panel(cx).await;
     let store = std::sync::Arc::new(MemoryCredentials::default());
     cx.update(|_window, cx| {
-        cx.set_global(zed_credentials_provider::ZedCredentialsProvider(
+        cx.set_global(zode_credentials_provider::ZodeCredentialsProvider(
             store.clone(),
         ));
     });
@@ -1847,7 +1847,7 @@ async fn a_shared_password_is_forgotten_by_its_own_node_after_the_list_moves(
     let (_workspace, panel, cx) = workspace_with_panel(cx).await;
     let store = std::sync::Arc::new(MemoryCredentials::default());
     cx.update(|_window, cx| {
-        cx.set_global(zed_credentials_provider::ZedCredentialsProvider(store));
+        cx.set_global(zode_credentials_provider::ZodeCredentialsProvider(store));
     });
     panel.update(cx, |panel, _cx| {
         push_team_node(panel, 0xa1, "staging", true, Some("hunter2"));
@@ -1978,7 +1978,7 @@ async fn settings_file_text(
 fn memory_credentials(cx: &mut gpui::VisualTestContext) -> std::sync::Arc<MemoryCredentials> {
     let store = std::sync::Arc::new(MemoryCredentials::default());
     cx.update(|_window, cx| {
-        cx.set_global(zed_credentials_provider::ZedCredentialsProvider(
+        cx.set_global(zode_credentials_provider::ZodeCredentialsProvider(
             store.clone(),
         ));
     });
@@ -2626,7 +2626,7 @@ async fn the_refresh_action_reaches_the_focused_panel(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
 
-    cx.dispatch_action(zed_actions::database::RefreshDatabase);
+    cx.dispatch_action(zode_actions::database::RefreshDatabase);
     cx.run_until_parked();
 
     assert_eq!(asked(&calls, "list_schemas"), 2);
@@ -3400,7 +3400,7 @@ mod grid_copy {
 
         click_row(cx, 0, 8., Modifiers::none());
         click_row(cx, 2, 8., shift());
-        cx.dispatch_action(zed_actions::database::CopySelection);
+        cx.dispatch_action(zode_actions::database::CopySelection);
 
         assert_eq!(
             clipboard(cx).as_deref(),
@@ -3417,11 +3417,11 @@ mod grid_copy {
         // The `id` column is as wide as a short column goes, so this lands in
         // `note`.
         click_row(cx, 3, 120., Modifiers::none());
-        cx.dispatch_action(zed_actions::database::CopySelection);
+        cx.dispatch_action(zode_actions::database::CopySelection);
         assert_eq!(clipboard(cx).as_deref(), Some("delta"));
 
         click_row(cx, 3, 8., Modifiers::none());
-        cx.dispatch_action(zed_actions::database::CopySelection);
+        cx.dispatch_action(zode_actions::database::CopySelection);
         assert_eq!(clipboard(cx).as_deref(), Some("4"), "the other column");
     }
 
@@ -3434,7 +3434,7 @@ mod grid_copy {
         sentinel(cx);
 
         click_row(cx, 1, 120., Modifiers::none());
-        cx.dispatch_action(zed_actions::database::CopySelection);
+        cx.dispatch_action(zode_actions::database::CopySelection);
 
         assert_eq!(clipboard(cx).as_deref(), Some("untouched"));
     }
@@ -3445,10 +3445,10 @@ mod grid_copy {
         show_rows(&panel, None, cx);
 
         click_row(cx, 0, 8., Modifiers::none());
-        cx.dispatch_action(zed_actions::database::SelectAllRows);
+        cx.dispatch_action(zode_actions::database::SelectAllRows);
         assert_eq!(selected(&panel, cx), [0, 1, 2, 3]);
 
-        cx.dispatch_action(zed_actions::database::CopySelection);
+        cx.dispatch_action(zode_actions::database::CopySelection);
         let copied = clipboard(cx).unwrap_or_default();
         assert_eq!(copied.lines().count(), 4, "four rows and no header");
 
@@ -6469,7 +6469,7 @@ mod task_growth {
     async fn keeping_a_shared_password_does_not_keep_every_task(cx: &mut TestAppContext) {
         let (_workspace, panel, cx) = workspace_with_panel(cx).await;
         cx.update(|_window, cx| {
-            cx.set_global(zed_credentials_provider::ZedCredentialsProvider(
+            cx.set_global(zode_credentials_provider::ZodeCredentialsProvider(
                 std::sync::Arc::new(MemoryCredentials::default()),
             ));
         });
@@ -7029,7 +7029,7 @@ mod grid_editing_ui {
         assert!(open_editor(&panel, 0, 1, cx));
         type_into_editor(&panel, "first", cx);
 
-        cx.dispatch_action(zed_actions::database::EditNextCell);
+        cx.dispatch_action(zode_actions::database::EditNextCell);
         draw_again(cx);
 
         assert_eq!(
@@ -7039,7 +7039,7 @@ mod grid_editing_ui {
         // The key column of row 1 is skipped: it is the email that opens.
         assert_eq!(editing(&panel, cx), Some((1, 1, String::new())));
 
-        cx.dispatch_action(zed_actions::database::EditPreviousCell);
+        cx.dispatch_action(zode_actions::database::EditPreviousCell);
         draw_again(cx);
         assert_eq!(editing(&panel, cx), Some((0, 1, "first".to_string())));
     }
@@ -7625,15 +7625,15 @@ mod grid_editing_ui {
                 KeyBinding::new("down", menu::SelectNext, Some("DatabaseResults")),
                 KeyBinding::new("escape", editor::actions::Cancel, Some("Editor")),
                 KeyBinding::new("tab", editor::actions::Tab, Some("Editor")),
-                KeyBinding::new("down", zed_actions::editor::MoveDown, Some("Editor")),
+                KeyBinding::new("down", zode_actions::editor::MoveDown, Some("Editor")),
                 KeyBinding::new(
                     "tab",
-                    zed_actions::database::EditNextCell,
+                    zode_actions::database::EditNextCell,
                     Some("DatabaseCellEditor > Editor"),
                 ),
                 KeyBinding::new(
                     "cmd-s",
-                    zed_actions::database::SaveChanges,
+                    zode_actions::database::SaveChanges,
                     Some("DatabaseResults"),
                 ),
             ]);

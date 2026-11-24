@@ -147,6 +147,10 @@ pub fn migrate_keymap(text: &str) -> Result<Option<String>> {
             migrations::m_2026_03_23::KEYMAP_PATTERNS,
             &KEYMAP_QUERY_2026_03_23,
         ),
+        MigrationType::TreeSitter(
+            migrations::m_2026_11_21::KEYMAP_PATTERNS,
+            &KEYMAP_QUERY_2026_11_21,
+        ),
     ];
     run_migrations(text, migrations)
 }
@@ -255,6 +259,7 @@ pub fn migrate_settings(text: &str) -> Result<Option<String>> {
         ),
         MigrationType::Json(migrations::m_2026_07_27::remove_dead_subsystem_settings),
         MigrationType::Json(migrations::m_2026_08_24::remove_registry_and_extension_agent_servers),
+        MigrationType::Json(migrations::m_2026_11_21::rename_zed_names_to_zode),
     ];
     run_migrations(text, migrations)
 }
@@ -396,6 +401,10 @@ define_query!(
 define_query!(
     KEYMAP_QUERY_2026_03_23,
     migrations::m_2026_03_23::KEYMAP_PATTERNS
+);
+define_query!(
+    KEYMAP_QUERY_2026_11_21,
+    migrations::m_2026_11_21::KEYMAP_PATTERNS
 );
 
 // custom query
@@ -3767,7 +3776,7 @@ mod tests {
             Some(&"{\n    \"agent\": {\n        \n    }\n}\n"),
         );
 
-        // Project-local settings (.zed/settings.json) with always_allow_tool_actions
+        // Project-local settings (.zode/settings.json) with always_allow_tool_actions
         // These files have no platform/channel overrides or root-level profiles.
         assert_migrate_with_migrations(
             &[MigrationType::Json(

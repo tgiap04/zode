@@ -1,7 +1,9 @@
-use askpass::EncryptedPassword;
+use askpass::{AskPassDelegate, EncryptedPassword};
 use editor::Editor;
 use futures::channel::oneshot;
-use gpui::{AppContext, DismissEvent, Entity, EventEmitter, Focusable, Styled};
+use gpui::{
+    AnyWindowHandle, AppContext, DismissEvent, Entity, EventEmitter, Focusable, Styled, WeakEntity,
+};
 use ui::{
     ActiveTheme, AnyElement, App, Button, Clickable, Color, Context, DynamicSpacing, Headline,
     HeadlineSize, Icon, IconName, IconSize, InteractiveElement, IntoElement, Label, LabelCommon,
@@ -9,14 +11,37 @@ use ui::{
     h_flex, v_flex,
 };
 use util::maybe;
-use workspace::ModalView;
+use workspace::{ModalView, Workspace};
 use zeroize::Zeroize;
 
-pub(crate) struct AskPassModal {
+pub struct AskPassModal {
     operation: SharedString,
     prompt: SharedString,
     editor: Entity<Editor>,
     tx: Option<oneshot::Sender<EncryptedPassword>>,
+}
+
+/// An askpass delegate that shows [`AskPassModal`] in `workspace` whenever
+/// git asks for a password, passphrase or username during `operation`.
+pub fn askpass_delegate_for_workspace(
+    workspace: WeakEntity<Workspace>,
+    window: AnyWindowHandle,
+    operation: SharedString,
+    cx: &mut App,
+) -> AskPassDelegate {
+    AskPassDelegate::new(&mut cx.to_async(), move |prompt, tx, cx| {
+        window
+            .update(cx, |_, window, cx| {
+                workspace
+                    .update(cx, |workspace, cx| {
+                        workspace.toggle_modal(window, cx, |window, cx| {
+                            AskPassModal::new(operation.clone(), prompt.into(), tx, window, cx)
+                        });
+                    })
+                    .ok();
+            })
+            .ok();
+    })
 }
 
 impl EventEmitter<DismissEvent> for AskPassModal {}

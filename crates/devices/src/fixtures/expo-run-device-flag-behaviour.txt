@@ -1,0 +1,13 @@
+# npx expo run:android -d emulator-5554   (stdin not a TTY; failed later at Gradle: compileSdk 37 platform not installed here)
+› Using --device Medium_Phone
+› Building app...
+
+# npx expo run:ios -d <sim udid>   (exit via SIGINT after Metro started; expo prebuild created ios/ and modified app.json and package.json)
+- Creating native directory (./ios)
+- Updating package.json
+› Using --device 00000000-0000-4000-8000-000000000005
+› Build Succeeded
+Starting Metro Bundler
+Waiting on http://localhost:8081
+› Installing on iPhone 17
+› Opening on iPhone 17 (com.example.expo-sample)

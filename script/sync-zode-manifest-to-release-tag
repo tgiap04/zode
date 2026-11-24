@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Moves the app's version in `crates/zed/Cargo.toml` and in zode's `Cargo.lock`
+# Moves the app's version in `crates/zode/Cargo.toml` and in zode's `Cargo.lock`
 # stanza up to a stable release tag, so a checkout of develop reports the version
 # that was last shipped.
 #
@@ -27,7 +27,7 @@ if [[ $# -ne 1 ]]; then
 fi
 
 tag="$1"
-manifest="crates/zed/Cargo.toml"
+manifest="crates/zode/Cargo.toml"
 lockfile="Cargo.lock"
 
 report() {

@@ -334,6 +334,32 @@ pub enum Control {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         open_agent_id: Option<String>,
     },
+    /// The keys a browser's push subscription encrypts with, base64url as
+    /// `PushSubscription.getKey()` gives them. They travel only inside this
+    /// encrypted channel: the server stores the subscription's endpoint and
+    /// never these, so it cannot read what the host pushes. Sent only to a host
+    /// that announced `push`.
+    PushSubscribe {
+        p256dh: String,
+        auth: String,
+    },
+    /// The browser stopped receiving pushes; the host forgets its keys.
+    PushUnsubscribe,
+    /// Whether the page is on screen, and which agent it shows. A host does not
+    /// push to a device that is already looking at the agent concerned.
+    PageVisibility {
+        visible: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
+    },
+    /// Whether the host will push to this device. `reason` says why not
+    /// (`not_in_plan`, `disabled`); a newer host may send other reasons. Sent
+    /// only to a device that announced `push`.
+    PushStatus {
+        enabled: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 }
 
 pub fn encode_control(control: &Control) -> Result<Vec<u8>, MessageError> {

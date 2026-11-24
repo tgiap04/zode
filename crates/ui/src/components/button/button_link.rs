@@ -3,7 +3,7 @@ use gpui::{IntoElement, Window, prelude::*};
 use crate::{ButtonLike, prelude::*};
 
 /// A button that takes an underline to look like a regular web link.
-/// It also contains an arrow icon to communicate the link takes you out of Zed.
+/// It also contains an arrow icon to communicate the link takes you out of Zode.
 ///
 /// # Usage Example
 ///

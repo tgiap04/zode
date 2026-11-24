@@ -127,7 +127,7 @@ mod tests {
                 }}
             }}"#
         );
-        PlanSummary::parse(&body, "https://zodekit.site").expect("a plan the server could send")
+        PlanSummary::parse(&body, "https://zodekit.com").expect("a plan the server could send")
     }
 
     #[test]

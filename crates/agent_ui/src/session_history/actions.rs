@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use util::ResultExt as _;
 use workspace::notifications::NotificationId;
-use zed_actions::agent::PermissionPrompts;
+use zode_actions::agent::PermissionPrompts;
 
 /// Whether the directory a session ran in is still there.
 ///

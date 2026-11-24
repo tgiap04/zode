@@ -36,7 +36,7 @@ use ui::{
 use util::ResultExt;
 use workspace::{MultiWorkspace, ToggleWorktreeSecurity, Workspace, dock::DockPosition};
 
-use zed_actions::OpenRemote;
+use zode_actions::OpenRemote;
 
 pub use onboarding_banner::restore_banner;
 
@@ -278,7 +278,7 @@ impl TitleBar {
         let platform_style = PlatformStyle::platform();
         let application_menu = match platform_style {
             PlatformStyle::Mac => {
-                if option_env!("ZED_USE_CROSS_PLATFORM_MENU").is_some() {
+                if option_env!("ZODE_USE_CROSS_PLATFORM_MENU").is_some() {
                     Some(cx.new(|cx| ApplicationMenu::new(false, window, cx)))
                 } else {
                     None
@@ -826,7 +826,7 @@ impl TitleBar {
                 move |_window, cx| {
                     Tooltip::for_action(
                         "Recent Projects",
-                        &zed_actions::OpenRecent {
+                        &zode_actions::OpenRecent {
                             create_new_window: false,
                         },
                         cx,
@@ -883,7 +883,7 @@ impl TitleBar {
                 move |_window, cx| {
                     Tooltip::for_action(
                         "Recent Projects",
-                        &zed_actions::OpenRecent {
+                        &zode_actions::OpenRecent {
                             create_new_window: false,
                         },
                         cx,
@@ -990,7 +990,7 @@ impl TitleBar {
                     move |_window, cx| {
                         Tooltip::with_meta(
                             "Worktree",
-                            Some(&zed_actions::git::Worktree),
+                            Some(&zode_actions::git::Worktree),
                             format!("Currently In Use: {}", worktree_label),
                             cx,
                         )
@@ -1044,7 +1044,7 @@ impl TitleBar {
                 } else {
                     format!("Currently Checked Out: {}", branch_tooltip_label)
                 };
-                Tooltip::with_meta("Branch & Stash", Some(&zed_actions::git::Branch), meta, cx)
+                Tooltip::with_meta("Branch & Stash", Some(&zode_actions::git::Branch), meta, cx)
             })
             .anchor(gpui::Anchor::TopLeft);
 

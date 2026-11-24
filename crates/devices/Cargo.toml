@@ -1,0 +1,37 @@
+[package]
+name = "devices"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/devices.rs"
+
+[features]
+default = []
+# A host that answers from scripted tool output, so the panel can be tested
+# without Xcode or an Android SDK on the machine.
+test-support = ["dep:parking_lot"]
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+log.workspace = true
+parking_lot = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+smol.workspace = true
+sysinfo.workspace = true
+util.workspace = true
+which.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+devices = { path = ".", features = ["test-support"] }

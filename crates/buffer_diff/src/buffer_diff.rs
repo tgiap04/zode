@@ -1139,7 +1139,7 @@ fn compute_hunks(
         )
         .log_err();
 
-        // A common case in Zed is that the empty buffer is represented as just a newline,
+        // A common case in Zode is that the empty buffer is represented as just a newline,
         // but if we just compute a naive diff you get a "preserved" line in the middle,
         // which is a bit odd.
         if buffer_text == "\n" && diff_base.ends_with("\n") && diff_base.len() > 1 {

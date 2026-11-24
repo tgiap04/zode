@@ -118,11 +118,11 @@ pub struct SettingsContent {
 
     pub agent_servers: Option<AllAgentServersSettings>,
 
-    /// Configuration of audio in Zed.
+    /// Configuration of audio in Zode.
     pub audio: Option<AudioSettingsContent>,
 
-    /// This base keymap settings adjusts the default keybindings in Zed to be similar
-    /// to other common code editors. By default, Zed's keymap closely follows VSCode's
+    /// This base keymap settings adjusts the default keybindings in Zode to be similar
+    /// to other common code editors. By default, Zode's keymap closely follows VSCode's
     /// keymap, with minor adjustments, this corresponds to the "VSCode" setting.
     ///
     /// Default: VSCode
@@ -176,6 +176,16 @@ pub struct SettingsContent {
     /// its CLI exits.
     pub agent_finished_notification: Option<AgentFinishedNotificationContent>,
 
+    /// Reminders to drink water, rest the eyes and stand up, and a focus timer
+    /// that alternates work and breaks. Each interval is yours to set.
+    pub reminders: Option<RemindersContent>,
+
+    /// Whether to show the Zode icon in the system tray (the macOS menu bar).
+    /// Clicking it opens the reminders panel.
+    ///
+    /// Default: true
+    pub tray_icon: Option<bool>,
+
     /// Lets another of your devices, signed in to the same account, watch and
     /// type into the agents and terminals running in this Zode.
     pub remote_control: Option<RemoteControlSettingsContent>,
@@ -190,6 +200,9 @@ pub struct SettingsContent {
 
     pub journal: Option<JournalSettingsContent>,
 
+    /// Translating the selected text with a keyboard shortcut.
+    pub translate: Option<TranslateSettingsContent>,
+
     /// A map of log scopes to the desired log level.
     /// Useful for filtering out noisy logs or enabling more verbose logging.
     ///
@@ -202,20 +215,24 @@ pub struct SettingsContent {
 
     pub project_panel: Option<ProjectPanelSettingsContent>,
 
+    pub devices_panel: Option<DevicesPanelSettingsContent>,
+
+    pub github_panel: Option<GithubPanelSettingsContent>,
+
     /// Configuration for Node-related features
     pub node: Option<NodeBinarySettings>,
 
     pub proxy: Option<String>,
 
-    /// The URL of the Zed server to connect to.
+    /// The URL of the server Zode fetches extensions from.
     pub server_url: Option<String>,
 
     /// Configuration for session-related features
     pub session: Option<SessionSettingsContent>,
-    /// Control what info is collected by Zed.
+    /// Control what info is collected by Zode.
     pub telemetry: Option<TelemetrySettingsContent>,
 
-    /// Configuration of the terminal in Zed.
+    /// Configuration of the terminal in Zode.
     pub terminal: Option<TerminalSettingsContent>,
 
     pub title_bar: Option<TitleBarSettingsContent>,
@@ -225,11 +242,11 @@ pub struct SettingsContent {
     /// Default: false
     pub vim_mode: Option<bool>,
 
-    // Settings related to calls in Zed
+    // Settings related to calls in Zode
     /// Settings for the which-key popup.
     pub which_key: Option<WhichKeySettingsContent>,
 
-    /// Settings related to Vim mode in Zed.
+    /// Settings related to Vim mode in Zode.
     pub vim: Option<VimSettingsContent>,
 
     /// Number of lines to search for modelines at the beginning and end of files.
@@ -339,7 +356,7 @@ pub enum ProfileBase {
     /// Apply profile settings on top of the user's current settings.
     #[default]
     User,
-    /// Apply profile settings on top of Zed's default settings, ignoring user customizations.
+    /// Apply profile settings on top of Zode's default settings, ignoring user customizations.
     Default,
 }
 
@@ -350,7 +367,7 @@ pub struct SettingsProfile {
     /// What base settings to start from before applying this profile's overrides.
     ///
     /// - `user`: Apply on top of user's settings (default)
-    /// - `default`: Apply on top of Zed's default settings, ignoring user customizations
+    /// - `default`: Apply on top of Zode's default settings, ignoring user customizations
     #[serde(default)]
     pub base: ProfileBase,
 
@@ -420,7 +437,7 @@ impl strum::VariantNames for BaseKeymapContent {
     ];
 }
 
-/// Configuration of audio in Zed.
+/// Configuration of audio in Zode.
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug)]
 pub struct AudioSettingsContent {
@@ -475,7 +492,7 @@ impl From<Option<String>> for AudioOutputDeviceName {
     }
 }
 
-/// Control what info is collected by Zed.
+/// Control what info is collected by Zode.
 #[with_fallible_options]
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Debug, MergeFrom)]
 pub struct TelemetrySettingsContent {
@@ -483,7 +500,7 @@ pub struct TelemetrySettingsContent {
     ///
     /// Default: true
     pub diagnostics: Option<bool>,
-    /// Send anonymized usage data like what languages you're using Zed with.
+    /// Send anonymized usage data like what languages you're using Zode with.
     ///
     /// Default: true
     pub metrics: Option<bool>,
@@ -505,7 +522,7 @@ pub struct DebuggerSettingsContent {
     ///
     /// Default: line
     pub stepping_granularity: Option<SteppingGranularity>,
-    /// Whether the breakpoints should be reused across Zed sessions.
+    /// Whether the breakpoints should be reused across Zode sessions.
     ///
     /// Default: true
     pub save_breakpoints: Option<bool>,
@@ -517,7 +534,7 @@ pub struct DebuggerSettingsContent {
     ///
     /// Default: 2000ms
     pub timeout: Option<u64>,
-    /// Whether to log messages between active debug adapters and Zed
+    /// Whether to log messages between active debug adapters and Zode
     ///
     /// Default: true
     pub log_dap_communications: Option<bool>,
@@ -740,7 +757,7 @@ pub struct FileFinderSettingsContent {
     /// Default: true
     pub skip_focus_for_active_in_search: Option<bool>,
     /// Whether to use gitignored files when searching.
-    /// Only the file Zed had indexed will be used, not necessary all the gitignored files.
+    /// Only the file Zode had indexed will be used, not necessary all the gitignored files.
     ///
     /// Default: Smart
     pub include_ignored: Option<IncludeIgnoredContent>,
@@ -764,7 +781,7 @@ pub struct FileFinderSettingsContent {
 pub enum IncludeIgnoredContent {
     /// Use all gitignored files
     All,
-    /// Use only the files Zed had indexed
+    /// Use only the files Zode had indexed
     Indexed,
     /// Be smart and search for ignored when called from a gitignored worktree
     #[default]
@@ -994,6 +1011,77 @@ pub enum HourFormat {
     Hour24,
 }
 
+/// Settings for translating the selected text.
+///
+/// API keys are not settings: they live in the system keychain.
+#[with_fallible_options]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq)]
+pub struct TranslateSettingsContent {
+    /// Which service translates the text.
+    ///
+    /// Default: deepl
+    pub provider: Option<TranslateProviderContent>,
+    /// The OpenAI-compatible chat completions service, used when `provider`
+    /// is `openai_compatible` (OpenAI, Ollama, LM Studio, ...).
+    pub openai_compatible: Option<OpenAiCompatibleTranslateSettingsContent>,
+    /// The longest selection, in characters, that is sent for translation.
+    /// A longer one is refused with a warning rather than cut.
+    ///
+    /// Default: 2000
+    pub max_characters: Option<usize>,
+    /// How long to wait for a translation before giving up, in seconds.
+    ///
+    /// Default: 20
+    pub timeout_seconds: Option<u64>,
+}
+
+#[with_fallible_options]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq)]
+pub struct OpenAiCompatibleTranslateSettingsContent {
+    /// The base URL of the API, up to and including the version segment.
+    /// `http` is only accepted for `localhost` and `127.0.0.1`.
+    ///
+    /// Default: "http://localhost:11434/v1"
+    pub base_url: Option<String>,
+    /// The model that translates.
+    ///
+    /// Default: ""
+    pub model: Option<String>,
+}
+
+#[derive(
+    Copy,
+    Clone,
+    Debug,
+    Default,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    PartialEq,
+    Eq,
+    Hash,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum TranslateProviderContent {
+    /// DeepL. Free keys (ending in `:fx`) use the free endpoint.
+    #[default]
+    #[strum(serialize = "DeepL")]
+    Deepl,
+    /// Google Cloud Translation (v2, API key).
+    #[strum(serialize = "Google Cloud Translation")]
+    Google,
+    /// Any service that speaks the OpenAI chat completions API.
+    #[strum(serialize = "OpenAI-compatible API")]
+    OpenaiCompatible,
+    /// Google Translate through its unofficial free web endpoint: no key, but
+    /// it may be rate limited or stop working at any time.
+    #[strum(serialize = "Google Translate (free, no key)")]
+    GoogleFree,
+}
+
 #[with_fallible_options]
 #[derive(Clone, Default, Serialize, Deserialize, JsonSchema, MergeFrom, Debug, PartialEq)]
 pub struct OutlinePanelSettingsContent {
@@ -1182,8 +1270,8 @@ pub struct SshConnection {
     pub projects: collections::BTreeSet<RemoteProject>,
     /// Name to use for this server in UI.
     pub nickname: Option<String>,
-    // By default Zed will download the binary to the host directly.
-    // If this is set to true, Zed will download the binary to your local machine,
+    // By default Zode will download the binary to the host directly.
+    // If this is set to true, Zode will download the binary to your local machine,
     // and then upload it over the SSH connection. Useful if your SSH server has
     // limited outbound internet access.
     pub upload_binary_over_ssh: Option<bool>,
@@ -1249,6 +1337,107 @@ pub struct ReplSettingsContent {
     pub output_max_height_lines: Option<usize>,
 }
 
+/// Reminders and the focus timer.
+///
+/// Every interval is in minutes and is clamped to 1..=480; a value outside that
+/// range is replaced by the default.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct RemindersContent {
+    /// Whether reminders run at all. Off stops every reminder and the focus
+    /// timer.
+    ///
+    /// Default: false
+    pub enabled: Option<bool>,
+    /// How a reminder is shown: a bubble under the tray icon, or an OS
+    /// notification. A bubble falls back to an OS notification whenever the
+    /// tray icon cannot be seen, such as behind a full-screen app.
+    ///
+    /// Default: bubble
+    pub style: Option<ReminderStyle>,
+    /// Reminders that come due after this many minutes without any input on
+    /// the computer wait until you are back, instead of firing at an empty
+    /// desk. Where the system cannot say how long it has been idle (Linux),
+    /// nothing is held.
+    ///
+    /// Default: 5
+    pub idle_pause_minutes: Option<u32>,
+    /// How long "Snooze" puts a reminder off.
+    ///
+    /// Default: 5
+    pub snooze_minutes: Option<u32>,
+    /// A reminder to drink water.
+    ///
+    /// Default: on, every 45 minutes
+    pub water: Option<ReminderContent>,
+    /// The 20-20-20 rule: every so often, look at something 20 feet (6 m) away
+    /// for 20 seconds.
+    ///
+    /// Default: on, every 20 minutes
+    pub eye_break: Option<ReminderContent>,
+    /// A reminder to stand up and move.
+    ///
+    /// Default: on, every 60 minutes
+    pub stand_up: Option<ReminderContent>,
+    /// The focus timer (Pomodoro): work, then a short break, and a long break
+    /// after a set number of rounds. It runs only when started.
+    pub focus: Option<FocusTimerContent>,
+}
+
+/// One periodic reminder.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct ReminderContent {
+    /// Whether this reminder runs.
+    pub enabled: Option<bool>,
+    /// Minutes between reminders.
+    pub interval_minutes: Option<u32>,
+}
+
+/// The focus timer's lengths, in minutes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct FocusTimerContent {
+    /// Length of a focus round.
+    ///
+    /// Default: 25
+    pub focus_minutes: Option<u32>,
+    /// Length of the break after each round.
+    ///
+    /// Default: 5
+    pub short_break_minutes: Option<u32>,
+    /// Length of the break after every `rounds_before_long_break` rounds.
+    ///
+    /// Default: 15
+    pub long_break_minutes: Option<u32>,
+    /// How many focus rounds come before a long break.
+    ///
+    /// Default: 4
+    pub rounds_before_long_break: Option<u32>,
+}
+
+/// How a reminder is shown.
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    Deserialize,
+    JsonSchema,
+    MergeFrom,
+    strum::VariantArray,
+    strum::VariantNames,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ReminderStyle {
+    /// A bubble under the tray icon, or an OS notification when the icon
+    /// cannot be seen.
+    #[default]
+    Bubble,
+    /// Always an OS notification.
+    System,
+}
+
 /// Settings for OS notifications when an agent finishes answering.
 ///
 /// One object rather than two flat keys: `quiet_period_ms` alone means
@@ -1305,6 +1494,29 @@ pub struct RemoteControlSettingsContent {
     ///
     /// Default: 30
     pub idle_timeout_minutes: Option<u64>,
+    /// Which agent events are pushed as notifications to the phones and
+    /// tablets paired for remote control, while remote control is on. A device
+    /// that already shows the agent concerned is not pushed to.
+    pub push_notifications: Option<RemoteControlPushContent>,
+}
+
+/// Which agent events reach paired devices as push notifications.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct RemoteControlPushContent {
+    /// An agent is waiting for your approval.
+    ///
+    /// Default: true
+    pub approval: Option<bool>,
+    /// An agent finished answering. For agents whose transcript Zode cannot
+    /// read this is a guess made after a minute of quiet, which a long-running
+    /// command can also cause.
+    ///
+    /// Default: true
+    pub answered: Option<bool>,
+    /// An agent's session ended.
+    ///
+    /// Default: true
+    pub ended: Option<bool>,
 }
 
 /// Settings for configuring the which-key popup behaviour.

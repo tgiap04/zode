@@ -33,7 +33,7 @@ use workspace::{
     Workspace,
     item::{Item, ItemEvent},
 };
-use zed_actions::ExtensionCategoryFilter;
+use zode_actions::ExtensionCategoryFilter;
 
 use crate::components::ExtensionCard;
 use crate::extension_version_selector::{
@@ -41,7 +41,7 @@ use crate::extension_version_selector::{
 };
 
 actions!(
-    zed,
+    zode,
     [
         /// Installs an extension from a local directory for development.
         InstallDevExtension
@@ -55,7 +55,7 @@ pub fn init(cx: &mut App) {
         };
         workspace
             .register_action(
-                move |workspace, action: &zed_actions::Extensions, window, cx| {
+                move |workspace, action: &zode_actions::Extensions, window, cx| {
                     let provides_filter = action.category_filter.map(|category| match category {
                         ExtensionCategoryFilter::Themes => ExtensionProvides::Themes,
                         ExtensionCategoryFilter::IconThemes => ExtensionProvides::IconThemes,
@@ -407,7 +407,7 @@ impl ExtensionsPage {
             workspace
                 .update(cx, |_workspace, cx| {
                     window.dispatch_action(
-                        zed_actions::theme_selector::Toggle {
+                        zode_actions::theme_selector::Toggle {
                             themes_filter: Some(themes),
                         }
                         .boxed_clone(),
@@ -1511,110 +1511,110 @@ impl ExtensionsPage {
             let banner = match feature {
                 Feature::AgentClaude => self.render_feature_upsell_banner(
                     "Claude Agent support is built-in to Zode!".into(),
-                    "https://zed.dev/docs/ai/external-agents#claude-agent".into(),
+                    "https://zodekit.com/docs/agent-sessions".into(),
                     false,
                     cx,
                 ),
                 Feature::AgentCodex => self.render_feature_upsell_banner(
                     "Codex CLI support is built-in to Zode!".into(),
-                    "https://zed.dev/docs/ai/external-agents#codex-cli".into(),
+                    "https://zodekit.com/docs/agent-sessions".into(),
                     false,
                     cx,
                 ),
                 Feature::AgentGemini => self.render_feature_upsell_banner(
                     "Gemini CLI support is built-in to Zode!".into(),
-                    "https://zed.dev/docs/ai/external-agents#gemini-cli".into(),
+                    "https://zodekit.com/docs/agent-sessions".into(),
                     false,
                     cx,
                 ),
                 Feature::ExtensionBasedpyright => self.render_feature_upsell_banner(
                     "Basedpyright (Python language server) support is built-in to Zode!".into(),
-                    "https://zed.dev/docs/languages/python#basedpyright".into(),
+                    "https://zodekit.com/docs/languages/python#basedpyright".into(),
                     false,
                     cx,
                 ),
                 Feature::ExtensionRuff => self.render_feature_upsell_banner(
                     "Ruff (linter for Python) support is built-in to Zode!".into(),
-                    "https://zed.dev/docs/languages/python#code-formatting--linting".into(),
+                    "https://zodekit.com/docs/languages/python#code-formatting--linting".into(),
                     false,
                     cx,
                 ),
                 Feature::ExtensionTailwind => self.render_feature_upsell_banner(
                     "Tailwind CSS support is built-in to Zode!".into(),
-                    "https://zed.dev/docs/languages/tailwindcss".into(),
+                    "https://zodekit.com/docs/languages/tailwindcss".into(),
                     false,
                     cx,
                 ),
                 Feature::ExtensionTy => self.render_feature_upsell_banner(
                     "Ty (Python language server) support is built-in to Zode!".into(),
-                    "https://zed.dev/docs/languages/python".into(),
+                    "https://zodekit.com/docs/languages/python".into(),
                     false,
                     cx,
                 ),
                 Feature::Git => self.render_feature_upsell_banner(
                     "Zode comes with basic Git support—more features are coming in the future."
                         .into(),
-                    "https://zed.dev/docs/git".into(),
+                    "https://zodekit.com/docs/git".into(),
                     false,
                     cx,
                 ),
                 Feature::LanguageBash => self.render_feature_upsell_banner(
                     "Shell support is built-in to Zode!".into(),
-                    "https://zed.dev/docs/languages/bash".into(),
+                    "https://zodekit.com/docs/languages/bash".into(),
                     false,
                     cx,
                 ),
                 Feature::LanguageC => self.render_feature_upsell_banner(
                     "C support is built-in to Zode!".into(),
-                    "https://zed.dev/docs/languages/c".into(),
+                    "https://zodekit.com/docs/languages/c".into(),
                     false,
                     cx,
                 ),
                 Feature::LanguageCpp => self.render_feature_upsell_banner(
                     "C++ support is built-in to Zode!".into(),
-                    "https://zed.dev/docs/languages/cpp".into(),
+                    "https://zodekit.com/docs/languages/cpp".into(),
                     false,
                     cx,
                 ),
                 Feature::LanguageGo => self.render_feature_upsell_banner(
                     "Go support is built-in to Zode!".into(),
-                    "https://zed.dev/docs/languages/go".into(),
+                    "https://zodekit.com/docs/languages/go".into(),
                     false,
                     cx,
                 ),
                 Feature::LanguagePython => self.render_feature_upsell_banner(
                     "Python support is built-in to Zode!".into(),
-                    "https://zed.dev/docs/languages/python".into(),
+                    "https://zodekit.com/docs/languages/python".into(),
                     false,
                     cx,
                 ),
                 Feature::LanguageReact => self.render_feature_upsell_banner(
                     "React support is built-in to Zode!".into(),
-                    "https://zed.dev/docs/languages/typescript".into(),
+                    "https://zodekit.com/docs/languages/typescript".into(),
                     false,
                     cx,
                 ),
                 Feature::LanguageRust => self.render_feature_upsell_banner(
                     "Rust support is built-in to Zode!".into(),
-                    "https://zed.dev/docs/languages/rust".into(),
+                    "https://zodekit.com/docs/languages/rust".into(),
                     false,
                     cx,
                 ),
                 Feature::LanguageTypescript => self.render_feature_upsell_banner(
                     "Typescript support is built-in to Zode!".into(),
-                    "https://zed.dev/docs/languages/typescript".into(),
+                    "https://zodekit.com/docs/languages/typescript".into(),
                     false,
                     cx,
                 ),
                 Feature::OpenIn => self.render_feature_upsell_banner(
                     "Zode supports linking to a source line on GitHub and others.".into(),
-                    "https://zed.dev/docs/git#git-integrations".into(),
+                    "https://zodekit.com/docs/git#git-integrations".into(),
                     false,
                     cx,
                 ),
                 Feature::Vim => self.render_feature_upsell_banner(
                     "Vim support is built-in to Zode!".into(),
-                    "https://zed.dev/docs/vim".into(),
+                    "https://zodekit.com/docs/vim".into(),
                     true,
                     cx,
                 ),

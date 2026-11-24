@@ -4,7 +4,7 @@ use crate::panel_queries::RunScope;
 use crate::query::QueryState;
 use gpui::{Context, DragMoveEvent, Window, uniform_list};
 use ui::{Tab, Tooltip, prelude::*};
-use zed_actions::database as actions;
+use zode_actions::database as actions;
 
 impl Render for DatabasePanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

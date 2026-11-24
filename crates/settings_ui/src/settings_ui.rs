@@ -44,7 +44,7 @@ use util::{ResultExt as _, paths::PathStyle, rel_path::RelPath};
 use workspace::{
     AppState, MultiWorkspace, OpenOptions, OpenVisible, Workspace, client_side_decorations,
 };
-use zed_actions::{OpenProjectSettings, OpenSettings, OpenSettingsAt};
+use zode_actions::{OpenProjectSettings, OpenSettings, OpenSettingsAt};
 
 use crate::components::{
     EnumVariantDropdown, NumberField, NumberFieldMode, NumberFieldType, SettingsInputField,
@@ -398,6 +398,11 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &OpenSettings, cx| {
         open_settings_editor(None, None, None, cx);
     });
+    // Reachable without a workspace window: the reminders panel dispatches it
+    // from the menu bar while no Zode window is active.
+    cx.on_action(|OpenSettingsAt { path }: &OpenSettingsAt, cx| {
+        open_settings_editor(Some(path), None, None, cx);
+    });
 
     cx.observe_new(|workspace: &mut workspace::Workspace, _, _| {
         workspace
@@ -466,6 +471,7 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::TextRenderingMode>(render_dropdown)
         .add_basic_renderer::<settings::FontFamilyName>(render_font_picker)
         .add_basic_renderer::<settings::BaseKeymapContent>(render_dropdown)
+        .add_basic_renderer::<settings::ReminderStyle>(render_dropdown)
         .add_basic_renderer::<settings::MultiCursorModifier>(render_dropdown)
         .add_basic_renderer::<settings::HideMouseMode>(render_dropdown)
         .add_basic_renderer::<settings::CurrentLineHighlight>(render_dropdown)
@@ -476,6 +482,7 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::SnippetSortOrder>(render_dropdown)
         .add_basic_renderer::<settings::ClosePosition>(render_dropdown)
         .add_basic_renderer::<settings::DockSide>(render_dropdown)
+        .add_basic_renderer::<settings::TranslateProviderContent>(render_dropdown)
         .add_basic_renderer::<settings::TerminalDockPosition>(render_dropdown)
         .add_basic_renderer::<settings::DockPosition>(render_dropdown)
         .add_basic_renderer::<settings::GitGutterSetting>(render_dropdown)
@@ -649,7 +656,7 @@ pub fn open_settings_editor(
         let scaled_bounds: gpui::Size<Pixels> = default_bounds.map(|axis| axis * scale_factor);
 
         let app_id = ReleaseChannel::global(cx).app_id();
-        let window_decorations = match std::env::var("ZED_WINDOW_DECORATIONS") {
+        let window_decorations = match std::env::var("ZODE_WINDOW_DECORATIONS") {
             Ok(val) if val == "server" => gpui::WindowDecorations::Server,
             Ok(val) if val == "client" => gpui::WindowDecorations::Client,
             _ => gpui::WindowDecorations::Client,
@@ -1104,16 +1111,16 @@ impl SettingsPageItem {
                                 .w_full()
                                 .max_w_1_2()
                                 .child(Label::new(action_link.title.clone()))
-                                .when_some(
-                                    action_link.description.as_ref(),
-                                    |this, description| {
-                                        this.child(
-                                            Label::new(description.clone())
-                                                .size(LabelSize::Small)
-                                                .color(Color::Muted),
-                                        )
-                                    },
-                                ),
+                                .when_some(action_link.description.as_ref(), |this, description| {
+                                    this.child(
+                                        Label::new(description.clone())
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                })
+                                .when_some(action_link.status, |this, status| {
+                                    this.child(Label::new(status(cx)).size(LabelSize::Small))
+                                }),
                         )
                         .child(
                             Button::new(
@@ -1234,7 +1241,7 @@ fn render_settings_item_link(
         .read_from_clipboard()
         .and_then(|entry| entry.text())
         .map_or(false, |maybe_url| {
-            json_path.is_some() && maybe_url.strip_prefix("zed://settings/") == json_path
+            json_path.is_some() && maybe_url.strip_prefix("zode://settings/") == json_path
         });
 
     let (link_icon, link_icon_color) = if clipboard_has_link {
@@ -1263,7 +1270,7 @@ fn render_settings_item_link(
                 .tooltip(Tooltip::text("Copy Link"))
                 .when_some(json_path, |this, path| {
                     this.on_click(cx.listener(move |_, _, _, cx| {
-                        let link = format!("zed://settings/{}", path);
+                        let link = format!("zode://settings/{}", path);
                         cx.write_to_clipboard(ClipboardItem::new_string(link));
                         cx.notify();
                     }))
@@ -1383,6 +1390,12 @@ impl PartialEq for SubPageLink {
 struct ActionLink {
     title: SharedString,
     description: Option<SharedString>,
+    /// Lets `OpenSettingsAt` and `#path` searches find a link that edits
+    /// something kept outside settings.json (see [`SettingField.json_path`]).
+    json_path: Option<&'static str>,
+    /// A line read on every frame, for state that lives outside settings
+    /// (an account's sign-in), so it stays current while the page is open.
+    status: Option<fn(&App) -> SharedString>,
     button_text: SharedString,
     on_click: Arc<dyn Fn(&mut SettingsWindow, &mut Window, &mut App) + Send + Sync>,
     files: FileMask,
@@ -1400,7 +1413,7 @@ fn all_language_names(cx: &App) -> Vec<SharedString> {
         .languages
         .language_names()
         .into_iter()
-        .filter(|name| name.as_ref() != "Zed Keybind Context")
+        .filter(|name| name.as_ref() != "Zode Keybind Context")
         .map(Into::into)
         .collect()
 }
@@ -1515,6 +1528,11 @@ impl SettingsWindow {
             cx.notify();
         })
         .detach();
+
+        // The GitHub section shows the GitHub tab's sign-in, which changes
+        // without any setting changing.
+        cx.observe_global_in::<github::GithubSignInStatus>(window, |_, _, cx| cx.notify())
+            .detach();
 
         use feature_flags::FeatureFlagAppExt as _;
         let mut last_is_staff = cx.is_staff();
@@ -2077,6 +2095,7 @@ impl SettingsWindow {
                         );
                     }
                     SettingsPageItem::ActionLink(action_link) => {
+                        json_path = action_link.json_path;
                         documents.push(SearchDocument {
                             id: key_index,
                             words: split_into_words(&[
@@ -4751,6 +4770,107 @@ pub mod test {
         "
     );
 
+    /// `OpenSettingsAt` from outside any window -- the reminders panel used from
+    /// the menu bar while another application is in front -- has no workspace
+    /// to reach, and used to be dropped without a word.
+    #[gpui::test]
+    async fn open_settings_at_works_with_no_window(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            register_settings(cx);
+            release_channel::init_test(
+                semver::Version::new(0, 0, 0),
+                release_channel::ReleaseChannel::Dev,
+                cx,
+            );
+            AppState::set_global(AppState::test(cx), cx);
+            crate::init(cx);
+        });
+        assert!(cx.windows().is_empty());
+
+        cx.update(|cx| {
+            cx.dispatch_action(&OpenSettingsAt {
+                path: "reminders.enabled".into(),
+            })
+        });
+        cx.run_until_parked();
+
+        let opened = cx.update(|cx| {
+            cx.windows()
+                .into_iter()
+                .any(|window| window.downcast::<SettingsWindow>().is_some())
+        });
+        assert!(opened, "no settings window opened");
+    }
+
+    /// The translation tooltip sends people here with `OpenSettingsAt { path: "translate" }`;
+    /// the key and shortcut links live outside settings.json, and must not be filtered away.
+    #[gpui::test]
+    async fn open_settings_at_translate_shows_the_whole_translate_page(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            register_settings(cx);
+            release_channel::init_test(
+                semver::Version::new(0, 0, 0),
+                release_channel::ReleaseChannel::Dev,
+                cx,
+            );
+            AppState::set_global(AppState::test(cx), cx);
+            crate::init(cx);
+        });
+
+        cx.update(|cx| {
+            cx.dispatch_action(&OpenSettingsAt {
+                path: "translate".into(),
+            })
+        });
+        cx.run_until_parked();
+
+        let settings_window = cx
+            .update(|cx| {
+                cx.windows()
+                    .into_iter()
+                    .find_map(|window| window.downcast::<SettingsWindow>())
+            })
+            .expect("a settings window opened");
+        let visible_titles = settings_window
+            .read_with(cx, |settings_window, _| {
+                let page_index = settings_window
+                    .pages
+                    .iter()
+                    .position(|page| page.title == "Translate")?;
+                let filter = settings_window.filter_table.get(page_index)?;
+                Some(
+                    settings_window.pages[page_index]
+                        .items
+                        .iter()
+                        .zip(filter)
+                        .filter(|(_, visible)| **visible)
+                        .filter_map(|(item, _)| match item {
+                            SettingsPageItem::SettingItem(item) => Some(item.title.to_string()),
+                            SettingsPageItem::DynamicItem(item) => {
+                                Some(item.discriminant.title.to_string())
+                            }
+                            SettingsPageItem::ActionLink(link) => Some(link.title.to_string()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .expect("settings window is alive")
+            .unwrap_or_default();
+        assert_eq!(
+            visible_titles,
+            vec![
+                "Provider",
+                "Max Characters",
+                "Timeout (seconds)",
+                "API Key",
+                "Shortcuts"
+            ]
+        );
+    }
+
     #[gpui::test]
     async fn test_settings_window_shows_worktrees_from_multiple_workspaces(
         cx: &mut gpui::TestAppContext,
@@ -5128,7 +5248,7 @@ mod project_settings_update_tests {
         let fs = FakeFs::new(cx.executor());
         let tree = if let Some(settings_content) = initial_settings {
             json!({
-                ".zed": {
+                ".zode": {
                     "settings.json": settings_content
                 },
                 "src": { "main.rs": "" }
@@ -5145,7 +5265,7 @@ mod project_settings_update_tests {
             (worktree.read(cx).id(), worktree.downgrade())
         });
 
-        let rel_path: Arc<RelPath> = RelPath::unix(".zed/settings.json")
+        let rel_path: Arc<RelPath> = RelPath::unix(".zode/settings.json")
             .expect("valid path")
             .into_arc();
         let project_path = ProjectPath {
@@ -5375,7 +5495,7 @@ mod project_settings_update_tests {
 
         let file_content = setup
             .fs
-            .load("/project/.zed/settings.json".as_ref())
+            .load("/project/.zode/settings.json".as_ref())
             .await
             .unwrap();
         assert_eq!(
@@ -5408,7 +5528,7 @@ mod project_settings_update_tests {
         setup
             .fs
             .save(
-                "/project/.zed/settings.json".as_ref(),
+                "/project/.zode/settings.json".as_ref(),
                 &r#"{ "tab_size": 99 }"#.into(),
                 Default::default(),
             )

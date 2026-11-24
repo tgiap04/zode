@@ -154,10 +154,10 @@ This creates a temporary file with the stdin content and opens it in Zode.
 
 ## URL Handling
 
-The CLI can open `zed://`, `http://`, and `https://` URLs:
+The CLI can open `zode://`, `http://`, and `https://` URLs:
 
 ```sh
-zode zed://settings
+zode zode://settings
 zode https://github.com/zed-industries/zed
 ```
 

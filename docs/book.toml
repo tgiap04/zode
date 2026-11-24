@@ -57,7 +57,7 @@ enable = false
 "/ai/temperature.html" = "/docs/ai/agent-settings.html#model-temperature"
 
 # Core
-"/configuring-zed.html" = "/docs/reference/all-settings.html"
+"/configuring-zed.html" = "/docs/configuring-zode.html"
 
 # Collaboration
 "/channels.html" = "/docs/collaboration/channels.html"

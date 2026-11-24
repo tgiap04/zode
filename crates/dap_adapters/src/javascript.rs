@@ -187,7 +187,7 @@ impl DebugAdapter for JsDebugAdapter {
         DebugAdapterName(Self::ADAPTER_NAME.into())
     }
 
-    async fn config_from_zed_format(&self, zed_scenario: ZedDebugConfig) -> Result<DebugScenario> {
+    async fn config_from_zed_format(&self, zed_scenario: ZodeDebugConfig) -> Result<DebugScenario> {
         let mut args = json!({
             "type": "pwa-node",
             "request": match zed_scenario.request {
@@ -314,7 +314,7 @@ impl DebugAdapter for JsDebugAdapter {
                                     "items": {
                                         "type": "string"
                                     },
-                                    "default": ["${ZED_WORKTREE_ROOT}/**/*.js", "!**/node_modules/**"]
+                                    "default": ["${ZODE_WORKTREE_ROOT}/**/*.js", "!**/node_modules/**"]
                                 },
                                 "sourceMaps": {
                                     "type": "boolean",
@@ -360,7 +360,7 @@ impl DebugAdapter for JsDebugAdapter {
                                 "webRoot": {
                                     "type": "string",
                                     "description": "Workspace absolute path to the webserver root",
-                                    "default": "${ZED_WORKTREE_ROOT}"
+                                    "default": "${ZODE_WORKTREE_ROOT}"
                                 },
                                 "userDataDir": {
                                     "type": ["string", "boolean"],
@@ -448,7 +448,7 @@ impl DebugAdapter for JsDebugAdapter {
                                     "items": {
                                         "type": "string"
                                     },
-                                    "default": ["${ZED_WORKTREE_ROOT}/**/*.js", "!**/node_modules/**"]
+                                    "default": ["${ZODE_WORKTREE_ROOT}/**/*.js", "!**/node_modules/**"]
                                 },
                                 "url": {
                                     "type": "string",
@@ -457,7 +457,7 @@ impl DebugAdapter for JsDebugAdapter {
                                 "webRoot": {
                                     "type": "string",
                                     "description": "Workspace absolute path to the webserver root",
-                                    "default": "${ZED_WORKTREE_ROOT}"
+                                    "default": "${ZODE_WORKTREE_ROOT}"
                                 },
                                 "skipFiles": {
                                     "type": "array",

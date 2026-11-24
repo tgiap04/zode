@@ -319,6 +319,10 @@ mod tests {
                 PlanLimitReason::TeamVaultNotInPlan,
             ),
             ("team_inactive", PlanLimitReason::TeamInactive),
+            (
+                "team_seat_unavailable",
+                PlanLimitReason::TeamSeatUnavailable,
+            ),
         ] {
             let body = serde_json::json!({
                 "error": slug,
@@ -406,7 +410,7 @@ mod tests {
 
         let read = futures::executor::block_on(fetch(
             &client,
-            "https://zodekit.site/api",
+            "https://zodekit.com/api",
             "token",
             &resource,
         ));
@@ -417,7 +421,7 @@ mod tests {
 
         let write = futures::executor::block_on(store(
             &client,
-            "https://zodekit.site/api",
+            "https://zodekit.com/api",
             "token",
             &resource,
             "blob",

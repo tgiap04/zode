@@ -1,5 +1,5 @@
 {
-  "$schema": "zed://schemas/settings",
+  "$schema": "zode://schemas/settings",
   // The name of the Zode theme to use for the UI.
   //
   // `mode` is one of:
@@ -34,8 +34,8 @@
   "buffer_font_family": "JetBrains Mono",
   // Set the buffer text's font fallbacks, this will be merged with
   // the platform's default fallbacks.
-  // ".ZedMono" aliases the bundled Lilex and covers glyphs JetBrains Mono lacks.
-  "buffer_font_fallbacks": [".ZedMono"],
+  // ".ZodeMono" aliases the bundled Lilex and covers glyphs JetBrains Mono lacks.
+  "buffer_font_fallbacks": [".ZodeMono"],
   // The OpenType features to enable for text in the editor.
   "buffer_font_features": {
     // Disable ligatures:
@@ -58,7 +58,7 @@
   "buffer_line_height": "comfortable",
   // The name of a font to use for rendering text in the UI
   // You can set this to ".SystemUIFont" to use the system font
-  // ".ZedSans" also resolves to whatever sans this build ships with,
+  // ".ZodeSans" also resolves to whatever sans this build ships with,
   // which is the same font named here
   "ui_font_family": "Inter",
   // Set the UI's font fallbacks, this will be merged with the platform's
@@ -164,6 +164,30 @@
     "enabled": true,
     "quiet_period_ms": 12000,
   },
+  // Reminders to drink water, rest your eyes (20-20-20) and stand up, and a
+  // focus timer (Pomodoro). Off by default. Every interval is in minutes,
+  // 1 to 480. `style` is "bubble" (under the tray icon, falling back to an OS
+  // notification when the icon cannot be seen) or "system" (always an OS
+  // notification). Reminders that come due after `idle_pause_minutes` without
+  // any input on the computer wait until you are back.
+  "reminders": {
+    "enabled": false,
+    "style": "bubble",
+    "idle_pause_minutes": 5,
+    "snooze_minutes": 5,
+    "water": { "enabled": true, "interval_minutes": 45 },
+    "eye_break": { "enabled": true, "interval_minutes": 20 },
+    "stand_up": { "enabled": true, "interval_minutes": 60 },
+    "focus": {
+      "focus_minutes": 25,
+      "short_break_minutes": 5,
+      "long_break_minutes": 15,
+      "rounds_before_long_break": 4,
+    },
+  },
+  // Whether to show the Zode icon in the system tray (the macOS menu bar).
+  // Clicking it opens the reminders panel.
+  "tray_icon": true,
   // Whether another of your devices, signed in to the same account, may watch
   // and type into the agents and terminals running here. Off means Zode opens
   // no connection for it and watches no terminal. Every device must be approved
@@ -173,9 +197,20 @@
   // long: typing in a terminal, browsing files, listing or resuming sessions,
   // and requests from a project opened from another Zode count as use, while
   // pings and that project's heartbeat do not. 0 turns the limit off.
+  // `push_notifications` chooses which agent events are pushed as notifications
+  // to paired phones and tablets that allowed them, while remote control is on:
+  // an agent waiting for `approval`, an agent that `answered` (for agents whose
+  // transcript Zode cannot read, a guess made after a minute of quiet), and a
+  // session that `ended`. A device already showing that agent is not pushed to.
+  // Push notifications need a plan that includes them.
   "remote_control": {
     "enabled": false,
     "idle_timeout_minutes": 30,
+    "push_notifications": {
+      "approval": true,
+      "answered": true,
+      "ended": true,
+    },
   },
   // Whether to show the combined CPU and RAM footprint of every tracked
   // project's child processes -- its language servers and its terminals --
@@ -833,6 +868,16 @@
   // Whether to resize all the panels in a dock when resizing the dock.
   // Can be a combination of "left", "right" and "bottom".
   "resize_all_panels_in_dock": ["left"],
+  "devices_panel": {
+    // Whether to show the Devices panel button in the right dock.
+    "button": true,
+    // Default width of the Devices panel.
+    "default_width": 320,
+  },
+  "github_panel": {
+    // Whether to show the GitHub button in the sidebar rail.
+    "button": true,
+  },
   "project_panel": {
     // Whether to show the project panel button in the status bar
     "button": true,
@@ -1507,7 +1552,7 @@
       "**/*.crt",
       "**/.dev.vars",
       "**/secrets.yml",
-      "**/.zed/settings.json", // zed project settings
+      "**/.zode/settings.json", // zed project settings
       "/**/zed/settings.json", // zed user settings
       "/**/zed/keymap.json",
     ],
@@ -1587,6 +1632,29 @@
     // 1. hour12
     // 2. hour24
     "hour_format": "hour12",
+  },
+  // Translating the selected text with a keyboard shortcut. API keys are kept
+  // in the system keychain, never in this file.
+  "translate": {
+    // Which service translates the text. May take 4 values:
+    // 1. "deepl": DeepL (free keys end in ":fx")
+    // 2. "google": Google Cloud Translation
+    // 3. "openai_compatible": any OpenAI-compatible chat completions API
+    // 4. "google_free": Google Translate through its unofficial free
+    //    endpoint. Needs no key, but may be rate limited or stop working,
+    //    and sends the selected text to Google.
+    "provider": "deepl",
+    "openai_compatible": {
+      // Base URL up to the version segment. "http" is only allowed for
+      // localhost and 127.0.0.1 (Ollama, LM Studio).
+      "base_url": "http://localhost:11434/v1",
+      // The model that translates, for example "gpt-4o-mini" or "qwen2.5".
+      "model": "",
+    },
+    // The longest selection, in characters, that is sent for translation.
+    "max_characters": 2000,
+    // How long to wait for a translation, in seconds.
+    "timeout_seconds": 20,
   },
   // Status bar-related settings.
   "status_bar": {
@@ -1788,7 +1856,7 @@
     // Set the terminal's font fallbacks. If this option is not included,
     // the terminal will default to matching the buffer's font fallbacks.
     // This will be merged with the platform's default font fallbacks
-    "font_fallbacks": [".ZedMono"],
+    "font_fallbacks": [".ZodeMono"],
     // The weight of the editor font in standard CSS units from 100 to 900.
     "font_weight": 400,
     // Sets the maximum number of lines in the terminal's scrollback buffer.
@@ -1893,9 +1961,9 @@
   //
   "file_types": {
     "JSONC": [
-      "**/.zed/*.json",
+      "**/.zode/*.json",
       "**/.vscode/**/*.json",
-      "**/{zed,Zed}/{settings,keymap,tasks,debug}.json",
+      "**/{zode,Zode}/{settings,keymap,tasks,debug}.json",
       "tsconfig*.json",
     ],
     "Markdown": [".rules", ".cursorrules", ".windsurfrules", ".clinerules"],
@@ -2315,7 +2383,7 @@
     //   }
     // ]
     //
-    // Default rules are viewable via the "zed: show default semantic token rules" action.
+    // Default rules are viewable via the "zode: show default semantic token rules" action.
     "semantic_token_rules": [],
   },
   // Jupyter settings
@@ -2371,7 +2439,7 @@
     "delay_ms": 1000,
   },
   // The server to connect to. If the environment variable
-  // ZED_SERVER_URL is set, it will override this setting.
+  // ZODE_SERVER_URL is set, it will override this setting.
   "server_url": "https://zed.dev",
   // Settings overrides to use when using Zode Preview.
   // Mostly useful for developers who are managing multiple instances of Zode.
@@ -2396,7 +2464,16 @@
   // Settings overrides to use when using Linux.
   "linux": {},
   // Settings overrides to use when using macOS.
-  "macos": {},
+  "macos": {
+    // Apple's own fonts, as in Finder and Terminal. They come with macOS and
+    // cannot ship with Zode, so other platforms keep Inter and JetBrains Mono,
+    // which stay installed here too.
+    "ui_font_family": "SF Pro",
+    "buffer_font_family": "SF Mono",
+    "terminal": {
+      "font_family": "SF Mono",
+    },
+  },
   // Settings overrides to use when using Windows.
   "windows": {
     "languages": {

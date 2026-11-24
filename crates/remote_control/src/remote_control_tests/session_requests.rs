@@ -400,9 +400,9 @@ async fn the_sessions_capability_is_advertised_only_when_it_is_switched_on(
     cx: &mut TestAppContext,
 ) {
     for (with_files, on, expected) in [
-        (false, false, vec!["terminal"]),
-        (false, true, vec!["terminal", "sessions"]),
-        (true, true, vec!["terminal", "files", "sessions"]),
+        (false, false, vec!["terminal", "push"]),
+        (false, true, vec!["terminal", "sessions", "push"]),
+        (true, true, vec!["terminal", "files", "sessions", "push"]),
     ] {
         let (_rig, browser, mut connected) = connected(cx, with_files, on).await;
         let controls = connected.controls(&browser);
