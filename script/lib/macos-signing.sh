@@ -72,12 +72,15 @@ macos_signing_setup_keychain() {
     security unlock-keychain -p "$password" "$keychain"
     # Without `-t` the keychain never locks itself again during the build.
     security set-keychain-settings "$keychain"
-    security import "$p12" -k "$keychain" -P "$password" -T /usr/bin/codesign
+    # `security` guesses the format from the file name's extension, and the
+    # release decodes the certificate into a temporary file without one.
+    security import "$p12" -k "$keychain" -f pkcs12 -P "$password" -T /usr/bin/codesign
 
     intermediate=$(mktemp)
     if curl -fsSL --retry 3 -o "$intermediate" "$macos_signing_intermediate_url" \
         && [[ "$(shasum -a 256 "$intermediate" | cut -d ' ' -f 1)" == "$macos_signing_intermediate_sha256" ]]; then
-        security import "$intermediate" -k "$keychain" > /dev/null || echo "warning: could not import Apple's Developer ID G2 intermediate"
+        # Runners usually have it already, which `security` reports as an error.
+        security import "$intermediate" -k "$keychain" > /dev/null 2>&1 || true
     else
         echo "warning: could not fetch Apple's Developer ID G2 intermediate; relying on the system's copy"
     fi
