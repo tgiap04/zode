@@ -9,6 +9,7 @@ mod frame;
 mod messages;
 mod noise_session;
 mod pairing;
+mod qr_pairing;
 
 #[cfg(test)]
 mod remote_relay_protocol_tests;
@@ -33,6 +34,10 @@ pub use pairing::{
     COMMITMENT_LEN, MAX_FAILED_PAIRING_ATTEMPTS, NONCE_LEN, PAIRING_EXPIRY, PairingAcceptor,
     PairingError, PairingGate, PairingOutcome, PairingRequester, commitment, random_nonce,
     short_authentication_string,
+};
+pub use qr_pairing::{
+    QR_PROOF_LEN, QR_SECRET_LEN, QR_SESSION_TTL, QrSecret, host_key_fingerprint, qr_confirm_code,
+    qr_pairing_uri, qr_proof, verify_qr_proof,
 };
 
 /// Version of the relay framing and of the encrypted channel.

@@ -39,6 +39,8 @@ use crate::{
     remote_host::TrustedDevices, session_router::UNSUPPORTED,
 };
 
+mod qr_pairing_tests;
+
 const USER_ID: &str = "user-1";
 const HOST_DEVICE: &str = "host-device";
 
@@ -60,6 +62,10 @@ struct Rig {
     push_answer: Arc<Mutex<(u16, &'static str)>>,
     /// While set, a push waits for it before it is answered.
     push_hold: Arc<Mutex<Option<futures::future::Shared<futures::channel::oneshot::Receiver<()>>>>>,
+    /// While set, the list of the account's devices (where a pairing device's
+    /// name comes from) waits for it before it is answered.
+    device_list_hold:
+        Arc<Mutex<Option<futures::future::Shared<futures::channel::oneshot::Receiver<()>>>>>,
     /// The tier the account service says the plan is.
     plan_tier: Arc<Mutex<&'static str>>,
     /// The `pushNotifications` limit the account service sends; `None` leaves
@@ -72,6 +78,14 @@ impl Rig {
     fn hold_pushes(&self) -> futures::channel::oneshot::Sender<()> {
         let (release, held) = futures::channel::oneshot::channel();
         *self.push_hold.lock() = Some(futures::FutureExt::shared(held));
+        release
+    }
+
+    /// Holds every look-up of the account's devices from now on until the
+    /// sender is used or dropped.
+    fn hold_device_list(&self) -> futures::channel::oneshot::Sender<()> {
+        let (release, held) = futures::channel::oneshot::channel();
+        *self.device_list_hold.lock() = Some(futures::FutureExt::shared(held));
         release
     }
 }
@@ -197,6 +211,9 @@ async fn build_rig(
     let push_hold: Arc<
         Mutex<Option<futures::future::Shared<futures::channel::oneshot::Receiver<()>>>>,
     > = Arc::new(Mutex::new(None));
+    let device_list_hold: Arc<
+        Mutex<Option<futures::future::Shared<futures::channel::oneshot::Receiver<()>>>>,
+    > = Arc::new(Mutex::new(None));
     let plan_tier = Arc::new(Mutex::new("free"));
     let plan_pushes = Arc::new(Mutex::new(None));
     let http_client: Arc<dyn HttpClient> = FakeHttpClient::create({
@@ -205,6 +222,7 @@ async fn build_rig(
         let pushes = pushes.clone();
         let push_answer = push_answer.clone();
         let push_hold = push_hold.clone();
+        let device_list_hold = device_list_hold.clone();
         let plan_tier = plan_tier.clone();
         let plan_pushes = plan_pushes.clone();
         move |request| {
@@ -213,6 +231,7 @@ async fn build_rig(
             let pushes = pushes.clone();
             let push_answer = push_answer.clone();
             let push_hold = push_hold.clone();
+            let device_list_hold = device_list_hold.clone();
             let plan_tier = plan_tier.clone();
             let plan_pushes = plan_pushes.clone();
             async move {
@@ -256,6 +275,10 @@ async fn build_rig(
                         .status(200)
                         .body(AsyncBody::from("{}"))
                         .expect("a response"));
+                }
+                let hold = device_list_hold.lock().clone();
+                if let Some(hold) = hold {
+                    hold.await.ok();
                 }
                 Ok(Response::builder()
                     .status(200)
@@ -333,6 +356,7 @@ async fn build_rig(
         pushes,
         push_answer,
         push_hold,
+        device_list_hold,
         plan_tier,
         plan_pushes,
     }
@@ -1315,7 +1339,10 @@ async fn a_mismatched_commitment_ends_pairing_and_three_of_them_lock_it(cx: &mut
         browser.client.send_text(
             &encode_pairing(
                 session_id,
-                &PairingMessage::PairReveal { nonce: [0xee; 32] },
+                &PairingMessage::PairReveal {
+                    nonce: [0xee; 32],
+                    qr_proof: None,
+                },
             )
             .expect("encodes"),
         );
@@ -1741,7 +1768,14 @@ async fn a_reveal_from_a_stranger_does_not_end_the_question_on_screen(cx: &mut T
 
     let foreign = stranger.client.open(HOST_DEVICE, OpenMode::Pair);
     stranger.client.send_text(
-        &encode_pairing(foreign, &PairingMessage::PairReveal { nonce: [7; 32] }).expect("encodes"),
+        &encode_pairing(
+            foreign,
+            &PairingMessage::PairReveal {
+                nonce: [7; 32],
+                qr_proof: None,
+            },
+        )
+        .expect("encodes"),
     );
     cx.run_until_parked();
 
@@ -1865,7 +1899,10 @@ async fn a_lockout_survives_the_connection_dropping_and_coming_back(cx: &mut Tes
         browser.client.send_text(
             &encode_pairing(
                 session_id,
-                &PairingMessage::PairReveal { nonce: [0xee; 32] },
+                &PairingMessage::PairReveal {
+                    nonce: [0xee; 32],
+                    qr_proof: None,
+                },
             )
             .expect("encodes"),
         );
@@ -1895,7 +1932,10 @@ async fn a_lockout_survives_turning_remote_control_off_and_on(cx: &mut TestAppCo
         browser.client.send_text(
             &encode_pairing(
                 session_id,
-                &PairingMessage::PairReveal { nonce: [0xee; 32] },
+                &PairingMessage::PairReveal {
+                    nonce: [0xee; 32],
+                    qr_proof: None,
+                },
             )
             .expect("encodes"),
         );
@@ -2005,7 +2045,7 @@ mod with_a_window {
     use remote_relay_client::{OpenMode, encode_pairing};
     use workspace::Workspace;
 
-    async fn window<'a>(
+    pub(super) async fn window<'a>(
         cx: &'a mut TestAppContext,
         rig: &Rig,
     ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
@@ -2140,7 +2180,7 @@ mod with_a_window {
 
     /// Clicks the element a test probe names, as a person would, and lets
     /// everything the click set going settle.
-    fn click(selector: &'static str, cx: &mut VisualTestContext) {
+    pub(super) fn click(selector: &'static str, cx: &mut VisualTestContext) {
         let bounds = cx
             .debug_bounds(selector)
             .unwrap_or_else(|| panic!("`{selector}` must be drawn"));

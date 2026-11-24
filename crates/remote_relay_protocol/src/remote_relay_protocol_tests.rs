@@ -692,6 +692,70 @@ fn pairing_messages_round_trip_and_check_lengths() {
     assert!(serde_json::from_str::<PairingMessage>(r#"{"t":"pair_reveal","nonce":"!!"}"#).is_err());
 }
 
+#[test]
+fn a_reveal_carries_an_optional_qr_proof_as_base64() {
+    let with_proof = PairingMessage::PairReveal {
+        nonce: [7; NONCE_LEN],
+        qr_proof: Some([9; QR_PROOF_LEN]),
+    };
+    let text = serde_json::to_string(&with_proof).expect("serialises");
+    assert_eq!(
+        text,
+        r#"{"t":"pair_reveal","nonce":"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=","qr_proof":"CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk="}"#
+    );
+    assert_eq!(
+        serde_json::from_str::<PairingMessage>(&text).expect("parses"),
+        with_proof
+    );
+
+    let without = PairingMessage::PairReveal {
+        nonce: [7; NONCE_LEN],
+        qr_proof: None,
+    };
+    let text = serde_json::to_string(&without).expect("serialises");
+    assert!(
+        !text.contains("qr_proof"),
+        "an old reveal must stay byte-for-byte what it was: {text}"
+    );
+}
+
+#[test]
+fn a_reveal_from_before_the_qr_proof_still_decodes_and_extra_fields_are_ignored() {
+    let old = r#"{"t":"pair_reveal","nonce":"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="}"#;
+    assert_eq!(
+        serde_json::from_str::<PairingMessage>(old).expect("an old reveal parses"),
+        PairingMessage::PairReveal {
+            nonce: [7; NONCE_LEN],
+            qr_proof: None,
+        }
+    );
+    let null = r#"{"t":"pair_reveal","nonce":"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=","qr_proof":null}"#;
+    assert!(matches!(
+        serde_json::from_str::<PairingMessage>(null),
+        Ok(PairingMessage::PairReveal { qr_proof: None, .. })
+    ));
+    let newer = r#"{"t":"pair_reveal","nonce":"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=","from_the_future":1}"#;
+    assert!(serde_json::from_str::<PairingMessage>(newer).is_ok());
+}
+
+#[test]
+fn a_qr_proof_of_the_wrong_length_or_encoding_is_refused() {
+    for bad in ["AAAA", "!!", "\"\""] {
+        let text = format!(
+            r#"{{"t":"pair_reveal","nonce":"BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=","qr_proof":{}}}"#,
+            if bad == "\"\"" {
+                "1".to_string()
+            } else {
+                format!("\"{bad}\"")
+            }
+        );
+        assert!(
+            serde_json::from_str::<PairingMessage>(&text).is_err(),
+            "{text}"
+        );
+    }
+}
+
 // ---- pairing ----
 
 fn pair(
@@ -720,7 +784,7 @@ fn pair(
     let (reveal, requester_outcome) = requester
         .receive_accept(public_key, nonce)
         .expect("reveals");
-    let PairingMessage::PairReveal { nonce } = reveal else {
+    let PairingMessage::PairReveal { nonce, .. } = reveal else {
         panic!("not a reveal");
     };
     (
@@ -1251,6 +1315,307 @@ fn rejected_digits_count_and_confirmed_digits_clear_the_count() {
     assert!(!gate.is_locked_out());
     gate.reject_digits();
     assert!(gate.is_locked_out());
+}
+
+/// What the phone sends after reading the QR code, for the exchange `begin`
+/// opens: keys `[1; 32]` and `[2; 32]`, nonces `[0xB0; 32]` and `[0xA0; 32]`,
+/// and the phone's device id.
+const PHONE_DEVICE: &str = "phone-device";
+
+fn qr_proof_for_begun_exchange(secret: &QrSecret) -> [u8; QR_PROOF_LEN] {
+    qr_proof(
+        secret,
+        &[1; KEY_LEN],
+        &[2; KEY_LEN],
+        &[0xB0; NONCE_LEN],
+        &[0xA0; NONCE_LEN],
+        PHONE_DEVICE,
+    )
+    .expect("a device id that fits")
+}
+
+fn qr_secret() -> QrSecret {
+    QrSecret::from_bytes([0x5E; QR_SECRET_LEN])
+}
+
+#[test]
+fn a_valid_qr_proof_confirms_the_exchange_without_digits_and_frees_the_gate() {
+    let start = Instant::now();
+    let mut gate = PairingGate::new();
+    gate.reject_digits();
+    begin(&mut gate, start).expect("begins");
+    let outcome = gate
+        .reveal_with_qr_proof(
+            [0xB0; NONCE_LEN],
+            PHONE_DEVICE,
+            &qr_proof_for_begun_exchange(&qr_secret()),
+            Some(&qr_secret()),
+            &[],
+            start,
+        )
+        .expect("a proof made from the code on screen");
+    assert_eq!(outcome.peer_public_key, [1; KEY_LEN]);
+    begin(&mut gate, start).expect("nobody is comparing digits, so the gate is free");
+    for _ in 0..MAX_FAILED_PAIRING_ATTEMPTS - 1 {
+        gate.reject_digits();
+    }
+    assert!(
+        !gate.is_locked_out(),
+        "a confirmed pairing forgives the failure before it"
+    );
+}
+
+#[test]
+fn a_wrong_qr_proof_counts_like_mismatched_digits_and_three_lock_pairing() {
+    let start = Instant::now();
+    let mut gate = PairingGate::new();
+    let mut wrong = qr_proof_for_begun_exchange(&qr_secret());
+    wrong[0] ^= 1;
+    for _ in 0..MAX_FAILED_PAIRING_ATTEMPTS {
+        begin(&mut gate, start).expect("begins");
+        assert_eq!(
+            gate.reveal_with_qr_proof(
+                [0xB0; NONCE_LEN],
+                PHONE_DEVICE,
+                &wrong,
+                Some(&qr_secret()),
+                &[],
+                start
+            ),
+            Err(PairingError::QrProofRejected)
+        );
+    }
+    assert!(gate.is_locked_out());
+    assert_eq!(begin(&mut gate, start), Err(PairingError::LockedOut));
+}
+
+#[test]
+fn a_qr_proof_with_no_code_on_screen_is_refused_but_is_not_a_guess() {
+    let start = Instant::now();
+    let mut gate = PairingGate::new();
+    // An expired code, a spent one, a closed modal, a re-opened link: none of
+    // them is somebody guessing, so however often they happen, pairing stays
+    // open.
+    for _ in 0..MAX_FAILED_PAIRING_ATTEMPTS + 1 {
+        begin(&mut gate, start).expect("begins");
+        assert_eq!(
+            gate.reveal_with_qr_proof(
+                [0xB0; NONCE_LEN],
+                PHONE_DEVICE,
+                &qr_proof_for_begun_exchange(&qr_secret()),
+                None,
+                &[],
+                start
+            ),
+            Err(PairingError::NoQrCode),
+            "no code is being shown"
+        );
+    }
+    assert!(!gate.is_locked_out(), "it was not counted");
+    begin(&mut gate, start).expect("the exchange did not stay open either");
+}
+
+fn retired_secret() -> QrSecret {
+    QrSecret::from_bytes([0x44; QR_SECRET_LEN])
+}
+
+#[test]
+fn a_qr_proof_made_from_a_retired_code_is_refused_and_is_not_a_guess() {
+    let start = Instant::now();
+    let mut gate = PairingGate::new();
+    let retired = retired_secret();
+    // A new code is on screen, and the phone read the one before it: a slow
+    // tap, an old photo. However often, that is not somebody guessing.
+    for _ in 0..MAX_FAILED_PAIRING_ATTEMPTS + 1 {
+        begin(&mut gate, start).expect("begins");
+        assert_eq!(
+            gate.reveal_with_qr_proof(
+                [0xB0; NONCE_LEN],
+                PHONE_DEVICE,
+                &qr_proof_for_begun_exchange(&retired),
+                Some(&qr_secret()),
+                &[&retired],
+                start
+            ),
+            Err(PairingError::StaleQrCode)
+        );
+    }
+    assert!(!gate.is_locked_out(), "it was not counted");
+}
+
+#[test]
+fn a_retired_code_is_never_accepted_even_with_no_code_on_screen() {
+    let start = Instant::now();
+    let mut gate = PairingGate::new();
+    let retired = retired_secret();
+    begin(&mut gate, start).expect("begins");
+    assert_eq!(
+        gate.reveal_with_qr_proof(
+            [0xB0; NONCE_LEN],
+            PHONE_DEVICE,
+            &qr_proof_for_begun_exchange(&retired),
+            None,
+            &[&retired],
+            start
+        ),
+        Err(PairingError::StaleQrCode)
+    );
+}
+
+#[test]
+fn a_proof_that_matches_no_code_while_one_is_live_still_counts_beside_retired_ones() {
+    let start = Instant::now();
+    let mut gate = PairingGate::new();
+    let retired = retired_secret();
+    let stranger = QrSecret::from_bytes([0x99; QR_SECRET_LEN]);
+    for _ in 0..MAX_FAILED_PAIRING_ATTEMPTS {
+        begin(&mut gate, start).expect("begins");
+        assert_eq!(
+            gate.reveal_with_qr_proof(
+                [0xB0; NONCE_LEN],
+                PHONE_DEVICE,
+                &qr_proof_for_begun_exchange(&stranger),
+                Some(&qr_secret()),
+                &[&retired],
+                start
+            ),
+            Err(PairingError::QrProofRejected)
+        );
+    }
+    assert!(gate.is_locked_out());
+}
+
+#[test]
+fn the_live_code_wins_over_a_retired_one_that_is_the_same_secret() {
+    let start = Instant::now();
+    let mut gate = PairingGate::new();
+    begin(&mut gate, start).expect("begins");
+    let live = qr_secret();
+    assert!(
+        gate.reveal_with_qr_proof(
+            [0xB0; NONCE_LEN],
+            PHONE_DEVICE,
+            &qr_proof_for_begun_exchange(&live),
+            Some(&live),
+            &[&live],
+            start
+        )
+        .is_ok(),
+        "the live code is judged first"
+    );
+}
+
+#[test]
+fn a_qr_proof_for_another_device_id_is_a_wrong_proof() {
+    let start = Instant::now();
+    let mut gate = PairingGate::new();
+    begin(&mut gate, start).expect("begins");
+    // A relay that reports the phone's exchange under another device's name.
+    assert_eq!(
+        gate.reveal_with_qr_proof(
+            [0xB0; NONCE_LEN],
+            "somebody-elses-device",
+            &qr_proof_for_begun_exchange(&qr_secret()),
+            Some(&qr_secret()),
+            &[],
+            start
+        ),
+        Err(PairingError::QrProofRejected)
+    );
+    for _ in 0..MAX_FAILED_PAIRING_ATTEMPTS - 1 {
+        gate.reject_digits();
+    }
+    assert!(gate.is_locked_out(), "it was counted");
+}
+
+#[test]
+fn a_qr_proof_is_judged_only_after_the_commitment_and_the_deadline() {
+    let start = Instant::now();
+    let mut gate = PairingGate::new();
+    let proof = qr_proof_for_begun_exchange(&qr_secret());
+    begin(&mut gate, start).expect("begins");
+    assert_eq!(
+        gate.reveal_with_qr_proof(
+            [0xB1; NONCE_LEN],
+            PHONE_DEVICE,
+            &proof,
+            Some(&qr_secret()),
+            &[],
+            start
+        ),
+        Err(PairingError::CommitmentMismatch)
+    );
+    begin(&mut gate, start).expect("begins");
+    assert_eq!(
+        gate.reveal_with_qr_proof(
+            [0xB0; NONCE_LEN],
+            PHONE_DEVICE,
+            &proof,
+            Some(&qr_secret()),
+            &[],
+            start + PAIRING_EXPIRY
+        ),
+        Err(PairingError::Expired)
+    );
+    assert_eq!(
+        gate.reveal_with_qr_proof(
+            [0xB0; NONCE_LEN],
+            PHONE_DEVICE,
+            &proof,
+            Some(&qr_secret()),
+            &[],
+            start
+        ),
+        Err(PairingError::NoPendingExchange)
+    );
+}
+
+#[test]
+fn a_qr_proof_from_another_exchange_does_not_carry_over() {
+    let start = Instant::now();
+    let mut gate = PairingGate::new();
+    // The same secret, but made for a host that answered with another nonce.
+    let other_exchange = qr_proof(
+        &qr_secret(),
+        &[1; KEY_LEN],
+        &[2; KEY_LEN],
+        &[0xB0; NONCE_LEN],
+        &[0xA1; NONCE_LEN],
+        PHONE_DEVICE,
+    )
+    .expect("a device id that fits");
+    begin(&mut gate, start).expect("begins");
+    assert_eq!(
+        gate.reveal_with_qr_proof(
+            [0xB0; NONCE_LEN],
+            PHONE_DEVICE,
+            &other_exchange,
+            Some(&qr_secret()),
+            &[],
+            start
+        ),
+        Err(PairingError::QrProofRejected)
+    );
+}
+
+#[test]
+fn a_locked_gate_refuses_a_qr_reveal_too() {
+    let start = Instant::now();
+    let mut gate = PairingGate::new();
+    for _ in 0..MAX_FAILED_PAIRING_ATTEMPTS {
+        gate.reject_digits();
+    }
+    assert_eq!(
+        gate.reveal_with_qr_proof(
+            [0xB0; NONCE_LEN],
+            PHONE_DEVICE,
+            &qr_proof_for_begun_exchange(&qr_secret()),
+            Some(&qr_secret()),
+            &[],
+            start
+        ),
+        Err(PairingError::LockedOut)
+    );
 }
 
 #[test]

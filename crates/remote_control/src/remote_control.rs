@@ -22,6 +22,7 @@ mod indicator;
 mod pairing_flow;
 mod pairing_modal;
 mod push_notifications;
+mod qr_pairing_modal;
 mod remote_control_settings;
 mod remote_host;
 mod session_history;
@@ -50,7 +51,7 @@ pub use host_environment::HostEnvironment;
 pub use indicator::RemoteControlIndicator;
 pub use pairing_flow::PendingDecision;
 pub use remote_control_settings::RemoteControlSettings;
-pub use remote_host::{HostState, RemoteHost, RemoteHostEvent, SessionInfo};
+pub use remote_host::{HostState, QrPairing, RemoteHost, RemoteHostEvent, SessionInfo};
 pub use terminal_mirror::{TerminalMirror, TerminalMirrorEvent};
 
 actions!(
@@ -71,6 +72,9 @@ actions!(
         /// Opens the question a device is waiting on: the six digits to
         /// compare before it may control this Zode.
         ReviewPairingRequest,
+        /// Shows a QR code that the Zode app on your phone scans to pair and
+        /// connect in one step, turning remote control on if it is off.
+        PairPhoneWithQr,
     ]
 );
 
@@ -264,6 +268,11 @@ fn register_workspace(
     workspace.register_action(|workspace, _: &ReviewPairingRequest, window, cx| {
         if let Some(host) = RemoteHost::global(cx) {
             indicator::open_pairing_question(host, workspace, window, cx);
+        }
+    });
+    workspace.register_action(|workspace, _: &PairPhoneWithQr, window, cx| {
+        if let Some(host) = RemoteHost::global(cx) {
+            qr_pairing_modal::open(host, workspace, window, cx);
         }
     });
     workspace.register_action(|workspace, _: &ManageDevices, window, cx| {

@@ -6,7 +6,7 @@
 //! [`Hosting`] and turning it off drops it, which is the whole of switching
 //! off -- there is no second place to forget to clean up.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use agent_notify::{AgentAttention, AgentNotifier};
 use futures::{FutureExt as _, future::LocalBoxFuture};
@@ -64,6 +64,9 @@ pub enum RemoteHostEvent {
     Changed,
     /// A device has just taken control. Raised once per session.
     SessionStarted { device_name: String },
+    /// A device was trusted without a question because it read the QR code on
+    /// this screen. Raised once per pairing, after the device is saved.
+    DevicePaired { device_name: String },
     /// Remote control stopped or could not do something, and the person at
     /// this screen should hear about it. `retry` says trying again may help.
     Problem { message: String, retry: bool },
@@ -101,6 +104,29 @@ pub(crate) fn problem_message(state: &HostState) -> Option<String> {
         | HostState::Failed(_) => return None,
     };
     Some(message.to_string())
+}
+
+/// The QR code to show: its text and how long it stays good.
+#[derive(Clone, PartialEq, Eq)]
+pub struct QrPairing {
+    /// Carries the secret that proves a phone saw this screen: drawn, never
+    /// logged.
+    pub uri: String,
+    /// Four characters the phone shows for a link opened without scanning, to
+    /// compare with these.
+    pub confirm_code: String,
+    pub remaining: Duration,
+}
+
+impl std::fmt::Debug for QrPairing {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("QrPairing")
+            .field("uri", &"<redacted>")
+            .field("confirm_code", &"<redacted>")
+            .field("remaining", &self.remaining)
+            .finish()
+    }
 }
 
 /// What the list of trusted devices has to say right now.
@@ -586,6 +612,32 @@ impl RemoteHost {
             self.serving = None;
             self.sync(cx);
         }
+    }
+
+    /// The QR code a phone can scan to pair, while one is being shown.
+    pub fn qr_pairing(&self, cx: &App) -> Option<QrPairing> {
+        self.running.as_ref()?.qr_pairing(cx)
+    }
+
+    /// Makes sure a QR code is being shown that has not run out, making a new
+    /// one when there is none, the last one ran out, or a phone used it. Does
+    /// nothing while the host is not running: there is no key to point the
+    /// code at.
+    pub fn show_qr_pairing(&mut self, cx: &mut Context<Self>) {
+        let Some(running) = self.running.as_mut() else {
+            return;
+        };
+        if running.qr_pairing(cx).is_none() && running.begin_qr_pairing(cx) {
+            self.refresh(cx);
+        }
+    }
+
+    /// The QR code is no longer on screen, so a proof made from it is refused.
+    pub fn stop_qr_pairing(&mut self, cx: &mut Context<Self>) {
+        if let Some(running) = self.running.as_mut() {
+            running.cancel_qr_pairing(cx);
+        }
+        self.refresh(cx);
     }
 
     /// The only way out of a pairing lockout.

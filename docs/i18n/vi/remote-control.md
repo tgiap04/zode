@@ -202,10 +202,19 @@ biểu tượng màn hình nhỏ: xám khi sẵn sàng, vàng khi đang kết n�
   workspace khác, rồi biến mất sau năm giây. Mở một phiên đang
   chạy thì không có toast.
 - Bấm chỉ báo để **Disconnect All Devices**, **Turn Off Remote
-  Control**, hoặc **Manage Trusted Devices…**.
+  Control**, **Pair a Phone with QR Code…**, hoặc **Manage Trusted Devices…**.
 - Các việc đó cũng có dưới dạng action trong bảng lệnh (command palette)
   `remote_control::DisconnectAll`, `remote_control::Disable` và
-  `remote_control::ManageDevices`. Menu tài khoản có **Manage Trusted
+  `remote_control::ManageDevices`. `remote_control::PairPhoneWithQr` (**Pair a
+  Phone with QR Code…**, menu tài khoản cũng có) bật điều khiển từ xa nếu nó đang
+  tắt và hiện một mã QR để app Zode trên điện thoại quét, ghép cặp và kết nối
+  mà không cần so chữ số; mã có hiệu lực hai phút, chỉ dùng được một lần, và mất
+  khi bạn đóng cửa sổ. Dưới mã, cửa sổ hiện bốn ký tự mà điện thoại mở liên
+  kết mà không quét sẽ nhờ bạn so. Điện thoại đã được tin với một khoá khác chỉ
+  bị hỏi có hoặc không về việc thay khoá, không có chữ số, và trả lời
+  không thì
+  không bị tính là lỗi. Khi ghép cặp đang bị khoá, cửa sổ hiện nút
+  **Unlock Pairing** thay cho mã. Menu tài khoản có **Manage Trusted
   Devices…** bất cứ lúc nào, kể cả khi điều khiển từ xa đang tắt, để bạn quên một
   thiết bị trước khi bật lại.
 - Khi có thiết bị kết nối, Zode giữ màn hình luôn sáng, theo cùng điều kiện như

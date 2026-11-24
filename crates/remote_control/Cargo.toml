@@ -28,6 +28,7 @@ menu.workspace = true
 parking_lot.workspace = true
 paths.workspace = true
 project.workspace = true
+qrcode.workspace = true
 release_channel.workspace = true
 remote_relay_client.workspace = true
 remote_relay_protocol.workspace = true
@@ -43,6 +44,7 @@ util.workspace = true
 workspace.workspace = true
 worktree.workspace = true
 zode_account.workspace = true
+zode_actions.workspace = true
 
 [dev-dependencies]
 base64.workspace = true

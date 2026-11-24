@@ -144,48 +144,21 @@ if [[ "${signing}" == "sign" ]]; then
     can_code_sign=true
 
     echo "Setting up keychain for code signing..."
-    security create-keychain -p "$MACOS_CERTIFICATE_PASSWORD" zode.keychain || echo ""
-    security default-keychain -s zode.keychain
-    security unlock-keychain -p "$MACOS_CERTIFICATE_PASSWORD" zode.keychain
-    # Calling set-keychain-settings without `-t` disables the auto-lock timeout
-    security set-keychain-settings zode.keychain
-    echo "$MACOS_CERTIFICATE" | base64 --decode > /tmp/zode-certificate.p12
-    security import /tmp/zode-certificate.p12 -k zode.keychain -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-    rm /tmp/zode-certificate.p12
-    security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$MACOS_CERTIFICATE_PASSWORD" zode.keychain > /dev/null
-
-    # codesign looks for identities in the user's keychain search list, not in
-    # the default keychain; on GitHub's macOS runners that list does not hold
-    # a newly created keychain, and signing fails with "The specified item
-    # could not be found in the keychain".
-    previous_keychains=()
-    while IFS= read -r keychain; do
-        keychain="${keychain#"${keychain%%[![:space:]]*}"}"
-        keychain="${keychain%\"}"
-        keychain="${keychain#\"}"
-        [[ -n "$keychain" ]] && previous_keychains+=("$keychain")
-    done < <(security list-keychains -d user)
+    certificate_file=$(mktemp)
 
     function cleanup() {
         echo "Cleaning up keychain"
-        security list-keychains -d user -s ${previous_keychains[@]+"${previous_keychains[@]}"}
+        rm -f "$certificate_file"
         security default-keychain -s login.keychain
-        security delete-keychain zode.keychain
+        macos_signing_cleanup_keychain zode.keychain
     }
 
     trap cleanup EXIT
 
-    security list-keychains -d user -s zode.keychain ${previous_keychains[@]+"${previous_keychains[@]}"}
-
-    # Every identity, trusted or not, so a missing chain shows as such below
-    # rather than as a missing identity.
-    identities="$(security find-identity -p codesigning zode.keychain)"
-    echo "$identities"
-    if ! grep -qF "\"$IDENTITY\"" <<< "$identities"; then
-        echo "error: no signing identity named \"$IDENTITY\" in the imported certificate."
-        echo "Check that MACOS_CERTIFICATE holds that Developer ID Application certificate with its private key, and that MACOS_SIGNING_IDENTITY matches its common name."
-        exit 1
-    fi
+    echo "$MACOS_CERTIFICATE" | base64 --decode > "$certificate_file"
+    macos_signing_setup_keychain zode.keychain "$certificate_file" "$MACOS_CERTIFICATE_PASSWORD" "$IDENTITY" || exit 1
+    rm -f "$certificate_file"
+    security default-keychain -s zode.keychain
 fi
 
 GIT_VERSION="v2.43.3"

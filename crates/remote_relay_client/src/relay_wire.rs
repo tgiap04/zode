@@ -232,7 +232,10 @@ mod tests {
 
     #[test]
     fn a_pairing_message_round_trips_with_its_session_id() {
-        let message = PairingMessage::PairReveal { nonce: [9; 32] };
+        let message = PairingMessage::PairReveal {
+            nonce: [9; 32],
+            qr_proof: None,
+        };
         let encoded = encode_pairing(41, &message).unwrap();
         assert_eq!(
             parse_relay_text(&encoded).unwrap().unwrap(),
@@ -245,7 +248,10 @@ mod tests {
 
     #[test]
     fn a_pairing_message_without_a_session_is_refused() {
-        let message = PairingMessage::PairReveal { nonce: [9; 32] };
+        let message = PairingMessage::PairReveal {
+            nonce: [9; 32],
+            qr_proof: None,
+        };
         let mut value = serde_json::to_value(&message).unwrap();
         assert!(matches!(
             parse_relay_text(&value.to_string()),

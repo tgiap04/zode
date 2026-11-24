@@ -63,7 +63,7 @@ impl Render for TrustedDevicesModal {
             } => {
                 let notice = devices
                     .is_empty()
-                    .then_some("No device is trusted. Pair one from the Zode web app.");
+                    .then_some("No device is trusted. Pair a phone with its QR code, or pair a browser from the Zode web app.");
                 (devices, unreadable, notice)
             }
         };
@@ -196,9 +196,25 @@ impl Render for TrustedDevicesModal {
                                 )
                             }))
                             .end_slot(
-                                Button::new("remote-devices-close", "Close").on_click(
-                                    cx.listener(|_, _, _window, cx| cx.emit(DismissEvent)),
-                                ),
+                                h_flex()
+                                    .gap_1()
+                                    .child(
+                                        Button::new(
+                                            "remote-devices-pair-phone",
+                                            "Pair a Phone\u{2026}",
+                                        )
+                                        .on_click(
+                                            |_, window, cx| {
+                                                window.dispatch_action(
+                                                    Box::new(crate::PairPhoneWithQr),
+                                                    cx,
+                                                );
+                                            },
+                                        ),
+                                    )
+                                    .child(Button::new("remote-devices-close", "Close").on_click(
+                                        cx.listener(|_, _, _window, cx| cx.emit(DismissEvent)),
+                                    )),
                             ),
                     ),
             )
