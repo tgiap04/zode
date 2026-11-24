@@ -734,6 +734,78 @@ bị giới hạn (bên dưới), và một lần khớp sai làm ghép cặp th
 Khi cả hai người xác nhận các chữ số khớp, mỗi bên lưu khoá công khai của bên kia
 làm khoá tĩnh đã ghim cho handshake Noise.
 
+### Pairing by QR code
+
+Mã QR hiện trên màn hình của acceptor và được camera của requester đọc là một
+kênh không ai chen vào được, nên nó thay cho các chữ số. Acceptor chỉ hiện
+một mã tại một thời điểm, và chỉ khi cửa sổ ghép cặp của nó đang mở:
+
+```
+zode://pair?v=1&h=<host device id>&k=<fp>&s=<secret>&e=<expiry>
+```
+
+`h` là device id của acceptor, đã mã hoá phần trăm. `k` là
+`base64url(SHA-256(pk_A))` không padding, để requester kiểm được mã có
+nêu đúng khoá mà tài khoản liệt kê cho thiết bị đó. `s` là 32 byte ngẫu nhiên,
+base64url không padding. `e` là thời điểm hết hạn tính bằng giây Unix nguyên, 120 giây
+sau khi mã được tạo. `v` không nhận ra thì bị từ chối.
+
+Requester chứng minh nó đã đọc mã bằng một trường tuỳ chọn trong reveal:
+
+```
+pair_reveal {nonce, qr_proof}
+qr_proof = HMAC-SHA256(s, "zode-qr-pair-v1" ‖ pk_B ‖ pk_A ‖ n_B ‖ n_A
+                          ‖ u16be(len(id_B)) ‖ utf8(id_B))   (standard base64)
+```
+
+`id_B` là device id của requester, đúng cái mà relay báo cho phiên ghép cặp.
+Nó nằm trong bằng chứng để relay không thể đưa khoá của requester cho
+acceptor dưới tên một thiết bị khác. Acceptor từ trước khi có trường này
+bỏ qua nó và hỏi các chữ số.
+
+**Các quy tắc acceptor áp dụng, thêm vào những điều trên:**
+
+- Một bằng chứng hợp lệ, so sánh trong thời gian hằng, làm từ mã đang hiện
+  khi nó còn hiệu lực, tin thiết bị **mà không so chữ số**. Mã bị tiêu ngay
+  khi đó: điện thoại thứ hai giữ cùng bí mật bị từ chối.
+- Thiết bị đã được tin với một khoá **khác** thì bằng chứng không đủ để tin nó.
+  Thay một khoá đã ghim là điều duy nhất mã trên màn hình không bảo đảm được,
+  nên người dùng được hỏi một câu đơn giản, không có chữ số (điện thoại không
+  hiện chữ số nào): "Replace the key for <device>? It was re-paired with a QR
+  code." Trả lời không thì không tính là một lần thử hỏng và không tính vào
+  lockout, và mã không được vẽ trong lúc câu hỏi đang hiện. Thiết bị mới, hoặc
+  thiết bị ghép cặp lại với đúng khoá nó đã có, được tin mà
+  không hỏi.
+- `qr_proof` sai, kể cả bằng chứng làm cho một device id khác, kết thúc
+  lượt trao đổi và **tính là một lần thử hỏng** vào lockout. Nó
+  không quay về so chữ số.
+- `qr_proof` đến khi không có mã nào đang hiện (chưa từng hiện, đã gỡ,
+  hết hạn, đã dùng) kết thúc lượt trao đổi và bị từ chối, nhưng **không
+  tính** vào lockout: một tấm ảnh cũ hay một liên kết mở hai lần không phải là
+  đoán mò.
+- `qr_proof` làm từ một mã đã bị thay hoặc đã dùng trong 60 giây gần nhất
+  cũng bị từ chối như vậy và **không tính**: một điện thoại trung thực quét mã
+  mà cửa sổ vừa thay.
+  Acceptor chỉ giữ các bí mật đó để nhận ra chúng, không bao giờ
+  để chấp nhận. Bằng chứng không khớp mã đang hiện lẫn các mã đó, trong lúc có mã
+  đang hiện, là bằng chứng sai và được tính.
+- Dưới mã QR, cửa sổ hiện bốn ký tự: 20 bit đầu của
+  `HMAC-SHA256(s, "zode-qr-confirm-v1" ‖ SHA-256(pk_A))` bằng Crockford base32
+  (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`, bit cao trước). Điện thoại mở liên kết
+  mà không quét sẽ hiện bản của nó để người dùng so; liên kết giả không
+  biết `s`.
+- Reveal không có `qr_proof` là luồng chữ số, không đổi, dù có đang hiện
+  mã hay không.
+- Lockout, quy tắc mỗi lúc một lượt trao đổi, hạn 120 giây của lượt trao đổi,
+  giới hạn số request được trả lời và giới hạn số câu hỏi đều áp dụng như trước. Ghép cặp
+  bằng QR không hỏi ai, nên không tốn câu hỏi nào trong hạn mức mỗi giờ.
+- Mã được gỡ khi cửa sổ đang hiện nó đóng, và được thay trong lúc
+  cửa sổ còn mở khi nó hết hạn hoặc đã dùng. Thiết bị đã chứng minh mã
+  mà còn đang chờ tra tên khi cửa sổ đóng
+  thì không được tin.
+- Khi ghép cặp đang bị khoá (lockout), cửa sổ báo điều đó, kèm nút **Unlock
+  Pairing**, thay cho mã.
+
 ### Điều khiển Zode
 
 Zode điều khiển Zode khác là **requester** khi ghép cặp và là

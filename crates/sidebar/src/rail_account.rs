@@ -131,6 +131,10 @@ impl Sidebar {
                             // Offered while off too: a lost device is forgotten
                             // before remote control is turned back on.
                             .action(
+                                "Pair a Phone with QR Code\u{2026}",
+                                Box::new(remote_control::PairPhoneWithQr),
+                            )
+                            .action(
                                 "Manage Trusted Devices\u{2026}",
                                 Box::new(remote_control::ManageDevices),
                             )

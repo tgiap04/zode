@@ -3,7 +3,9 @@ use std::time::{Duration, Instant};
 use ring::rand::{SecureRandom as _, SystemRandom};
 use sha2::{Digest as _, Sha256};
 
-use crate::{KEY_LEN, PairingMessage, is_low_order_public_key};
+use crate::{
+    KEY_LEN, PairingMessage, QR_PROOF_LEN, QrSecret, is_low_order_public_key, verify_qr_proof,
+};
 
 pub const NONCE_LEN: usize = 32;
 pub const COMMITMENT_LEN: usize = 32;
@@ -40,6 +42,12 @@ pub enum PairingError {
     LockedOut,
     #[error("there is no pairing exchange to continue")]
     NoPendingExchange,
+    #[error("the QR proof is wrong")]
+    QrProofRejected,
+    #[error("a QR proof arrived but no QR code is being shown")]
+    NoQrCode,
+    #[error("the QR proof was made from a code that has since been replaced")]
+    StaleQrCode,
 }
 
 pub fn random_nonce() -> Result<[u8; NONCE_LEN], PairingError> {
@@ -135,7 +143,13 @@ impl PairingRequester {
                 &self.nonce,
             ),
         };
-        Ok((PairingMessage::PairReveal { nonce: self.nonce }, outcome))
+        Ok((
+            PairingMessage::PairReveal {
+                nonce: self.nonce,
+                qr_proof: None,
+            },
+            outcome,
+        ))
     }
 }
 
@@ -180,6 +194,64 @@ impl PairingAcceptor {
     /// exchange is abandoned, and the string is never shown.
     pub fn receive_reveal(
         self,
+        requester_nonce: [u8; NONCE_LEN],
+        now: Instant,
+    ) -> Result<PairingOutcome, PairingError> {
+        self.check_reveal(requester_nonce, now)
+    }
+
+    /// [`Self::receive_reveal`] for a requester that says it read the QR code
+    /// on this screen. `secret` is the code being shown, if one is.
+    /// `requester_device_id` is the id the relay reports for the requester,
+    /// which the proof must have been made for.
+    ///
+    /// A proof it did not make fails like a mismatch: someone claimed
+    /// knowledge of a secret they do not have. With no code being shown there
+    /// is nothing to judge it against, which is [`PairingError::NoQrCode`]: an
+    /// old code, a link opened twice, not a guess. A proof made from one of the
+    /// `stale` secrets, codes that were shown a moment ago and have since been
+    /// replaced or used, is [`PairingError::StaleQrCode`]: an honest phone that
+    /// was slow, also not a guess. A stale secret is only ever recognised, never
+    /// accepted.
+    ///
+    /// The commitment is checked first, so a proof is judged only for a
+    /// requester that is who it said it was.
+    pub fn receive_reveal_with_qr_proof(
+        self,
+        requester_nonce: [u8; NONCE_LEN],
+        requester_device_id: &str,
+        proof: &[u8; QR_PROOF_LEN],
+        secret: Option<&QrSecret>,
+        stale: &[&QrSecret],
+        now: Instant,
+    ) -> Result<PairingOutcome, PairingError> {
+        let outcome = self.check_reveal(requester_nonce, now)?;
+        let made_from = |candidate: &QrSecret| {
+            verify_qr_proof(
+                candidate,
+                &self.requester_public_key,
+                &self.public_key,
+                &requester_nonce,
+                &self.nonce,
+                requester_device_id,
+                proof,
+            )
+        };
+        // The live code is judged first, and only it can ever be accepted.
+        if secret.is_some_and(made_from) {
+            return Ok(outcome);
+        }
+        if stale.iter().any(|retired| made_from(retired)) {
+            return Err(PairingError::StaleQrCode);
+        }
+        match secret {
+            Some(_) => Err(PairingError::QrProofRejected),
+            None => Err(PairingError::NoQrCode),
+        }
+    }
+
+    fn check_reveal(
+        &self,
         requester_nonce: [u8; NONCE_LEN],
         now: Instant,
     ) -> Result<PairingOutcome, PairingError> {
@@ -284,6 +356,44 @@ impl PairingGate {
         match &outcome {
             Ok(_) => self.deciding_until = Some(deadline),
             Err(PairingError::CommitmentMismatch) => self.failed_attempts += 1,
+            Err(_) => {}
+        }
+        outcome
+    }
+
+    /// [`Self::reveal`] for a requester that read the QR code on this screen.
+    /// A valid proof is the confirmation: nobody compares digits, so the
+    /// exchange does not hold the gate afterwards and the failures are
+    /// forgiven, as a confirmed comparison forgives them. A wrong proof counts
+    /// as a failed guess. A proof with no code being shown does not: that is a
+    /// code that ran out, was used or was taken down, and it is refused
+    /// without counting. Neither does one made from a `stale` secret.
+    pub fn reveal_with_qr_proof(
+        &mut self,
+        requester_nonce: [u8; NONCE_LEN],
+        requester_device_id: &str,
+        proof: &[u8; QR_PROOF_LEN],
+        secret: Option<&QrSecret>,
+        stale: &[&QrSecret],
+        now: Instant,
+    ) -> Result<PairingOutcome, PairingError> {
+        if self.is_locked_out() {
+            return Err(PairingError::LockedOut);
+        }
+        let acceptor = self.pending.take().ok_or(PairingError::NoPendingExchange)?;
+        let outcome = acceptor.receive_reveal_with_qr_proof(
+            requester_nonce,
+            requester_device_id,
+            proof,
+            secret,
+            stale,
+            now,
+        );
+        match &outcome {
+            Ok(_) => self.failed_attempts = 0,
+            Err(PairingError::CommitmentMismatch | PairingError::QrProofRejected) => {
+                self.failed_attempts += 1;
+            }
             Err(_) => {}
         }
         outcome

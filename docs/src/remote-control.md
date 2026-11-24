@@ -202,12 +202,21 @@ remote control off or manage trusted devices.
   different one, and goes away after five seconds. Opening a session that is
   already running shows no toast.
 - Click the indicator to **Disconnect All Devices**, **Turn Off Remote
-  Control**, or **Manage Trusted Devices…**.
+  Control**, **Pair a Phone with QR Code…**, or **Manage Trusted Devices…**.
 - The same are available as the command-palette actions
   `remote_control::DisconnectAll`, `remote_control::Disable` and
-  `remote_control::ManageDevices`. The account menu offers **Manage Trusted
-  Devices…** at any time, even while remote control is off, so you can forget a
-  device before you turn it back on.
+  `remote_control::ManageDevices`. `remote_control::PairPhoneWithQr` (**Pair a
+  Phone with QR Code…**, in the account menu too) turns remote control on if it
+  is off and shows a QR code that the Zode app on your phone scans to pair and
+  connect without comparing digits; the code lasts two minutes, works once, and
+  goes away when you close the window. Under the code the window shows four
+  characters that a phone opening the link without scanning asks you to
+  compare. A phone already trusted under a different key gets a plain yes or no
+  about replacing its key, with no digits, and a no is not held against it.
+  While pairing is locked the window offers **Unlock Pairing** instead of a
+  code. The account
+  menu offers **Manage Trusted Devices…** at any time, even while remote control
+  is off, so you can forget a device before you turn it back on.
 - While a device is connected Zode holds the display awake, on the same terms as
   [`keep_display_awake`](./reference/all-settings.md).
 

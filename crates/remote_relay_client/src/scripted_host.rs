@@ -318,7 +318,7 @@ impl ScriptedHost {
                     Err(_) => self.close_at_relay(session_id, cx),
                 }
             }
-            PairingMessage::PairReveal { nonce } => match self.gate.reveal(nonce, now) {
+            PairingMessage::PairReveal { nonce, .. } => match self.gate.reveal(nonce, now) {
                 Ok(outcome) => {
                     self.pair_session = Some(session_id);
                     self.pair_outcome = Some((

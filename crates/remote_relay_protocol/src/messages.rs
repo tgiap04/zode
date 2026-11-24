@@ -2,7 +2,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::{
-    COMMITMENT_LEN, FrameError, KEY_LEN, MAX_INNER_PAYLOAD_LEN, NONCE_LEN, RELAY_PROTOCOL_VERSION,
+    COMMITMENT_LEN, FrameError, KEY_LEN, MAX_INNER_PAYLOAD_LEN, NONCE_LEN, QR_PROOF_LEN,
+    RELAY_PROTOCOL_VERSION,
 };
 
 /// Stable error codes carried by [`Control::Error`].
@@ -413,7 +414,39 @@ pub enum PairingMessage {
     PairReveal {
         #[serde(with = "base64_array")]
         nonce: [u8; NONCE_LEN],
+        /// Present when the requester read a QR code shown on the acceptor's
+        /// screen: the proof that it did, in place of comparing six digits. An
+        /// acceptor from before it existed ignores the field and asks for the
+        /// digits as always.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "base64_optional_array"
+        )]
+        qr_proof: Option<[u8; QR_PROOF_LEN]>,
     },
+}
+
+mod base64_optional_array {
+    use super::*;
+
+    pub fn serialize<S: Serializer, const LEN: usize>(
+        bytes: &Option<[u8; LEN]>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match bytes {
+            Some(bytes) => base64_array::serialize(bytes, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, const LEN: usize>(
+        deserializer: D,
+    ) -> Result<Option<[u8; LEN]>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .map(|encoded| base64_array::decode(&encoded).map_err(serde::de::Error::custom))
+            .transpose()
+    }
 }
 
 mod base64_array {
@@ -430,12 +463,16 @@ mod base64_array {
         deserializer: D,
     ) -> Result<[u8; LEN], D::Error> {
         let encoded = String::deserialize(deserializer)?;
+        decode(&encoded).map_err(serde::de::Error::custom)
+    }
+
+    pub fn decode<const LEN: usize>(encoded: &str) -> Result<[u8; LEN], String> {
         let decoded = BASE64
             .decode(encoded.as_bytes())
-            .map_err(serde::de::Error::custom)?;
+            .map_err(|error| error.to_string())?;
         let length = decoded.len();
         decoded
             .try_into()
-            .map_err(|_| serde::de::Error::custom(format!("expected {LEN} bytes, found {length}")))
+            .map_err(|_| format!("expected {LEN} bytes, found {length}"))
     }
 }

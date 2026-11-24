@@ -734,6 +734,78 @@ capped (below), and one wrong match fails the pairing visibly.
 Once both people confirm the digits match, each side stores the other's public
 key as a pinned static key for the Noise handshake.
 
+### Pairing by QR code
+
+A QR code shown on the acceptor's screen and read by the requester's camera is
+a channel nobody can sit in, so it stands in for the digits. The acceptor shows
+one code at a time, and only while its pairing window is open:
+
+```
+zode://pair?v=1&h=<host device id>&k=<fp>&s=<secret>&e=<expiry>
+```
+
+`h` is the acceptor's device id, percent-encoded. `k` is
+`base64url(SHA-256(pk_A))` without padding, so the requester can check the code
+names the key the account lists for that device. `s` is 32 random bytes,
+base64url without padding. `e` is the expiry in whole Unix seconds, 120 seconds
+after the code was made. An unknown `v` is refused.
+
+The requester proves it read the code with an optional field in its reveal:
+
+```
+pair_reveal {nonce, qr_proof}
+qr_proof = HMAC-SHA256(s, "zode-qr-pair-v1" ‖ pk_B ‖ pk_A ‖ n_B ‖ n_A
+                          ‖ u16be(len(id_B)) ‖ utf8(id_B))   (standard base64)
+```
+
+`id_B` is the requester's device id, the one the relay reports for the pairing
+session. It is in the proof so a relay cannot hand the requester's key to the
+acceptor under another device's name. An acceptor from before the field existed
+ignores it and asks for the digits.
+
+**Rules the acceptor enforces, on top of the above:**
+
+- A valid proof, compared in constant time, made from the code being shown
+  while it is still good, trusts the device **without comparing digits**. The
+  code is spent by it: a second phone holding the same secret is refused.
+- A device that is already trusted under a **different** key is not trusted by
+  the proof. Replacing a pinned key is the one thing the code on screen cannot
+  vouch for, so the person is asked a plain question, without digits (the
+  phone shows none): "Replace the key for <device>? It was re-paired with a QR
+  code." Saying no is not a failed attempt and does not count toward the
+  lockout, and the code is not drawn while the question is up. A new device, or
+  one that pairs again with the key it already has, is trusted without a
+  question.
+- A `qr_proof` that is wrong, including one made for another device id, ends
+  the exchange and **counts as a failed attempt** toward the lockout. It does
+  not fall back to the digits.
+- A `qr_proof` that arrives when no code is being shown (never shown, taken
+  down, expired, already used) ends the exchange and is refused, but is **not
+  counted** toward the lockout: an old photo or a link opened twice is not a
+  guess.
+- A `qr_proof` made from a code that was replaced or used within the last 60
+  seconds is refused the same way and **not counted**: an honest phone that
+  scanned a code the window has since replaced. The acceptor keeps those
+  secrets only to recognise them, never to accept one. A proof that matches
+  neither the code being shown nor one of those, while a code is being shown,
+  is a wrong proof and counts.
+- Under the QR code the window shows four characters: the first 20 bits of
+  `HMAC-SHA256(s, "zode-qr-confirm-v1" ‖ SHA-256(pk_A))` in Crockford base32
+  (`0123456789ABCDEFGHJKMNPQRSTVWXYZ`, most significant first). A phone that
+  opened the link without scanning it shows its own copy so the person can
+  compare; a forged link cannot know `s`.
+- A reveal without `qr_proof` is the digits flow, unchanged, whether or not a
+  code is being shown.
+- The lockout, the one-exchange-at-a-time rule, the 120-second exchange expiry,
+  the answered-request caps and the question cap all apply as before. A QR
+  pairing asks nobody, so it spends no question from the hourly allowance.
+- The code is taken down when the window showing it closes, and replaced while
+  it is open once it expires or is used. A device that proved the code and is
+  still waiting for its name to be looked up when the window closes is not
+  trusted.
+- While pairing is locked out the window shows that, with an **Unlock
+  Pairing** button, instead of a code.
+
 ### Controlling Zode
 
 A Zode that controls another is the **requester** when pairing and the

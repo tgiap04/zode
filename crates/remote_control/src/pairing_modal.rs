@@ -17,6 +17,9 @@ pub struct PairingModal {
     /// What the device is already trusted as, when trusting it again would
     /// replace what is saved for it.
     replaces: Option<String>,
+    /// The device read the QR code: there are no digits, and the question is
+    /// only whether to replace the saved key.
+    via_qr: bool,
     code: String,
     answered: bool,
     focus_handle: FocusHandle,
@@ -72,6 +75,7 @@ impl PairingModal {
             session_id,
             device_name: decision.peer_name,
             replaces: decision.replaces,
+            via_qr: decision.via_qr,
             code: decision.code,
             answered: false,
             focus_handle: cx.focus_handle(),
@@ -101,6 +105,23 @@ impl PairingModal {
 
 impl Render for PairingModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let via_qr = self.via_qr;
+        let (title, trust_label, reject_label) = if via_qr {
+            (
+                format!(
+                    "Replace the key for {}?",
+                    self.replaces.as_deref().unwrap_or(&self.device_name)
+                ),
+                "Trust It",
+                "Don't Trust",
+            )
+        } else {
+            (
+                format!("{} wants to control this Zode", self.device_name),
+                "The Digits Match: Trust It",
+                "Reject",
+            )
+        };
         div()
             .key_context("RemoteControlPairing")
             .track_focus(&self.focus_handle)
@@ -112,44 +133,63 @@ impl Render for PairingModal {
             .child(
                 Modal::new("remote-pairing", None)
                     .header(
-                        ModalHeader::new().child(
-                            Headline::new(format!(
-                                "{} wants to control this Zode",
-                                self.device_name
-                            ))
-                            .size(HeadlineSize::Small),
-                        ),
+                        ModalHeader::new().child(Headline::new(title).size(HeadlineSize::Small)),
                     )
                     .section(
                         Section::new()
-                            .when_some(self.replaces.clone(), |section, existing| {
+                            .when(via_qr, |section| {
                                 section.child(
-                                    Label::new(format!(
-                                        "{existing} is already trusted. Trusting this request \
-                                         replaces what is saved for it and ends any connection \
-                                         made with the old key."
-                                    ))
-                                    .size(LabelSize::Small)
-                                    .color(Color::Warning),
+                                    div()
+                                        .debug_selector(|| "remote-pairing-replace-question".into())
+                                        .child(
+                                            Label::new(format!(
+                                                "{} was re-paired with a QR code and is now using \
+                                                 a different key. Trusting it replaces what is \
+                                                 saved for it and ends any connection made with \
+                                                 the old key.",
+                                                self.device_name
+                                            ))
+                                            .size(LabelSize::Small),
+                                        ),
                                 )
                             })
-                            .child(
-                                Label::new(
-                                    "Look at the other device. If it shows the same six digits, \
-                                     it is the one you meant. Trusting it lets it watch your \
-                                     agents and terminals and type into them.",
-                                )
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                            )
-                            .child(
-                                v_flex().w_full().py_4().gap_1p5().items_center().child(
-                                    Label::new(self.code.clone())
-                                        .size(LabelSize::Large)
-                                        .weight(FontWeight::MEDIUM)
-                                        .buffer_font(cx),
-                                ),
-                            ),
+                            .when(!via_qr, |section| {
+                                section
+                                    .when_some(self.replaces.clone(), |section, existing| {
+                                        section.child(
+                                            Label::new(format!(
+                                                "{existing} is already trusted. Trusting this \
+                                                 request replaces what is saved for it and ends \
+                                                 any connection made with the old key."
+                                            ))
+                                            .size(LabelSize::Small)
+                                            .color(Color::Warning),
+                                        )
+                                    })
+                                    .child(
+                                        Label::new(
+                                            "Look at the other device. If it shows the same six \
+                                             digits, it is the one you meant. Trusting it lets it \
+                                             watch your agents and terminals and type into them.",
+                                        )
+                                        .size(LabelSize::Small)
+                                        .color(Color::Muted),
+                                    )
+                                    .child(
+                                        v_flex()
+                                            .debug_selector(|| "remote-pairing-digits".into())
+                                            .w_full()
+                                            .py_4()
+                                            .gap_1p5()
+                                            .items_center()
+                                            .child(
+                                                Label::new(self.code.clone())
+                                                    .size(LabelSize::Large)
+                                                    .weight(FontWeight::MEDIUM)
+                                                    .buffer_font(cx),
+                                            ),
+                                    )
+                            }),
                     )
                     .footer(
                         ModalFooter::new().end_slot(
@@ -161,7 +201,7 @@ impl Render for PairingModal {
                                     div()
                                         .debug_selector(|| "remote-pairing-reject".into())
                                         .child(
-                                            Button::new("remote-pairing-reject", "Reject")
+                                            Button::new("remote-pairing-reject", reject_label)
                                                 .on_click(cx.listener(|this, _, _window, cx| {
                                                     this.answer(false, cx)
                                                 })),
@@ -171,16 +211,11 @@ impl Render for PairingModal {
                                     div()
                                         .debug_selector(|| "remote-pairing-trust".into())
                                         .child(
-                                            Button::new(
-                                                "remote-pairing-trust",
-                                                "The Digits Match: Trust It",
-                                            )
-                                            .style(ButtonStyle::Filled)
-                                            .on_click(
-                                                cx.listener(|this, _, _window, cx| {
+                                            Button::new("remote-pairing-trust", trust_label)
+                                                .style(ButtonStyle::Filled)
+                                                .on_click(cx.listener(|this, _, _window, cx| {
                                                     this.answer(true, cx)
-                                                }),
-                                            ),
+                                                })),
                                         ),
                                 ),
                         ),

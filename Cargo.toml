@@ -678,6 +678,9 @@ prost-types = "0.9"
 pollster = "0.4.0"
 pulldown-cmark = { version = "0.13.0", default-features = false }
 quote = "1.0.9"
+# Encodes the pairing QR code. No image support: the modules are drawn with gpui
+# elements, so the `image` crate is not pulled in.
+qrcode = { version = "0.14", default-features = false }
 rand = "0.9"
 # Already compiled into every build as a transitive dependency of rustls, but a
 # crate that calls into it must say so. `zode_sync` uses AES-256-GCM and

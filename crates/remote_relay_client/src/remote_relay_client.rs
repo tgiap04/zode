@@ -895,7 +895,14 @@ mod tests {
         let session_id = browser.open("host-device", OpenMode::Session);
         browser.send_binary(session_id, b"opaque");
         browser.send_text(
-            &encode_pairing(session_id, &PairingMessage::PairReveal { nonce: [4; 32] }).unwrap(),
+            &encode_pairing(
+                session_id,
+                &PairingMessage::PairReveal {
+                    nonce: [4; 32],
+                    qr_proof: None,
+                },
+            )
+            .unwrap(),
         );
         relay.revoke_device("browser-9");
         browser.close(session_id);
@@ -916,7 +923,10 @@ mod tests {
                 },
                 RelayEvent::Pairing {
                     session_id,
-                    message: PairingMessage::PairReveal { nonce: [4; 32] }
+                    message: PairingMessage::PairReveal {
+                        nonce: [4; 32],
+                        qr_proof: None
+                    }
                 },
                 RelayEvent::DeviceRevoked {
                     device_id: "browser-9".into()
@@ -941,7 +951,13 @@ mod tests {
         client.read_with(cx, |client, _| {
             client.send_frame(session_id, b"sealed").unwrap();
             client
-                .send_pairing(session_id, &PairingMessage::PairReveal { nonce: [1; 32] })
+                .send_pairing(
+                    session_id,
+                    &PairingMessage::PairReveal {
+                        nonce: [1; 32],
+                        qr_proof: None,
+                    },
+                )
                 .unwrap();
         });
         cx.run_until_parked();

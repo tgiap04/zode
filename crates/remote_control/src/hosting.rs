@@ -22,8 +22,8 @@ use remote_relay_client::{
 };
 use remote_relay_protocol::{
     Control, DeviceKeypair, InnerFrame, InnerKind, MAX_INNER_PAYLOAD_LEN, PAIRING_EXPIRY,
-    PairingMessage, SessionCursor, build_prologue, decode_control, encode_control, error_code,
-    random_nonce,
+    PairingMessage, QrSecret, SessionCursor, build_prologue, decode_control, encode_control,
+    error_code, random_nonce,
 };
 use zode_account::PlanSummary;
 
@@ -32,10 +32,13 @@ use crate::{
     file_browse::{self, BrowseError, FileBrowser, FileReply, FileRequest},
     ide_bridge::{self, IdeBridge, IdeLaunch, IdeOutput},
     ide_heartbeat::RequestDetector,
-    pairing_flow::{MAX_PAIRING_REQUESTS_PER_HOUR, PairingFlow, PairingHistory, PairingRefusal},
+    pairing_flow::{
+        MAX_PAIRING_REQUESTS_PER_HOUR, PairingFlow, PairingHistory, PairingRefusal,
+        PendingDecision, QrTrust,
+    },
     push_notifications::PushSend,
     remote_control_settings::RemoteControlSettings,
-    remote_host::{RemoteHost, RemoteHostEvent},
+    remote_host::{QrPairing, RemoteHost, RemoteHostEvent},
     session_history::{self, SessionRequest},
     session_router::{
         HOST_STREAM_BASE, HostFacts, MAX_ATTACHMENTS_PER_SESSION, RouterAction, RouterState,
@@ -392,6 +395,7 @@ enum RefusalNotice {
     RateLimited,
     TooManyAnswered,
     LockedOut,
+    NoQrRandomness,
 }
 
 pub(crate) struct Hosting {
@@ -843,8 +847,14 @@ impl Hosting {
                     }
                 }
             }
-            PairingMessage::PairReveal { nonce } => {
-                match self.pairing.reveal(session_id, nonce, now) {
+            PairingMessage::PairReveal { nonce, qr_proof } => {
+                let revealed = match qr_proof {
+                    Some(proof) => self
+                        .pairing
+                        .reveal_with_qr_proof(session_id, nonce, proof, now),
+                    None => self.pairing.reveal(session_id, nonce, now),
+                };
+                match revealed {
                     Ok(revealed) => {
                         self.look_up_name_then_ask(session_id, revealed.peer_device_id, cx);
                     }
@@ -921,6 +931,30 @@ impl Hosting {
         // question, the notification, the indicator and the saved pin.
         let peer_name = displayable_device_name(&peer_name);
         let trust = &self.trust;
+        if self.pairing.is_trusted_by_qr(session_id) {
+            let decision = self.pairing.trust_by_qr(
+                session_id,
+                peer_name,
+                |device_id, key| {
+                    trust
+                        .get(device_id)
+                        .filter(|pinned| pinned.public_key != *key)
+                        .map(|pinned| pinned.name.clone())
+                },
+                now,
+            );
+            match decision {
+                Some(QrTrust::Trusted(decision)) => self.trust_decided_by_qr(decision, cx),
+                // A different key is saved for this device: the code does not
+                // say who held it, so the person is asked with the digits.
+                Some(QrTrust::Asking) => {
+                    self.reported_refusal = None;
+                    self.mark_changed(cx);
+                }
+                None => self.end_session(session_id, cx),
+            }
+            return;
+        }
         let asked = self.pairing.present(
             session_id,
             peer_name,
@@ -964,29 +998,11 @@ impl Hosting {
         };
         self.pairing_presented = None;
         let mut replaced_key_of = None;
+        let mut pinned = false;
         if trust {
-            let replaces_key = self
-                .trust
-                .get(&decision.peer_device_id)
-                .is_some_and(|existing| existing.public_key != decision.peer_public_key);
-            let device = PinnedDevice {
-                device_id: decision.peer_device_id.clone(),
-                public_key: decision.peer_public_key,
-                name: decision.peer_name.clone(),
-                paired_at: unix_now(),
-            };
-            match self.trust.pin(device, cx) {
-                Ok(()) => {
-                    replaced_key_of = replaces_key.then(|| decision.peer_device_id.clone());
-                }
-                Err(error) => {
-                    log::error!("could not trust {}: {error}", decision.peer_name);
-                    cx.emit(RemoteHostEvent::Problem {
-                        message: format!("Could not trust {}: {error}", decision.peer_name),
-                        retry: false,
-                    });
-                }
-            }
+            let saved = self.pin_trusted_device(&decision, cx);
+            pinned = saved.is_some();
+            replaced_key_of = saved.flatten();
         } else if self.pairing.is_locked_out() {
             self.report_lockout(cx);
         }
@@ -996,6 +1012,64 @@ impl Hosting {
         if let Some(device_id) = replaced_key_of {
             self.end_sessions_of(&device_id, cx);
         }
+        if trust && decision.via_qr && pinned {
+            // Announced as any trusted QR pairing is, which closes the code.
+            cx.emit(RemoteHostEvent::DevicePaired {
+                device_name: decision.peer_name,
+            });
+            self.mark_changed(cx);
+        }
+    }
+
+    /// Saves the device `decision` is about as trusted. `None` if it could not
+    /// be saved, which the person is told; otherwise the device id if this
+    /// replaced a different key saved for it, whose sessions are then to end.
+    fn pin_trusted_device(
+        &mut self,
+        decision: &PendingDecision,
+        cx: &mut Context<RemoteHost>,
+    ) -> Option<Option<String>> {
+        let replaces_key = self
+            .trust
+            .get(&decision.peer_device_id)
+            .is_some_and(|existing| existing.public_key != decision.peer_public_key);
+        let device = PinnedDevice {
+            device_id: decision.peer_device_id.clone(),
+            public_key: decision.peer_public_key,
+            name: decision.peer_name.clone(),
+            paired_at: unix_now(),
+        };
+        match self.trust.pin(device, cx) {
+            Ok(()) => Some(replaces_key.then(|| decision.peer_device_id.clone())),
+            Err(error) => {
+                log::error!("could not trust {}: {error}", decision.peer_name);
+                cx.emit(RemoteHostEvent::Problem {
+                    message: format!("Could not trust {}: {error}", decision.peer_name),
+                    retry: false,
+                });
+                None
+            }
+        }
+    }
+
+    /// A device proved it read the QR code on this screen, so it is trusted
+    /// without digits. The code was made by and for the person at this screen,
+    /// which is what the digits would have established.
+    fn trust_decided_by_qr(&mut self, decision: PendingDecision, cx: &mut Context<RemoteHost>) {
+        let pinned = self.pin_trusted_device(&decision, cx);
+        self.end_session(decision.session_id, cx);
+        let Some(replaced_key_of) = pinned else {
+            return;
+        };
+        // Sessions made under a key that was replaced hold it still.
+        if let Some(device_id) = replaced_key_of {
+            self.end_sessions_of(&device_id, cx);
+        }
+        self.reported_refusal = None;
+        cx.emit(RemoteHostEvent::DevicePaired {
+            device_name: decision.peer_name,
+        });
+        self.mark_changed(cx);
     }
 
     /// The question was closed without an answer. The device is turned away,
@@ -1011,6 +1085,68 @@ impl Hosting {
         };
         self.pairing_presented = None;
         self.end_session(decision.session_id, cx);
+    }
+
+    /// Shows a new QR code in place of whatever was on screen. `false` when
+    /// there is not yet a device id to put in it, which is known only once the
+    /// relay has accepted this host's credential.
+    pub(crate) fn begin_qr_pairing(&mut self, cx: &mut Context<RemoteHost>) -> bool {
+        // While pairing is locked every scan would be turned away, so there is
+        // nothing to show; the person unlocks it first.
+        if self.pairing.is_locked_out() {
+            return false;
+        }
+        // A phone that read the code is waiting for an answer here: drawing a code beside the
+        // question would invite a second pairing while the first is undecided.
+        if self.pairing.is_asking_about_a_qr_device() {
+            return false;
+        }
+        let Some(host_device_id) = self.local_device_id(cx) else {
+            return false;
+        };
+        let secret = match QrSecret::random() {
+            Ok(secret) => secret,
+            Err(error) => {
+                log::error!("no randomness for the pairing QR code: {error}");
+                self.report_refusal(
+                    RefusalNotice::NoQrRandomness,
+                    "Zode could not make a pairing QR code: no secure randomness is available."
+                        .to_string(),
+                    cx,
+                );
+                return false;
+            }
+        };
+        self.pairing
+            .start_qr_session(secret, host_device_id, Self::now(cx), unix_now());
+        self.mark_changed(cx);
+        true
+    }
+
+    /// The QR code being shown, while it is good, pairing is not locked and no
+    /// question is waiting for the person.
+    pub(crate) fn qr_pairing(&self, cx: &gpui::App) -> Option<QrPairing> {
+        if self.pairing.is_locked_out() || self.pairing.is_asking_about_a_qr_device() {
+            return None;
+        }
+        let now = Self::now(cx);
+        let session = self.pairing.qr_session(now)?;
+        Some(QrPairing {
+            uri: session.uri(self.keypair.public_key()),
+            confirm_code: session.confirm_code(self.keypair.public_key()),
+            remaining: session.remaining(now),
+        })
+    }
+
+    /// The code is off screen. A device that proved it and is only waiting for
+    /// its name to be looked up is not trusted: nobody can see the code any
+    /// more, and the person who closed it has not been asked about anything.
+    pub(crate) fn cancel_qr_pairing(&mut self, cx: &mut Context<RemoteHost>) {
+        if let Some(session_id) = self.pairing.cancel_qr_session() {
+            self.name_lookup = None;
+            self.end_session(session_id, cx);
+        }
+        self.mark_changed(cx);
     }
 
     /// The only way out of a pairing lockout.

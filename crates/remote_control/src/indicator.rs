@@ -14,11 +14,13 @@ use workspace::{MultiWorkspace, StatusItemView, Toast, Workspace, notifications:
 use crate::{
     pairing_flow::PendingDecision,
     pairing_modal::PairingModal,
+    qr_pairing_modal,
     remote_host::{HostState, RemoteHost, RemoteHostEvent, SessionInfo, problem_message},
     trusted_devices_modal::TrustedDevicesModal,
 };
 
 struct SessionStartedToast;
+struct DevicePairedToast;
 struct ProblemToast;
 
 pub struct RemoteControlIndicator {
@@ -252,6 +254,9 @@ impl RemoteControlIndicator {
                     RemoteHostEvent::SessionStarted { device_name } => {
                         this.announce(device_name, window, cx);
                     }
+                    RemoteHostEvent::DevicePaired { device_name } => {
+                        this.announce_paired(device_name, window, cx);
+                    }
                     RemoteHostEvent::Problem { message, retry } => {
                         this.report_problem(message, *retry, window, cx);
                     }
@@ -297,6 +302,26 @@ impl RemoteControlIndicator {
             .update(cx, |workspace, cx| {
                 workspace.show_toast(
                     Toast::new(NotificationId::unique::<SessionStartedToast>(), message),
+                    cx,
+                );
+            })
+            .log_err();
+    }
+
+    /// Once, in one window: a phone read the QR code and is now trusted.
+    fn announce_paired(&mut self, device_name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if !shows_toast(window, cx) {
+            return;
+        }
+        let message = if device_name.is_empty() {
+            "A device is now paired with this Zode".to_string()
+        } else {
+            format!("{device_name} is now paired with this Zode")
+        };
+        self.workspace
+            .update(cx, |workspace, cx| {
+                workspace.show_toast(
+                    Toast::new(NotificationId::unique::<DevicePairedToast>(), message),
                     cx,
                 );
             })
@@ -386,6 +411,8 @@ impl RemoteControlIndicator {
         ContextMenu::build(window, cx, move |menu, _window, _cx| {
             let disconnect_host = host.clone();
             let manage_host = host.clone();
+            let pair_host = host.clone();
+            let pair_workspace = workspace.clone();
             menu.when(push_needs_upgrade, |menu| menu.label(PUSH_NEEDS_PRO))
                 .when(upgrade, |menu| {
                     menu.entry("Upgrade\u{2026}", None, |_window, cx| {
@@ -402,6 +429,18 @@ impl RemoteControlIndicator {
                     crate::disable_remote_control(cx);
                 })
                 .separator()
+                .entry(
+                    "Pair a Phone with QR Code\u{2026}",
+                    None,
+                    move |window, cx| {
+                        let host = pair_host.clone();
+                        pair_workspace
+                            .update(cx, |workspace, cx| {
+                                qr_pairing_modal::open(host, workspace, window, cx);
+                            })
+                            .log_err();
+                    },
+                )
                 .entry("Manage Trusted Devices\u{2026}", None, move |window, cx| {
                     let host = manage_host.clone();
                     workspace
