@@ -156,6 +156,19 @@ macos_signing_notarize() {
     notarytool="$(xcode-select -p)/usr/bin/notarytool"
     key_file=$(mktemp)
     printf '%s\n' "$APPLE_NOTARIZATION_KEY" > "$key_file"
+    # The .p8 key as text; a base64 copy of it is accepted too. Anything else
+    # reaches notarytool as "invalidAsn1", which names neither the secret nor
+    # the cause.
+    if ! grep -q "BEGIN PRIVATE KEY" "$key_file"; then
+        if printf '%s' "$APPLE_NOTARIZATION_KEY" | base64 --decode 2>/dev/null | grep -q "BEGIN PRIVATE KEY"; then
+            printf '%s' "$APPLE_NOTARIZATION_KEY" | base64 --decode > "$key_file"
+        else
+            rm -f "$key_file"
+            echo "error: APPLE_NOTARIZATION_KEY is not the text of an App Store Connect API key (.p8)."
+            echo "Set it from the file itself: gh secret set APPLE_NOTARIZATION_KEY < AuthKey_<KEY_ID>.p8"
+            return 1
+        fi
+    fi
     local credentials=(--key "$key_file" --key-id "$APPLE_NOTARIZATION_KEY_ID" --issuer "$APPLE_NOTARIZATION_ISSUER_ID")
 
     output=$("$notarytool" submit --wait --output-format json "${credentials[@]}" "$file") || result=$?
