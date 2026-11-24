@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Temporary: runs the release's signing and notarization path on tiny stand-ins.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+source script/lib/macos-signing.sh
+work=$(mktemp -d)
+keychain=zode-rehearsal.keychain
+trap 'macos_signing_cleanup_keychain "$keychain"; rm -rf "$work"' EXIT
+
+certificate="$work/certificate"
+echo "$MACOS_CERTIFICATE" | base64 --decode > "$certificate"
+macos_signing_setup_keychain "$keychain" "$certificate" "$MACOS_CERTIFICATE_PASSWORD" "$MACOS_SIGNING_IDENTITY"
+IDENTITY=$MACOS_SIGNING_IDENTITY
+
+printf 'int main(void){return 0;}\n' > "$work/main.c"
+for driver in zode-db-one zode-db-two; do
+    clang -o "$work/$driver" "$work/main.c"
+    /usr/bin/codesign --force --timestamp --options runtime --sign "$IDENTITY" "$work/$driver" -v
+done
+echo "== drivers"
+macos_signing_zip_for_notarization "$work/drivers.zip" "$work/zode-db-one" "$work/zode-db-two"
+macos_signing_notarize "$work/drivers.zip"
+
+echo "== app + dmg"
+app="$work/dmg/Rehearsal.app"
+mkdir -p "$app/Contents/MacOS"
+clang -o "$app/Contents/MacOS/Rehearsal" "$work/main.c"
+cat > "$app/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>Rehearsal</string>
+<key>CFBundleIdentifier</key><string>dev.zode.signing-rehearsal</string>
+<key>CFBundleName</key><string>Rehearsal</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>1.0</string>
+<key>CFBundleVersion</key><string>1</string>
+</dict></plist>
+PLIST
+/usr/bin/codesign --deep --force --timestamp --options runtime --entitlements crates/zode/resources/zode.entitlements --sign "$IDENTITY" "$app/Contents/MacOS/Rehearsal" -v
+/usr/bin/codesign --force --timestamp --options runtime --entitlements crates/zode/resources/zode.entitlements --sign "$IDENTITY" "$app" -v
+dmg="$work/Rehearsal.dmg"
+hdiutil create -volname Rehearsal -srcfolder "$work/dmg" -ov -format UDZO "$dmg"
+/usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "$dmg" -v
+macos_signing_notarize "$dmg"
+"$(xcode-select -p)/usr/bin/stapler" staple "$dmg"
+spctl --assess --type open --context context:primary-signature -v "$dmg"
+echo "REHEARSAL PASSED"

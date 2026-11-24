@@ -1,0 +1,22 @@
+# Temporary: the release's signing and notarization on tiny stand-ins.
+name: rehearse_macos_signing
+on:
+  push:
+    branches:
+    - ci/rehearse-macos-signing
+permissions:
+  contents: read
+jobs:
+  rehearse:
+    runs-on: macos-15
+    steps:
+    - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+    - name: rehearse signing and notarization
+      env:
+        MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+        MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        MACOS_SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
+        APPLE_NOTARIZATION_KEY: ${{ secrets.APPLE_NOTARIZATION_KEY }}
+        APPLE_NOTARIZATION_KEY_ID: ${{ secrets.APPLE_NOTARIZATION_KEY_ID }}
+        APPLE_NOTARIZATION_ISSUER_ID: ${{ secrets.APPLE_NOTARIZATION_ISSUER_ID }}
+      run: script/rehearse-macos-signing
