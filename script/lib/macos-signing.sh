@@ -131,3 +131,59 @@ macos_signing_cleanup_keychain() {
     fi
     security delete-keychain "$keychain" 2>/dev/null || true
 }
+
+# Puts <file>... into one zip at <zip> for notarization. `ditto -c -k`
+# archives a single source, so the files are gathered into one folder first;
+# notarytool wants the macOS metadata that ditto keeps and `zip` drops.
+macos_signing_zip_for_notarization() {
+    local zip=$1
+    shift
+    local staging
+    staging="$(mktemp -d)/notarize"
+    mkdir -p "$staging"
+    cp -p "$@" "$staging/"
+    /usr/bin/ditto -c -k --keepParent "$staging" "$zip"
+    rm -rf "$(dirname "$staging")"
+}
+
+# Submits <file> (a .zip, .dmg or .pkg) to Apple's notary service, waits for
+# the verdict, and returns 1 unless it is Accepted; a rejection prints Apple's
+# log, which names every binary and the reason. `submit --wait` alone exits 0
+# for an Invalid submission too.
+macos_signing_notarize() {
+    local file=$1 key_file output status submission_id result=0
+    local notarytool
+    notarytool="$(xcode-select -p)/usr/bin/notarytool"
+    key_file=$(mktemp)
+    printf '%s\n' "$APPLE_NOTARIZATION_KEY" > "$key_file"
+    # The .p8 key as text; a base64 copy of it is accepted too. Anything else
+    # reaches notarytool as "invalidAsn1", which names neither the secret nor
+    # the cause.
+    if ! grep -q "BEGIN PRIVATE KEY" "$key_file"; then
+        if printf '%s' "$APPLE_NOTARIZATION_KEY" | base64 --decode 2>/dev/null | grep -q "BEGIN PRIVATE KEY"; then
+            printf '%s' "$APPLE_NOTARIZATION_KEY" | base64 --decode > "$key_file"
+        else
+            rm -f "$key_file"
+            echo "error: APPLE_NOTARIZATION_KEY is not the text of an App Store Connect API key (.p8)."
+            echo "Set it from the file itself: gh secret set APPLE_NOTARIZATION_KEY < AuthKey_<KEY_ID>.p8"
+            return 1
+        fi
+    fi
+    local credentials=(--key "$key_file" --key-id "$APPLE_NOTARIZATION_KEY_ID" --issuer "$APPLE_NOTARIZATION_ISSUER_ID")
+
+    output=$("$notarytool" submit --wait --output-format json "${credentials[@]}" "$file") || result=$?
+    echo "$output"
+    status=$(grep -o '"status" *: *"[^"]*"' <<< "$output" | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/' || true)
+    submission_id=$(grep -o '"id" *: *"[^"]*"' <<< "$output" | head -n 1 | sed -E 's/.*"([^"]*)"$/\1/' || true)
+
+    if [[ $result -ne 0 || "$status" != "Accepted" ]]; then
+        echo "error: notarization of $(basename "$file") ended as '${status:-unknown}' (notarytool exit ${result})."
+        if [[ -n "$submission_id" ]]; then
+            "$notarytool" log "$submission_id" "${credentials[@]}" || true
+        fi
+        rm -f "$key_file"
+        return 1
+    fi
+    rm -f "$key_file"
+    echo "Notarized $(basename "$file")"
+}

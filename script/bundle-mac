@@ -267,7 +267,6 @@ function sign_app_binaries() {
         rm -rf ${dmg_source_directory}
         mkdir -p ${dmg_source_directory}
         mv "${app_path}" "${dmg_source_directory}"
-        notarization_key_file=$(mktemp)
 
         echo "Adding symlink to /Applications to ${dmg_source_directory}"
         ln -s /Applications ${dmg_source_directory}
@@ -287,9 +286,7 @@ function sign_app_binaries() {
         if [[ $can_code_sign = true ]]; then
             echo "Notarizing DMG with Apple"
             /usr/bin/codesign --deep --force --timestamp --options runtime --sign "$IDENTITY" "$(pwd)/${dmg_file_path}" -v
-            echo "$APPLE_NOTARIZATION_KEY" > "$notarization_key_file"
-            "${xcode_bin_dir_path}/notarytool" submit --wait --key "$notarization_key_file" --key-id "$APPLE_NOTARIZATION_KEY_ID" --issuer "$APPLE_NOTARIZATION_ISSUER_ID" "${dmg_file_path}"
-            rm "$notarization_key_file"
+            macos_signing_notarize "${dmg_file_path}"
             "${xcode_bin_dir_path}/stapler" staple "${dmg_file_path}"
         fi
 
@@ -323,16 +320,14 @@ function package_database_drivers() {
         done
 
         echo "Notarizing database drivers with Apple"
-        local notarization_bundle
-        local drivers_key_file
+        local notarization_bundle driver_paths=()
         notarization_bundle="$(mktemp -d)/database-drivers.zip"
-        drivers_key_file=$(mktemp)
-        # `ditto -c -k` rather than `zip`: notarytool rejects an archive that
-        # does not preserve macOS metadata, and this is the form Apple documents.
-        (cd "${binaries}" && /usr/bin/ditto -c -k --keepParent "${database_drivers[@]}" "${notarization_bundle}") ||             /usr/bin/ditto -c -k "${binaries}" "${notarization_bundle}"
-        echo "$APPLE_NOTARIZATION_KEY" > "$drivers_key_file"
-        "$(xcode-select -p)/usr/bin/notarytool" submit --wait             --key "$drivers_key_file"             --key-id "$APPLE_NOTARIZATION_KEY_ID"             --issuer "$APPLE_NOTARIZATION_ISSUER_ID"             "${notarization_bundle}"
-        rm "$drivers_key_file"
+        for driver in "${database_drivers[@]}"; do
+            driver_paths+=("${binaries}/${driver}")
+        done
+        macos_signing_zip_for_notarization "${notarization_bundle}" "${driver_paths[@]}"
+        macos_signing_notarize "${notarization_bundle}"
+        rm -f "${notarization_bundle}"
         # Not stapled: a staple attaches to a container, and these ship as bare
         # executables inside a tarball. Gatekeeper checks the cdhash with Apple
         # instead, which is what the submission above registered.
