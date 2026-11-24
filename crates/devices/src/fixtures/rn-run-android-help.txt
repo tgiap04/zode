@@ -1,0 +1,43 @@
+npm warn Unknown user config "python". This will stop working in the next major version of npm. See `npm help npmrc` for supported config options.
+Usage: react-native run-android [options]
+
+builds your app and starts it on a connected Android emulator or device
+
+Options:
+  --verbose                 Increase logging verbosity
+  --mode <string>           Specify your app's build variant
+  --tasks <list>            Run custom Gradle tasks. By default it's
+                            "assembleDebug". Will override passed mode and
+                            variant arguments.
+  --active-arch-only        Build native libraries only for the current device
+                            architecture for debug builds. (default: false)
+  --extra-params <string>   Custom params passed to gradle build command
+  -i --interactive          Explicitly select build type and flavour to use
+                            before running a build
+  --no-packager             Do not launch packager while running the app
+  --port <number>            (default: 8081)
+  --terminal <string>       Launches the Metro Bundler in a new window using
+                            the specified terminal path.
+  --appId <string>          Specify an applicationId to launch after build. If
+                            not specified, `package` from AndroidManifest.xml
+                            will be used. (default: "")
+  --appIdSuffix <string>    Specify an applicationIdSuffix to launch after
+                            build. (default: "")
+  --main-activity <string>  Name of the activity to start
+  --device <string>         Explicitly set the device to use by name. The value
+                            is not required if you have a single device
+                            connected.
+  --deviceId <string>       **DEPRECATED** Builds your app and starts it on a
+                            specific device/simulator with the given device id
+                            (listed by running "adb devices" on the command
+                            line).
+  --list-devices            Lists all available Android devices and simulators
+                            and let you choose one to run the app (default:
+                            false)
+  --binary-path <string>    Path relative to project root where pre-built .apk
+                            binary lives.
+  --user <number>           Id of the User Profile you want to install the app
+                            on.
+  -h, --help                display help for command
+
+

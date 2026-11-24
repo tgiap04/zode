@@ -106,6 +106,7 @@ pub(crate) fn run_tests() -> Workflow {
                 .pull_request(PullRequest::default().add_branch("**"))
                 .merge_group(MergeGroup::default()),
         )
+        .permissions(Permissions::default().contents(Level::Read))
         .concurrency(vars::one_workflow_per_non_main_branch())
         .add_env(("CARGO_TERM_COLOR", "always"))
         .add_env(("RUST_BACKTRACE", 1))
@@ -526,6 +527,7 @@ fn check_wasm() -> NamedJob {
             .add_step(steps::setup_cargo_config(Platform::Linux))
             .add_step(steps::cache_rust_dependencies_namespace())
             .add_step(install_nightly_wasm_toolchain())
+            .add_step(steps::expose_actions_cache())
             .add_step(steps::setup_sccache(Platform::Linux))
             .add_step(cargo_check_wasm())
             .add_step(steps::show_sccache_stats(Platform::Linux))
@@ -541,6 +543,7 @@ fn check_workspace_binaries() -> NamedJob {
             .add_step(steps::setup_cargo_config(Platform::Linux))
             .add_step(steps::cache_rust_dependencies_namespace())
             .map(steps::install_linux_dependencies)
+            .add_step(steps::expose_actions_cache())
             .add_step(steps::setup_sccache(Platform::Linux))
             // `cargo build -p collab` was here. That crate went with the collaboration
             // server, so the step could only ever fail; the workspace build below already
@@ -594,6 +597,7 @@ pub(crate) fn clippy_on_ref(
         .when_some(target, |this, target| {
             this.add_step(steps::install_rustup_target(target))
         })
+        .add_step(steps::expose_actions_cache())
         .add_step(steps::setup_sccache(platform))
         .add_step(steps::clippy(platform, target))
         .add_step(steps::show_sccache_stats(platform));
@@ -680,10 +684,12 @@ fn run_platform_tests_impl(
             .when(platform == Platform::Mac, |job| {
                 job.add_step(steps::download_wasi_sdk())
             })
+            .add_step(steps::expose_actions_cache())
             .add_step(steps::setup_sccache(platform))
             .when(filter_packages, |job| {
                 job.add_step(
-                    steps::cargo_nextest(platform).with_changed_packages_filter("orchestrate"),
+                    steps::cargo_nextest(platform)
+                        .with_changed_packages_filter(platform, "orchestrate"),
                 )
             })
             .when(!filter_packages, |job| {
@@ -709,13 +715,22 @@ pub(crate) fn check_postgres_and_protobuf_migrations() -> NamedJob {
     }
 
     fn bufbuild_setup_action() -> Step<Use> {
-        named::uses!("bufbuild", "buf-setup-action", "v1")
-            .add_with(("version", "v1.29.0"))
-            .add_with(("github_token", vars::GITHUB_TOKEN))
+        named::uses!(
+            "bufbuild",
+            "buf-setup-action",
+            "a47c93e0b1648d5651a065437926377d060baa99", // v1.50.0
+        )
+        .add_with(("version", "v1.29.0"))
+        .add_with(("github_token", vars::GITHUB_TOKEN))
     }
 
     fn bufbuild_breaking_action() -> Step<Use> {
-        named::uses!("bufbuild", "buf-breaking-action", "v1").add_with(("input", "crates/proto/proto/"))
+        named::uses!(
+            "bufbuild",
+            "buf-breaking-action",
+            "c57b3d842a5c3f3b454756ef65305a50a587c5ba", // v1.1.4
+        )
+        .add_with(("input", "crates/proto/proto/"))
             .add_with(("against", "https://github.com/${GITHUB_REPOSITORY}.git#branch=${BUF_BASE_BRANCH},subdir=crates/proto/proto/"))
     }
 
@@ -758,6 +773,7 @@ fn doctests() -> NamedJob {
             .add_step(steps::cache_rust_dependencies_namespace())
             .map(steps::install_linux_dependencies)
             .add_step(steps::setup_cargo_config(Platform::Linux))
+            .add_step(steps::expose_actions_cache())
             .add_step(steps::setup_sccache(Platform::Linux))
             .add_step(run_doctests())
             .add_step(steps::show_sccache_stats(Platform::Linux))

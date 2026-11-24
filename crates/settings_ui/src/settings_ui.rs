@@ -482,6 +482,7 @@ fn init_renderers(cx: &mut App) {
         .add_basic_renderer::<settings::SnippetSortOrder>(render_dropdown)
         .add_basic_renderer::<settings::ClosePosition>(render_dropdown)
         .add_basic_renderer::<settings::DockSide>(render_dropdown)
+        .add_basic_renderer::<settings::TranslateProviderContent>(render_dropdown)
         .add_basic_renderer::<settings::TerminalDockPosition>(render_dropdown)
         .add_basic_renderer::<settings::DockPosition>(render_dropdown)
         .add_basic_renderer::<settings::GitGutterSetting>(render_dropdown)
@@ -1110,16 +1111,16 @@ impl SettingsPageItem {
                                 .w_full()
                                 .max_w_1_2()
                                 .child(Label::new(action_link.title.clone()))
-                                .when_some(
-                                    action_link.description.as_ref(),
-                                    |this, description| {
-                                        this.child(
-                                            Label::new(description.clone())
-                                                .size(LabelSize::Small)
-                                                .color(Color::Muted),
-                                        )
-                                    },
-                                ),
+                                .when_some(action_link.description.as_ref(), |this, description| {
+                                    this.child(
+                                        Label::new(description.clone())
+                                            .size(LabelSize::Small)
+                                            .color(Color::Muted),
+                                    )
+                                })
+                                .when_some(action_link.status, |this, status| {
+                                    this.child(Label::new(status(cx)).size(LabelSize::Small))
+                                }),
                         )
                         .child(
                             Button::new(
@@ -1389,6 +1390,12 @@ impl PartialEq for SubPageLink {
 struct ActionLink {
     title: SharedString,
     description: Option<SharedString>,
+    /// Lets `OpenSettingsAt` and `#path` searches find a link that edits
+    /// something kept outside settings.json (see [`SettingField.json_path`]).
+    json_path: Option<&'static str>,
+    /// A line read on every frame, for state that lives outside settings
+    /// (an account's sign-in), so it stays current while the page is open.
+    status: Option<fn(&App) -> SharedString>,
     button_text: SharedString,
     on_click: Arc<dyn Fn(&mut SettingsWindow, &mut Window, &mut App) + Send + Sync>,
     files: FileMask,
@@ -1521,6 +1528,11 @@ impl SettingsWindow {
             cx.notify();
         })
         .detach();
+
+        // The GitHub section shows the GitHub tab's sign-in, which changes
+        // without any setting changing.
+        cx.observe_global_in::<github::GithubSignInStatus>(window, |_, _, cx| cx.notify())
+            .detach();
 
         use feature_flags::FeatureFlagAppExt as _;
         let mut last_is_staff = cx.is_staff();
@@ -2083,6 +2095,7 @@ impl SettingsWindow {
                         );
                     }
                     SettingsPageItem::ActionLink(action_link) => {
+                        json_path = action_link.json_path;
                         documents.push(SearchDocument {
                             id: key_index,
                             words: split_into_words(&[
@@ -4787,6 +4800,75 @@ pub mod test {
                 .any(|window| window.downcast::<SettingsWindow>().is_some())
         });
         assert!(opened, "no settings window opened");
+    }
+
+    /// The translation tooltip sends people here with `OpenSettingsAt { path: "translate" }`;
+    /// the key and shortcut links live outside settings.json, and must not be filtered away.
+    #[gpui::test]
+    async fn open_settings_at_translate_shows_the_whole_translate_page(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            register_settings(cx);
+            release_channel::init_test(
+                semver::Version::new(0, 0, 0),
+                release_channel::ReleaseChannel::Dev,
+                cx,
+            );
+            AppState::set_global(AppState::test(cx), cx);
+            crate::init(cx);
+        });
+
+        cx.update(|cx| {
+            cx.dispatch_action(&OpenSettingsAt {
+                path: "translate".into(),
+            })
+        });
+        cx.run_until_parked();
+
+        let settings_window = cx
+            .update(|cx| {
+                cx.windows()
+                    .into_iter()
+                    .find_map(|window| window.downcast::<SettingsWindow>())
+            })
+            .expect("a settings window opened");
+        let visible_titles = settings_window
+            .read_with(cx, |settings_window, _| {
+                let page_index = settings_window
+                    .pages
+                    .iter()
+                    .position(|page| page.title == "Translate")?;
+                let filter = settings_window.filter_table.get(page_index)?;
+                Some(
+                    settings_window.pages[page_index]
+                        .items
+                        .iter()
+                        .zip(filter)
+                        .filter(|(_, visible)| **visible)
+                        .filter_map(|(item, _)| match item {
+                            SettingsPageItem::SettingItem(item) => Some(item.title.to_string()),
+                            SettingsPageItem::DynamicItem(item) => {
+                                Some(item.discriminant.title.to_string())
+                            }
+                            SettingsPageItem::ActionLink(link) => Some(link.title.to_string()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .expect("settings window is alive")
+            .unwrap_or_default();
+        assert_eq!(
+            visible_titles,
+            vec![
+                "Provider",
+                "Max Characters",
+                "Timeout (seconds)",
+                "API Key",
+                "Shortcuts"
+            ]
+        );
     }
 
     #[gpui::test]

@@ -14,6 +14,7 @@ path = "src/sidebar.rs"
 [dependencies]
 container_ui.workspace = true
 database_ui.workspace = true
+github_ui.workspace = true
 agent_ui.workspace = true
 anyhow.workspace = true
 collections.workspace = true
@@ -46,6 +47,8 @@ zode_account = { workspace = true, features = ["test-support"] }
 # exit wakes the GPUI test scheduler from a blocking thread and aborts the run.
 container_ui = { workspace = true, features = ["test-support"] }
 editor = { workspace = true, features = ["test-support"] }
+# So pressing the GitHub button in a test reaches no keychain, `gh` or network.
+github_ui = { workspace = true, features = ["test-support"] }
 fs = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 project = { workspace = true, features = ["test-support"] }

@@ -174,7 +174,7 @@ impl Sidebar {
             .into_any_element()
     }
 
-    /// The buttons for the two tools that open as editor tabs.
+    /// The buttons for the tools that open as editor tabs.
     ///
     /// One block, because they are one group: both open a tab of their own the
     /// way the agent buttons below them do, and the person who asked for the
@@ -190,6 +190,9 @@ impl Sidebar {
             .border_color(cx.theme().colors().border)
             .child(self.render_rail_database(window, cx))
             .child(self.render_rail_container(window, cx))
+            .when(Self::shows_github_button(cx), |block| {
+                block.child(self.render_rail_github(window, cx))
+            })
             .into_any_element()
     }
 

@@ -947,6 +947,30 @@ pub mod database {
     );
 }
 
+pub mod github {
+    use gpui::actions;
+
+    actions!(
+        github,
+        [
+            /// Opens the GitHub tab, or steps back to the tab that was being
+            /// read.
+            Toggle,
+            /// Opens the GitHub tab and starts Sign in with GitHub.
+            SignIn,
+            /// Forgets the token Zode signed in to GitHub with and opens
+            /// GitHub's page for revoking Zode's access.
+            Disconnect,
+            /// Makes the selection bold in a GitHub description or comment.
+            FormatBold,
+            /// Makes the selection italic in a GitHub description or comment.
+            FormatItalic,
+            /// Makes the selection code in a GitHub description or comment.
+            FormatCode,
+        ]
+    );
+}
+
 pub mod container {
     use gpui::actions;
 
@@ -1063,6 +1087,20 @@ pub mod notebook {
             EnterEditMode,
             /// Exits the cell editor and returns to cell command mode.
             EnterCommandMode,
+        ]
+    );
+}
+
+pub mod translate {
+    use gpui::actions;
+
+    actions!(
+        translate,
+        [
+            /// Opens the dialog that stores the API key of the translation service.
+            SetApiKey,
+            /// Opens the dialog that edits the language pairs and their shortcuts.
+            EditShortcuts,
         ]
     );
 }

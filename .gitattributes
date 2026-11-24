@@ -3,3 +3,9 @@
 
 # Ensure the WSL script always has LF line endings, even on Windows
 crates/zode/resources/windows/zode.sh text eol=lf
+
+# Device tool output recorded on a Mac; tests compare it byte for byte
+crates/devices/src/fixtures/** text eol=lf
+# The emulator console answers with CRLF; these keep its bytes as recorded
+crates/devices/src/fixtures/adb-emu-avd-name.txt -text
+crates/devices/src/fixtures/adb-emu-kill.txt -text

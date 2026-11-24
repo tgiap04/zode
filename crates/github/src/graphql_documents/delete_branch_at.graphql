@@ -1,0 +1,15 @@
+mutation DeleteBranchAt(
+  $repositoryId: ID!
+  $refName: GitRefname!
+  $expectedOid: GitObjectID!
+  $deletedOid: GitObjectID!
+) {
+  updateRefs(
+    input: {
+      repositoryId: $repositoryId
+      refUpdates: [{ name: $refName, beforeOid: $expectedOid, afterOid: $deletedOid }]
+    }
+  ) {
+    clientMutationId
+  }
+}

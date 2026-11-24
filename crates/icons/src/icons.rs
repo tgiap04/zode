@@ -215,6 +215,7 @@ pub enum IconName {
     SignalMedium,
     Slash,
     Sliders,
+    Smartphone,
     Space,
     Sparkle,
     Split,

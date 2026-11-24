@@ -22,6 +22,7 @@ mod rail_agents;
 mod rail_avatar;
 mod rail_container;
 mod rail_database;
+mod rail_github;
 mod rail_item;
 mod rail_panels;
 #[cfg(test)]

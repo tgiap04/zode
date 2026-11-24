@@ -505,7 +505,7 @@ impl Focusable for KeymapEditor {
     }
 }
 /// Helper function to check if two keystroke sequences match exactly
-fn keystrokes_match_exactly(
+pub fn keystrokes_match_exactly(
     keystrokes1: &[KeybindingKeystroke],
     keystrokes2: &[KeybindingKeystroke],
 ) -> bool {
@@ -529,7 +529,7 @@ fn disabled_binding_matches_context(
     }
 }
 
-fn binding_is_unbound_by_unbind(
+pub fn binding_is_unbound_by_unbind(
     binding: &gpui::KeyBinding,
     binding_index: usize,
     all_bindings: &[&gpui::KeyBinding],

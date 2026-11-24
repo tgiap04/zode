@@ -1,0 +1,5 @@
+# xcrun devicectl list devices --json-output <file> -q
+# exit code: 0; stdout: empty; stderr below
+Failed to load provisioning paramter list due to error: Error Domain=com.apple.dt.CoreDeviceError Code=1002 "No provider was found." UserInfo={NSLocalizedDescription=No provider was found.}.
+`devicectl manage create` may support a reduced set of arguments.
+xcrun devicectl list devices --json-output devicectl-list-devices.json -q  0.04s user 0.02s system 74% cpu 0.073 total

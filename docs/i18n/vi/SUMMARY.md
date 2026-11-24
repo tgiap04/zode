@@ -171,6 +171,9 @@
 - [Thông báo khi agent hoàn tất](./agent-finished-notifications.md)
 - [Chỉ báo dung lượng dự án](./project-footprint-indicator.md)
 - [Nhắc nhở và đồng hồ tập trung](./reminders.md)
+- [Thiết bị](./devices.md)
+- [Dịch](./translate.md)
+- [GitHub](./github.md)
 
 # Phát triển Zode
 

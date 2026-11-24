@@ -655,6 +655,11 @@ fn main() {
         agent_ui::init(cx);
         database_ui::init(cx);
         container_ui::init(cx);
+        devices_ui::init(cx);
+        github_ui::init(cx);
+        translate::init(cx);
+        translate_settings::init(cx);
+        translate_ui::init(cx);
         floating_pane::init(cx);
         feedback::init(cx);
         markdown_preview::init(cx);

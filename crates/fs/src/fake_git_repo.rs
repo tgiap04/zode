@@ -62,6 +62,9 @@ pub struct FakeGitRepositoryState {
     pub branches: HashSet<String>,
     /// List of remotes, keys are names and values are URLs
     pub remotes: HashMap<String, String>,
+    /// What each remote holds, by remote name then ref name, for a fetch
+    /// of one refspec to copy from.
+    pub remote_refs: HashMap<String, HashMap<String, String>>,
     pub simulated_index_write_error_message: Option<String>,
     pub simulated_create_worktree_error: Option<String>,
     /// Fails the graph's log after it has streamed `graph_commits`, as a log that dies partway does.
@@ -72,6 +75,9 @@ pub struct FakeGitRepositoryState {
     pub graph_fetch_count: usize,
     /// Makes a scoped diff never finish, as a repository on a stalled disk would.
     pub simulated_scoped_diff_hangs: bool,
+    /// Makes `create_branch` start from HEAD whatever base it is given, as a
+    /// host older than the base field does.
+    pub simulated_create_branch_drops_base: bool,
     pub refs: HashMap<String, String>,
     pub graph_commits: Vec<Arc<InitialGraphCommitData>>,
     pub graph_commit_details: HashMap<Oid, GraphCommitData>,
@@ -94,10 +100,12 @@ impl FakeGitRepositoryState {
             simulated_commit_data_error: None,
             graph_fetch_count: 0,
             simulated_scoped_diff_hangs: false,
+            simulated_create_branch_drops_base: false,
             refs: HashMap::from_iter([("HEAD".into(), "abc".into())]),
             merge_base_contents: Default::default(),
             oids: Default::default(),
             remotes: HashMap::default(),
+            remote_refs: HashMap::default(),
             graph_commits: Vec::new(),
             graph_commit_details: HashMap::default(),
             commit_history: Vec::new(),
@@ -271,10 +279,19 @@ impl GitRepository for FakeGitRepository {
         })
     }
 
+    /// A ref the fake knows answers with its commit, as `git show` would;
+    /// anything else is taken to be a commit already.
     fn show(&self, commit: String) -> BoxFuture<'_, Result<CommitDetails>> {
-        async {
+        // Answered at once, without the simulated delay the other calls take:
+        // `show` runs while a repository loads, and a delay here reorders what
+        // every test that opens one sees.
+        let known = self.fs.with_git_state(&self.dot_git_path, false, |state| {
+            state.refs.get(&commit).cloned()
+        });
+        async move {
+            let sha = known?.unwrap_or(commit);
             Ok(CommitDetails {
-                sha: commit.into(),
+                sha: sha.into(),
                 message: "initial commit".into(),
                 ..Default::default()
             })
@@ -906,10 +923,11 @@ impl GitRepository for FakeGitRepository {
         })
     }
 
+    /// As `git switch -c`: the new branch is checked out.
     fn create_branch(
         &self,
         name: String,
-        _base_branch: Option<String>,
+        base_branch: Option<String>,
     ) -> BoxFuture<'_, Result<()>> {
         self.with_state_async(true, move |state| {
             if let Some((remote, _)) = name.split_once('/')
@@ -917,7 +935,27 @@ impl GitRepository for FakeGitRepository {
             {
                 state.remotes.insert(remote.to_owned(), "".to_owned());
             }
-            state.branches.insert(name);
+            let base_branch = base_branch.filter(|_| !state.simulated_create_branch_drops_base);
+            // As git does: a base must name something, and no base means
+            // HEAD. A base known only as a branch name has no commit here.
+            let commit = match base_branch {
+                None => state.refs.get("HEAD").cloned(),
+                Some(base) => match state.refs.get(&base) {
+                    Some(commit) => Some(commit.clone()),
+                    None => {
+                        let branch = base.strip_prefix("refs/heads/").unwrap_or(&base);
+                        if !state.branches.contains(branch) {
+                            bail!("invalid reference: {base}");
+                        }
+                        None
+                    }
+                },
+            };
+            if let Some(commit) = commit {
+                state.refs.insert(format!("refs/heads/{name}"), commit);
+            }
+            state.branches.insert(name.clone());
+            state.current_branch_name = Some(name);
             Ok(())
         })
     }
@@ -935,11 +973,16 @@ impl GitRepository for FakeGitRepository {
         })
     }
 
+    /// As git: the branch checked out cannot be deleted.
     fn delete_branch(&self, _is_remote: bool, name: String) -> BoxFuture<'_, Result<()>> {
         self.with_state_async(true, move |state| {
+            if state.current_branch_name.as_deref() == Some(name.as_str()) {
+                bail!("cannot delete branch '{name}' checked out");
+            }
             if !state.branches.remove(&name) {
                 bail!("no such branch: {name}");
             }
+            state.refs.remove(&format!("refs/heads/{name}"));
             Ok(())
         })
     }
@@ -1123,12 +1166,42 @@ impl GitRepository for FakeGitRepository {
 
     fn fetch(
         &self,
-        _fetch_options: FetchOptions,
+        fetch_options: FetchOptions,
         _askpass: AskPassDelegate,
         _env: Arc<HashMap<String, String>>,
         _cx: AsyncApp,
     ) -> BoxFuture<'_, Result<git::repository::RemoteCommandOutput>> {
-        unimplemented!()
+        self.with_state_async(true, move |state| {
+            fetch_options.validate()?;
+            match &fetch_options {
+                FetchOptions::All => {}
+                FetchOptions::Remote(remote) => {
+                    if !state.remotes.contains_key(remote.name.as_ref()) {
+                        bail!("'{}' does not appear to be a git repository", remote.name);
+                    }
+                }
+                FetchOptions::Refspec {
+                    remote,
+                    source,
+                    destination,
+                } => {
+                    if !state.remotes.contains_key(remote.name.as_ref()) {
+                        bail!("'{}' does not appear to be a git repository", remote.name);
+                    }
+                    let commit = state
+                        .remote_refs
+                        .get(remote.name.as_ref())
+                        .and_then(|refs| refs.get(source.as_ref()))
+                        .with_context(|| format!("couldn't find remote ref {source}"))?
+                        .clone();
+                    state.refs.insert(destination.to_string(), commit);
+                }
+            }
+            Ok(git::repository::RemoteCommandOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        })
     }
 
     fn get_all_remotes(&self) -> BoxFuture<'_, Result<Vec<Remote>>> {

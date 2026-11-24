@@ -1,0 +1,16 @@
+query ProjectOwners($owner: String!, $name: String!) {
+  viewer {
+    id
+    login
+    avatarUrl(size: 40)
+  }
+  repository(owner: $owner, name: $name) {
+    id
+    owner {
+      __typename
+      id
+      login
+      avatarUrl(size: 40)
+    }
+  }
+}

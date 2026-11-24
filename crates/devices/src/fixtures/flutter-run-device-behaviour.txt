@@ -1,0 +1,34 @@
+# flutter run -d emulator-5554 --no-pub   (first 22 lines; stdin from a pipe, not a TTY)
+Launching lib/main.dart on sdk gphone16k arm64 in debug mode...
+Running Gradle task 'assembleDebug'...                           1362.5s
+✓ Built build/app/outputs/flutter-apk/app-debug.apk
+Installing build/app/outputs/flutter-apk/app-debug.apk...          325ms
+D/FlutterJNI( 7139): Beginning load of flutter...
+D/FlutterJNI( 7139): flutter (null) was loaded normally!
+I/flutter ( 7139): [IMPORTANT:flutter/shell/platform/android/android_context_gl_impeller.cc(104)] Using the Impeller rendering backend (OpenGLES).
+D/FlutterRenderer( 7139): Width is zero. 0,0
+Syncing files to device sdk gphone16k arm64...                      73ms
+
+Flutter run key commands.
+r Hot reload. 🔥🔥🔥
+R Hot restart.
+h List all available interactive commands.
+d Detach (terminate "flutter run" but leave application running).
+c Clear the screen
+q Quit (terminate the application on the device).
+
+A Dart VM Service on sdk gphone16k arm64 is available at: http://127.0.0.1:55396/VN13PC_SfIk=/
+The Flutter DevTools debugger and profiler on sdk gphone16k arm64 is available at: http://127.0.0.1:55396/VN13PC_SfIk=/devtools/?uri=ws://127.0.0.1:55396/VN13PC_SfIk=/ws
+I/Choreographer( 7139): Skipped 82 frames!  The application may be doing too much work on its main thread.
+D/WindowOnBackDispatcher( 7139): setTopOnBackInvokedCallback (unwrapped): android.app.Activity$$ExternalSyntheticLambda0@81a7357
+...
+# after SIGINT to the process group (Ctrl-C): last lines, flutter exits and the app process is gone on the device
+D/ProfileInstaller( 7139): Installing profile for dev.zodeverify.vsample
+Lost connection to device.
+flutter exited rc=0
+
+# flutter run -d <udid of a Shutdown simulator> --no-pub   -> exit 1
+No devices found yet. Checking for wireless devices...
+
+No supported devices found with name or id matching '00000000-0000-4000-8000-000000000001'.
+

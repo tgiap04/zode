@@ -124,7 +124,7 @@ hỗ trợ; với Zode cũ hơn thì không có và không có gì khác thay đ
 
 ### Thông báo đẩy
 
-Với **Pro** hoặc **Team**, trình duyệt đã ghép nối với A nhận được thông báo đẩy
+Trình duyệt đã ghép nối với A nhận được thông báo đẩy
 khi một agent trên A cần bạn, kể cả khi trang đã đóng hoặc điện thoại đã khoá:
 
 | Sự kiện           | Khi nào                                                                             |
@@ -147,7 +147,7 @@ khi một agent trên A cần bạn, kể cả khi trang đã đóng hoặc đi�
 - A mã hoá từng thông báo bằng khoá chỉ trình duyệt đó giữ. Server
   zodekit.com và dịch vụ push của Apple hay Google chuyển tiếp mà không
   đọc được tên tab. Chúng vẫn biết lúc nào có thông báo được gửi.
-- Ở gói Free, trang báo thông báo không nằm trong gói và có nút **Xem các gói**.
+- Thông báo đẩy có ở mọi gói, kể cả Free.
 
 ## Điều khiển A từ một Zode khác
 
@@ -237,7 +237,7 @@ dừng lại và yêu cầu bạn đăng nhập lại, còn khoá và các ghép
 | Băng thông qua relay                        | Free: 5 GiB mỗi ngày cho mỗi tài khoản; Pro và Team: không giới hạn |
 | Yêu cầu liệt kê file và phiên, mỗi thiết bị | 4 cùng lúc; vượt quá thì yêu cầu được trả lời `rate_limited`        |
 | Tiếp tục phiên, mỗi thiết bị                | Một lần mỗi lúc, cách nhau 3 giây; sớm hơn là `rate_limited`        |
-| Thông báo đẩy                               | Pro và Team; tối đa 10 mỗi phút và 60 mỗi giờ cho mỗi máy chủ       |
+| Thông báo đẩy                               | Mọi gói; tối đa 10 mỗi phút và 60 mỗi giờ cho mỗi máy chủ           |
 | Ngắt khi rảnh                               | `idle_timeout_minutes`, mặc định 30                                 |
 | Terminal trong dự án từ một Zode khác       | 16 cùng lúc, tính cả những cái đang đóng                            |
 | Project server đang dừng cùng lúc           | 4; dự án khác bị từ chối với `rate_limited`                         |

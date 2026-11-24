@@ -9,6 +9,9 @@ extend-exclude = [
     # Contributor names aren't typos.
     ".mailmap",
 
+    # GitHub's public GraphQL schema, vendored as is for the query check.
+    "crates/github/test-data/schema.docs.graphql",
+
     # Vietnamese prose: its words (tham, thay, ...) read as English misspellings.
     "docs/i18n/",
     ".tobi/memory/",
@@ -80,6 +83,8 @@ extend-exclude = [
     "docs/src/vim.md",
     # Test fixtures use deliberately mangled strings such as "AyCD{}GHIzJ".
     "crates/text/src/tests.rs",
+    # Recorded tool output, Apple's own misspellings ("paramter") included.
+    "crates/devices/src/fixtures/",
 ]
 
 [default]
@@ -130,5 +135,9 @@ extend-ignore-re = [
     # the shape they actually are, so "asteroid" would be the misspelling here.
     "astroid",
     "Astroid",
+    # A device's unique identifier in Apple's simctl and devicectl, not "uuid".
+    '(?i)udid',
+    # Intel's emulator accelerator, as the Android emulator's log names it.
+    '\bHAX\b',
 ]
 check-filename = true

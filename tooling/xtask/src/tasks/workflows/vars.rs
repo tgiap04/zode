@@ -41,9 +41,6 @@ secret!(ZODE_SENTRY_MINIDUMP_ENDPOINT);
 secret!(SLACK_APP_ZODE_UNIT_EVALS_BOT_TOKEN);
 secret!(ZODE_ZIPPY_APP_ID);
 secret!(ZODE_ZIPPY_APP_PRIVATE_KEY);
-secret!(R2_ACCOUNT_ID);
-secret!(R2_ACCESS_KEY_ID);
-secret!(R2_SECRET_ACCESS_KEY);
 secret!(ZODE_DRIVER_UPLOAD_TOKEN);
 // The base64 of the PKCS#8 private key that signs the driver manifest. Its public half
 // is `DRIVER_MANIFEST_PUBLIC_KEY` in `crates/database/src/signature.rs`.

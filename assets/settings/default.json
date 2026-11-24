@@ -868,6 +868,16 @@
   // Whether to resize all the panels in a dock when resizing the dock.
   // Can be a combination of "left", "right" and "bottom".
   "resize_all_panels_in_dock": ["left"],
+  "devices_panel": {
+    // Whether to show the Devices panel button in the right dock.
+    "button": true,
+    // Default width of the Devices panel.
+    "default_width": 320,
+  },
+  "github_panel": {
+    // Whether to show the GitHub button in the sidebar rail.
+    "button": true,
+  },
   "project_panel": {
     // Whether to show the project panel button in the status bar
     "button": true,
@@ -1622,6 +1632,29 @@
     // 1. hour12
     // 2. hour24
     "hour_format": "hour12",
+  },
+  // Translating the selected text with a keyboard shortcut. API keys are kept
+  // in the system keychain, never in this file.
+  "translate": {
+    // Which service translates the text. May take 4 values:
+    // 1. "deepl": DeepL (free keys end in ":fx")
+    // 2. "google": Google Cloud Translation
+    // 3. "openai_compatible": any OpenAI-compatible chat completions API
+    // 4. "google_free": Google Translate through its unofficial free
+    //    endpoint. Needs no key, but may be rate limited or stop working,
+    //    and sends the selected text to Google.
+    "provider": "deepl",
+    "openai_compatible": {
+      // Base URL up to the version segment. "http" is only allowed for
+      // localhost and 127.0.0.1 (Ollama, LM Studio).
+      "base_url": "http://localhost:11434/v1",
+      // The model that translates, for example "gpt-4o-mini" or "qwen2.5".
+      "model": "",
+    },
+    // The longest selection, in characters, that is sent for translation.
+    "max_characters": 2000,
+    // How long to wait for a translation, in seconds.
+    "timeout_seconds": 20,
   },
   // Status bar-related settings.
   "status_bar": {

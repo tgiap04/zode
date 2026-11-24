@@ -1,0 +1,17 @@
+query RepositoryProjects($owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    projectsV2(first: 50, after: $after) {
+      nodes {
+        id
+        number
+        title
+        url
+        closed
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+}

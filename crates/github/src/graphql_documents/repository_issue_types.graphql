@@ -1,0 +1,13 @@
+query RepositoryIssueTypes($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    issueTypes(first: 25) {
+      nodes {
+        id
+        name
+        description
+        color
+        isEnabled
+      }
+    }
+  }
+}

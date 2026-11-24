@@ -634,6 +634,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
         let agent_history_panel =
             agent_ui::AgentHistoryPanel::load(workspace_handle.clone(), cx.clone());
+        let devices_panel = devices_ui::DevicesPanel::load(workspace_handle.clone(), cx.clone());
 
         async fn add_panel_when_ready(
             panel_task: impl Future<Output = anyhow::Result<Entity<impl workspace::Panel>>> + 'static,
@@ -658,6 +659,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(branch_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(agent_history_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(devices_panel, workspace_handle.clone(), cx.clone()),
         );
 
         anyhow::Ok(())
@@ -5151,6 +5153,7 @@ mod tests {
                 "debug_panel",
                 "debugger",
                 "dev",
+                "devices_panel",
                 "diagnostics",
                 "editor",
                 "encoding_selector",
@@ -5163,6 +5166,7 @@ mod tests {
                 "git_onboarding",
                 "git_panel",
                 "git_picker",
+                "github",
                 "go_to_line",
                 "highlights_tree_view",
                 "image_viewer",
@@ -5209,6 +5213,7 @@ mod tests {
                 "theme_selector",
                 "toast",
                 "toolchain",
+                "translate",
                 "variable_list",
                 "vim",
                 "welcome",
@@ -5400,6 +5405,8 @@ mod tests {
             agent_ui::init(cx);
             database_ui::init(cx);
             container_ui::init(cx);
+            devices_ui::init(cx);
+            github_ui::init(cx);
             floating_pane::init(cx);
 
             repl::init(app_state.fs.clone(), cx);

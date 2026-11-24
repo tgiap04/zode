@@ -1,0 +1,34 @@
+query RepositoryPullRequest($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      id
+      number
+      title
+      state
+      isDraft
+      author {
+        login
+      }
+      headRefName
+      headRefOid
+      baseRefName
+      isCrossRepository
+      url
+      updatedAt
+      reviewDecision
+      statusCheckRollup {
+        state
+      }
+      reviewRequests(first: 20) {
+        nodes {
+          requestedReviewer {
+            __typename
+            ... on User {
+              login
+            }
+          }
+        }
+      }
+    }
+  }
+}
