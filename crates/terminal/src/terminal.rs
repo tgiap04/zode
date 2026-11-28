@@ -388,6 +388,10 @@ pub const PROGRAM_COPY_MAX_CHARACTERS: usize = 30_000;
 /// to the translator only right after the user's own drag in that program.
 pub const PROGRAM_COPY_LIFETIME: Duration = Duration::from_secs(30);
 
+/// How soon after the user releases the mouse over a program a copy by that
+/// program still counts as the user's own selection.
+pub const USER_COPY_WINDOW: Duration = Duration::from_secs(2);
+
 /// What the program in a terminal last put on the clipboard (OSC 52).
 ///
 /// TUIs that read the mouse themselves (Claude Code's full-screen mode, vim
@@ -531,6 +535,7 @@ impl TerminalBuilder {
             last_mouse_move_time: Instant::now(),
             recent_pty_output: VecDeque::new(),
             program_copy: None,
+            last_mouse_release_to_program: None,
             last_scroll_sent_to_pty: None,
             last_hyperlink_search_position: None,
             mouse_down_hyperlink: None,
@@ -776,6 +781,7 @@ impl TerminalBuilder {
                 last_mouse_move_time: Instant::now(),
                 recent_pty_output: VecDeque::new(),
                 program_copy: None,
+                last_mouse_release_to_program: None,
                 last_scroll_sent_to_pty: None,
                 last_hyperlink_search_position: None,
                 mouse_down_hyperlink: None,
@@ -1089,6 +1095,10 @@ pub struct Terminal {
     /// The program's last clipboard copy and when it arrived, on the
     /// executor's clock. Cleared by the user's next input.
     program_copy: Option<(ProgramCopy, Instant)>,
+    /// When the user last released a mouse button over a program that reads
+    /// the mouse, on the executor's clock. A copy right after it is the
+    /// user's own selection, made on the program's screen.
+    last_mouse_release_to_program: Option<Instant>,
     /// When a scroll was last forwarded to the pty. See [`SCROLL_REPAINT_WINDOW`].
     last_scroll_sent_to_pty: Option<Instant>,
     last_hyperlink_search_position: Option<Point<Pixels>>,
@@ -1864,12 +1874,30 @@ impl Terminal {
         (age < PROGRAM_COPY_LIFETIME).then_some(copy)
     }
 
+    /// Whether the recent program copy came within [`USER_COPY_WINDOW`] of the
+    /// user releasing the mouse over the program -- the program copying what
+    /// the user just dragged across on its screen, as Claude Code does. A
+    /// copy with no mouse release before it is the program's own doing, which
+    /// a remote host can also cause.
+    pub fn recent_program_copy_followed_mouse(&self) -> bool {
+        let (Some((_, copied_at)), Some(released_at)) = (
+            self.program_copy.as_ref(),
+            self.last_mouse_release_to_program,
+        ) else {
+            return false;
+        };
+        *copied_at >= released_at && copied_at.duration_since(released_at) <= USER_COPY_WINDOW
+    }
+
     /// Like [`Self::recent_program_copy`], and forgets the copy: it is offered
     /// once, so a second key press does not bring back text the user has
     /// already seen and dismissed.
     pub fn take_recent_program_copy(&mut self) -> Option<ProgramCopy> {
         let copy = self.recent_program_copy().cloned();
         self.program_copy = None;
+        // One release vouches for one copy; the next one the program makes on
+        // its own must not ride on it.
+        self.last_mouse_release_to_program = None;
         copy
     }
 
@@ -2460,6 +2488,7 @@ impl Terminal {
             {
                 self.write_to_pty(bytes);
             }
+            self.last_mouse_release_to_program = Some(self.background_executor.now());
         } else {
             if e.button == MouseButton::Left && setting.copy_on_select {
                 self.copy(Some(true));
