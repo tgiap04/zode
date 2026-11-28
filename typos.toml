@@ -14,6 +14,8 @@ extend-exclude = [
 
     # Vietnamese prose: its words (tham, thay, ...) read as English misspellings.
     "docs/i18n/",
+    # Release notes carry a Vietnamese highlights section for the website.
+    "docs/changelog/",
     ".tobi/memory/",
 
     # File suffixes aren't typos.

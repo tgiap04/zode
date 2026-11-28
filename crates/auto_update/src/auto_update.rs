@@ -401,18 +401,30 @@ pub fn check(_: &Check, window: &mut Window, cx: &mut App) {
     }
 }
 
+/// Where a stable release's hand-written notes live (docs/changelog, published by the website).
+const CHANGELOG_URL: &str = "https://zodekit.com/changelog";
+
 /// The web page for the running version's release. Used as the fallback when the notes
 /// cannot be shown inside the app.
 pub fn release_notes_url(cx: &mut App) -> Option<String> {
     let auto_updater = AutoUpdater::get(cx)?;
-    let mut version = auto_updater.read(cx).current_version.clone();
+    let version = auto_updater.read(cx).current_version.clone();
+    let channel = ReleaseChannel::try_global(cx).unwrap_or_default();
+    Some(release_notes_url_for(&version, channel))
+}
+
+/// A stable release has an entry on the changelog page; nightly, preview and dev builds have
+/// no hand-written notes, so they keep the GitHub release they were built from.
+fn release_notes_url_for(version: &Version, channel: ReleaseChannel) -> String {
     // A built binary carries channel and commit in the build metadata; the release it came
     // from is tagged with the bare version.
+    let mut version = version.clone();
     version.pre = semver::Prerelease::EMPTY;
     version.build = semver::BuildMetadata::EMPTY;
-    Some(format!(
-        "https://github.com/{RELEASE_REPO}/releases/tag/v{version}"
-    ))
+    match channel {
+        ReleaseChannel::Stable => format!("{CHANGELOG_URL}#v{version}"),
+        _ => format!("https://github.com/{RELEASE_REPO}/releases/tag/v{version}"),
+    }
 }
 
 pub fn view_release_notes(_: &ViewReleaseNotes, cx: &mut App) -> Option<()> {
@@ -1298,6 +1310,31 @@ mod tests {
         time::Duration,
     };
     use tempfile::tempdir;
+
+    #[test]
+    fn a_stable_build_opens_its_entry_on_the_changelog_page() {
+        let version: semver::Version = "0.1.10+stable.abc1234".parse().unwrap();
+        assert_eq!(
+            release_notes_url_for(&version, ReleaseChannel::Stable),
+            "https://zodekit.com/changelog#v0.1.10"
+        );
+    }
+
+    #[test]
+    fn other_channels_open_the_github_release_they_were_built_from() {
+        let version: semver::Version = "0.1.11-pre+nightly.abc1234".parse().unwrap();
+        for channel in [
+            ReleaseChannel::Nightly,
+            ReleaseChannel::Preview,
+            ReleaseChannel::Dev,
+        ] {
+            assert_eq!(
+                release_notes_url_for(&version, channel),
+                format!("https://github.com/{RELEASE_REPO}/releases/tag/v0.1.11"),
+                "{channel:?}"
+            );
+        }
+    }
 
     #[ctor::ctor]
     fn init_logger() {

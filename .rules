@@ -164,6 +164,15 @@ Release Notes:
 - N/A
 ```
 
+# Release changelog
+
+Before pushing a stable release tag `v<major>.<minor>.<patch>`, write `docs/changelog/v<version>.md` in the same commit set, following the format in `docs/changelog/README.md` (frontmatter, `## Highlights`, `## Highlights (vi)`, `## Changes`).
+
+- The website's changelog page and the GitHub release body are built from this file; the release workflow fails when it is missing or its frontmatter `version` does not match the tag.
+- Check it with `script/changelog-release-body <version>` before tagging; a non-zero exit names what is missing.
+- Write for users from the commits since the previous tag (`git log <previous-tag>..HEAD`): say what changed, never paste commit subjects, and leave out tests, CI, chores and invisible refactors.
+- Nightly and preview builds need no changelog file.
+
 # Rules Hygiene
 
 These `.rules` files are read by every agent session. Keep them high-signal.
