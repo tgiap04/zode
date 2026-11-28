@@ -695,7 +695,11 @@ impl Item for Editor {
     }
 
     fn tab_content(&self, params: TabContentParams, _: &Window, cx: &App) -> AnyElement {
-        let label_color = if ItemSettings::get_global(cx).git_status {
+        // A git colour on the orange fill would be unreadable; the fill already
+        // marks the tab, and the other tabs still show the status.
+        let label_color = if params.filled {
+            params.text_color()
+        } else if ItemSettings::get_global(cx).git_status {
             self.buffer()
                 .read(cx)
                 .as_singleton()
@@ -753,11 +757,13 @@ impl Item for Editor {
                 .when(was_deleted, |this| this.strikethrough()),
             )
             .when_some(description, |this, description| {
-                this.child(
-                    Label::new(description)
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                )
+                this.child(Label::new(description).size(LabelSize::XSmall).color(
+                    if params.filled {
+                        Color::OnBrand
+                    } else {
+                        Color::Muted
+                    },
+                ))
             })
             .into_any_element()
     }

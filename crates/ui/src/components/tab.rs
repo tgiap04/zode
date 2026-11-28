@@ -109,19 +109,11 @@ impl ParentElement for Tab {
 impl RenderOnce for Tab {
     #[allow(refining_impl_trait)]
     fn render(self, _: &mut Window, cx: &mut App) -> Stateful<Div> {
-        let (text_color, tab_bg, _tab_hover_bg, _tab_active_bg) = match self.selected {
-            false => (
-                cx.theme().colors().text_muted,
-                cx.theme().colors().tab_inactive_background,
-                cx.theme().colors().ghost_element_hover,
-                cx.theme().colors().ghost_element_active,
-            ),
-            true => (
-                cx.theme().colors().text,
-                cx.theme().colors().tab_active_background,
-                cx.theme().colors().element_hover,
-                cx.theme().colors().element_active,
-            ),
+        let colors = cx.theme().colors();
+        let text_color = if self.selected {
+            crate::brand_on_solid(cx)
+        } else {
+            colors.text_muted
         };
 
         let (start_slot, end_slot) = {
@@ -141,51 +133,43 @@ impl RenderOnce for Tab {
             }
         };
 
+        // No borders between tabs: each tab's surface is inset so neighbours
+        // never touch. The selected tab is a solid pill in the app's orange
+        // with its text in the colour that reads on it -- one mark, plain at a
+        // glance whether the pane is focused or not, where an unfocused pane
+        // mutes every label alike.
+        let inset = DynamicSpacing::Base02.px(cx);
         self.div
             .h(Tab::container_height(cx))
-            .bg(tab_bg)
-            .border_color(cx.theme().colors().border)
-            .map(|this| match self.position {
-                TabPosition::First => {
-                    if self.selected {
-                        this.pl_px().border_r_1().pb_px()
-                    } else {
-                        this.pl_px().pr_px().border_b_1()
-                    }
-                }
-                TabPosition::Last => {
-                    if self.selected {
-                        this.border_l_1().border_r_1().pb_px()
-                    } else {
-                        this.pl_px().border_b_1().border_r_1()
-                    }
-                }
-                TabPosition::Middle(Ordering::Equal) => this.border_l_1().border_r_1().pb_px(),
-                TabPosition::Middle(Ordering::Less) => this.border_l_1().pr_px().border_b_1(),
-                TabPosition::Middle(Ordering::Greater) => this.border_r_1().pl_px().border_b_1(),
+            .relative()
+            .flex_none()
+            .px(inset)
+            .when(self.position == TabPosition::First, |this| {
+                this.pl(inset * 2.)
             })
             .cursor_pointer()
-            .when(self.selected, |this| {
-                // Absolutely positioned so the indicator overlays the content instead of
-                // shrinking it, which keeps every tab the same height whether selected or not.
-                this.relative().child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .right_0()
-                        .h(px(2.))
-                        .bg(cx.theme().colors().tab_active_indicator),
-                )
-            })
             .child(
                 h_flex()
                     .group("")
                     .relative()
-                    .h(Tab::content_height(cx))
-                    .px(DynamicSpacing::Base04.px(cx))
+                    .h(Tab::content_height(cx) - inset * 2.)
+                    .my(inset)
+                    .px(DynamicSpacing::Base06.px(cx))
                     .gap(DynamicSpacing::Base04.rems(cx))
+                    .rounded_md()
                     .text_color(text_color)
+                    .when(self.selected, |content| {
+                        content
+                            .debug_selector(|| "TAB_ACTIVE_FILL".into())
+                            .bg(crate::brand_solid(cx))
+                    })
+                    .when(!self.selected, |content| {
+                        content.hover(|content| {
+                            content
+                                .bg(colors.ghost_element_hover)
+                                .text_color(colors.text)
+                        })
+                    })
                     .child(start_slot)
                     .children(self.children)
                     .child(end_slot),

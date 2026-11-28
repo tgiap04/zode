@@ -29,7 +29,9 @@ impl Sidebar {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = cx.theme().colors();
-        let border_selected = colors.border_selected;
+        // The app's own orange, not the theme's selection border: the active
+        // project is marked the same way the active tab is, whatever the theme.
+        let border_selected = ui::brand_accent(cx);
         let border_transparent = colors.border_transparent;
 
         div()

@@ -333,6 +333,7 @@ impl ColumnWidthConfig {
 #[derive(RegisterComponent, IntoElement)]
 pub struct Table {
     striped: bool,
+    header_background: Option<gpui::Hsla>,
     show_row_borders: bool,
     show_row_hover: bool,
     headers: Option<TableRow<AnyElement>>,
@@ -353,6 +354,7 @@ impl Table {
         Self {
             cols,
             striped: false,
+            header_background: None,
             show_row_borders: true,
             show_row_hover: true,
             headers: None,
@@ -424,6 +426,13 @@ impl Table {
     /// Enables row striping (alternating row colors)
     pub fn striped(mut self) -> Self {
         self.striped = true;
+        self
+    }
+
+    /// Draws the header row on a surface of its own, so it reads apart from
+    /// the rows under it.
+    pub fn header_background(mut self, background: gpui::Hsla) -> Self {
+        self.header_background = Some(background);
         self
     }
 
@@ -617,6 +626,9 @@ pub fn render_table_header(
         .flex_row()
         .items_center()
         .w_full()
+        .when_some(table_context.header_background, |header, background| {
+            header.bg(background)
+        })
         .border_b_1()
         .border_color(cx.theme().colors().border)
         .children(
@@ -652,6 +664,7 @@ pub fn render_table_header(
 #[derive(Clone)]
 pub struct TableRenderContext {
     pub striped: bool,
+    pub header_background: Option<gpui::Hsla>,
     pub show_row_borders: bool,
     pub show_row_hover: bool,
     pub total_row_count: usize,
@@ -665,6 +678,7 @@ impl TableRenderContext {
     fn new(table: &Table, cx: &App) -> Self {
         Self {
             striped: table.striped,
+            header_background: table.header_background,
             show_row_borders: table.show_row_borders,
             show_row_hover: table.show_row_hover,
             total_row_count: table.rows.len(),
@@ -678,6 +692,7 @@ impl TableRenderContext {
     pub fn for_column_widths(column_widths: Option<TableRow<Length>>, use_ui_font: bool) -> Self {
         Self {
             striped: false,
+            header_background: None,
             show_row_borders: true,
             show_row_hover: true,
             total_row_count: 0,

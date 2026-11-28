@@ -161,6 +161,11 @@ pub struct FloatingPane {
     /// needs to render, and what every `open_*` method targets.
     pub(crate) active_pane: Entity<Pane>,
     pub(crate) open: bool,
+    /// Whether the window fills the whole floating layer.
+    ///
+    /// A flag over the stored `position` and `size` rather than a write to
+    /// them, so restoring puts the window back exactly where it was.
+    pub(crate) maximized: bool,
     /// Top-left of the window, relative to the workspace body it floats over.
     ///
     /// Relative rather than absolute so a resized editor window does not leave
@@ -228,6 +233,7 @@ impl FloatingPane {
             center: PaneGroup::new(pane.clone()),
             active_pane: pane.clone(),
             open: false,
+            maximized: false,
             position: None,
             size: OPENING_SIZE,
             dragging: None,
@@ -255,6 +261,13 @@ impl FloatingPane {
             // would take the keyboard away from the editor for nothing.
             self.focus_pane(window, cx);
         }
+        cx.notify();
+    }
+
+    /// Fills the floating layer with the window, or puts it back.
+    pub fn toggle_maximized(&mut self, cx: &mut Context<Self>) {
+        self.maximized = !self.maximized;
+        self.dragging = None;
         cx.notify();
     }
 
@@ -298,6 +311,8 @@ impl FloatingPane {
             })
             .collect();
         self.open = false;
+        // Close ends the window; the next one starts at its normal size.
+        self.maximized = false;
         cx.notify();
         self.opening = Some(cx.spawn(async move |_this, _cx| {
             for closing in closing {
@@ -320,6 +335,12 @@ impl FloatingPane {
     /// rail. A stored rectangle would be right until the first time somebody
     /// opened a dock.
     pub(crate) fn bounds_within(&self, container: Size<Pixels>) -> Bounds<Pixels> {
+        if self.maximized {
+            return Bounds {
+                origin: Point::default(),
+                size: container,
+            };
+        }
         let size = Size {
             width: self.size.width.min(container.width).max(SMALLEST.width),
             height: self.size.height.min(container.height).max(SMALLEST.height),

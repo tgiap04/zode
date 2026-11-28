@@ -13,8 +13,8 @@ use crate::compose_render::render_compose_trailing;
 use crate::container_panel::{Busy, ContainerPanel, ListState};
 use crate::terminal::TerminalIntent;
 
-impl Render for ContainerPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl ContainerPanel {
+    fn render_contents(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .key_context("ContainerPanel")
             .track_focus(&self.focus_handle)
@@ -319,12 +319,12 @@ impl ContainerPanel {
                     .start_slot(
                         Icon::new(kind_icon(kind))
                             .size(IconSize::XSmall)
-                            .color(if active { Color::Default } else { Color::Muted }),
+                            .color(if active { Color::OnBrand } else { Color::Muted }),
                     )
                     .child(
                         Label::new(kind.label())
                             .size(LabelSize::Small)
-                            .color(if active { Color::Default } else { Color::Muted }),
+                            .color(if active { Color::OnBrand } else { Color::Muted }),
                     )
                     .on_click(cx.listener(move |this, _, _window, cx| this.choose_kind(kind, cx)))
                     .into_any_element()
@@ -1147,5 +1147,15 @@ pub(crate) fn action_is_useful(action: ResourceAction, state: RunState) -> bool 
         (ResourceAction::Pause, state) => state == RunState::Running,
         (ResourceAction::Unpause, state) => state == RunState::Paused,
         _ => true,
+    }
+}
+
+impl Render for ContainerPanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // In the terminal's font, as every tool panel is, so a column of
+        // names and statuses reads the same as the shell beside it.
+        terminal_view::terminal_font_scope(cx)
+            .size_full()
+            .child(self.render_contents(window, cx))
     }
 }

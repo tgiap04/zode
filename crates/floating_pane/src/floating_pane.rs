@@ -71,6 +71,15 @@ pub fn init(cx: &mut App) {
                 view.update(cx, |this, cx| this.toggle(window, cx)).ok();
             }
         });
+        workspace.register_action({
+            let view = view.downgrade();
+            move |_workspace,
+                  _: &zode_actions::floating_pane::ToggleMaximizeFloatingPane,
+                  _window,
+                  cx| {
+                view.update(cx, |this, cx| this.toggle_maximized(cx)).ok();
+            }
+        });
         // `Pane::new` was handed this as the double-click action, so the pane
         // has been advertising it on empty tab-bar space with nothing behind
         // it. Registered here rather than dropped: a double-click on a tab bar

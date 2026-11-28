@@ -1,5 +1,7 @@
 mod persistence;
+pub use terminal_font_scope::terminal_font_scope;
 pub mod terminal_element;
+mod terminal_font_scope;
 pub mod terminal_panel;
 mod terminal_path_like_target;
 pub mod terminal_scrollbar;
@@ -1394,7 +1396,17 @@ impl Item for TerminalView {
                     }
                 }
             },
-            None => (IconName::Terminal, Color::Muted, None),
+            // Muted grey would vanish on the open tab's orange fill; a task's
+            // status colours keep their meaning there.
+            None => (
+                IconName::Terminal,
+                if params.filled {
+                    Color::OnBrand
+                } else {
+                    Color::Muted
+                },
+                None,
+            ),
         };
 
         let self_handle = self.self_handle.clone();
