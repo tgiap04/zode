@@ -403,16 +403,27 @@ fn create_draft_release(deps: &[&NamedJob]) -> NamedJob {
     // writes links into that repository -- for a fork it produces notes that look right
     // and point at the wrong project. Nothing here can fail on a first release: with no
     // prior tag it simply says so.
+    // A stable release's notes are the hand-written docs/changelog/v<version>.md (the same text
+    // the website and the app's "View Release Notes" show); a missing file fails the release
+    // here, before anything is published. Preview tags have no hand-written notes and keep the
+    // commit list.
     fn generate_release_notes() -> Step<Run> {
         named::bash!(indoc::indoc! {r#"
             prior_tag=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+            if [ "$RELEASE_CHANNEL" = "stable" ]; then
+                script/changelog-release-body "$RELEASE_VERSION" > target/changelog-body.md
+            fi
             {
-                if [ -n "$prior_tag" ]; then
+                if [ "$RELEASE_CHANNEL" = "stable" ]; then
+                    cat target/changelog-body.md
+                elif [ -n "$prior_tag" ]; then
                     git log --no-merges --pretty='- %s' "${prior_tag}..${GITHUB_REF_NAME}"
-                    echo
-                    echo "**Full changelog**: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${prior_tag}...${GITHUB_REF_NAME}"
                 else
                     echo "- First release."
+                fi
+                if [ -n "$prior_tag" ]; then
+                    echo
+                    echo "**Full changelog**: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${prior_tag}...${GITHUB_REF_NAME}"
                 fi
                 echo
                 echo "Not code-signed. See the README before installing."

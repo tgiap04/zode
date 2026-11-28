@@ -70,6 +70,10 @@ pub enum Color {
     ///
     /// For less emphasis, consider using [`Color::Hidden`].
     Muted,
+    /// Text or an icon drawn on the app's own orange fill, such as the open
+    /// tab: the brand's on-solid colour, which reads on that fill in light and
+    /// dark alike.
+    OnBrand,
     /// A color used for placeholder text in input fields.
     Placeholder,
     /// A color associated with a specific player number.
@@ -98,6 +102,7 @@ impl Color {
         match self {
             Color::Default => cx.theme().colors().text,
             Color::Muted => cx.theme().colors().text_muted,
+            Color::OnBrand => crate::brand_on_solid(cx),
             Color::Created => cx.theme().status().created,
             Color::Modified => cx.theme().status().modified,
             Color::Conflict => cx.theme().status().conflict,

@@ -223,10 +223,48 @@ pub fn driver_for_url(url: &str) -> Option<&'static str> {
     }
     // No scheme at all is a bare filesystem path, which is what SQLite takes --
     // and `sqlite` is the only shipped driver whose connection string is one.
-    if url.starts_with('/') || url.starts_with('.') || url.starts_with('~') {
+    if url.starts_with('/')
+        || url.starts_with('.')
+        || url.starts_with('~')
+        || url.starts_with('\\')
+        || is_windows_drive_path(url)
+    {
         return Some("sqlite");
     }
     None
+}
+
+/// `C:\…` or `C:/…`. No engine's scheme is one letter, so a drive letter
+/// followed by a separator is a path, never a URL.
+fn is_windows_drive_path(url: &str) -> bool {
+    let mut characters = url.chars();
+    matches!(
+        (characters.next(), characters.next(), characters.next()),
+        (Some(drive), Some(':'), Some('\\' | '/')) if drive.is_ascii_alphabetic()
+    )
+}
+
+/// The extensions a database that lives in one file is commonly saved under.
+pub const DATABASE_FILE_EXTENSIONS: [&str; 6] = ["sqlite", "sqlite3", "db", "db3", "s3db", "sl3"];
+
+/// Whether `path` looks like a database that is one file on disk.
+pub fn is_database_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            DATABASE_FILE_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        })
+}
+
+/// The driver that opens a database file at `path`: the one whose connection
+/// string is a path. Absolute, so `driver_for_url` reads it as one.
+pub fn driver_for_file(path: &std::path::Path) -> Option<&'static str> {
+    if !path.is_absolute() {
+        return None;
+    }
+    driver_for_url(&path.to_string_lossy())
 }
 
 /// Every engine, with the driver each one needs and whether it is on `host`.
@@ -1059,6 +1097,16 @@ mod url_scheme_tests {
         assert_eq!(driver_for_url("/home/someone/app.sqlite"), Some("sqlite"));
         assert_eq!(driver_for_url("./app.db"), Some("sqlite"));
         assert_eq!(driver_for_url("sqlite:app.db"), Some("sqlite"));
+    }
+
+    /// What the Windows file picker hands back: a drive letter reads like a
+    /// one-letter scheme, and no engine has one.
+    #[test]
+    fn a_windows_path_is_sqlite() {
+        assert_eq!(driver_for_url(r"C:\proj\app.db"), Some("sqlite"));
+        assert_eq!(driver_for_url("d:/proj/app.sqlite"), Some("sqlite"));
+        assert_eq!(driver_for_url(r"\\server\share\app.db"), Some("sqlite"));
+        assert_eq!(driver_for_url("c:app.db"), None);
     }
 
     /// `None`, not a guess: saving a URL against the wrong driver fails

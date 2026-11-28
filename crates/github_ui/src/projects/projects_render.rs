@@ -1,5 +1,6 @@
 use gpui::{Context, IntoElement, Render, Window};
 use ui::{Callout, ContextMenu, DropdownMenu, IconPosition, prelude::*};
+use workspace::notifications::DetachAndPromptErr as _;
 
 use crate::projects::move_item::WRITE_SCOPE_GUIDANCE;
 use crate::projects::project_layout::shows_board;
@@ -10,13 +11,25 @@ use crate::untrusted_text::reveal_hidden_characters;
 
 pub const MISSING_SCOPE_GUIDANCE: &str = "Projects need the `read:project` scope, which this token lacks. With the GitHub CLI, run `gh auth refresh -s project`, then check again; or sign in with GitHub, which asks for it.";
 
+/// Said instead when the token is the GitHub CLI's: the account is signed in,
+/// it only lacks a permission, and the CLI is where that is granted.
+pub const CLI_SCOPE_GUIDANCE: &str = "You are signed in through the GitHub CLI, but its token lacks the `read:project` permission Projects need. Grant it with the GitHub CLI, finish in the browser, then check again.";
+
+/// What "Grant with GitHub CLI" runs. `project` covers reading and changing
+/// projects, so changing one later asks for nothing more.
+const GH_GRANT_PROJECT_COMMAND: &str = "gh auth refresh -h github.com -s project\n";
+
 impl Render for ProjectsSection {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.missing_scope() {
             return self.render_scope_guidance(
                 "github-projects-guidance",
                 "Projects need another permission",
-                MISSING_SCOPE_GUIDANCE,
+                if self.grant_with_cli {
+                    CLI_SCOPE_GUIDANCE
+                } else {
+                    MISSING_SCOPE_GUIDANCE
+                },
                 cx,
             );
         }
@@ -150,6 +163,7 @@ impl ProjectsSection {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let can_sign_in = github::sign_in_with_github_available(cx);
+        let grant_with_cli = self.grant_with_cli;
         v_flex()
             .debug_selector(move || selector.to_string())
             .gap_2()
@@ -162,10 +176,28 @@ impl ProjectsSection {
             .child(
                 h_flex()
                     .gap_2()
+                    .when(grant_with_cli, |row| {
+                        row.child(
+                            div()
+                                .debug_selector(|| "github-projects-grant-cli".into())
+                                .child(
+                                    Button::new(
+                                        "github-projects-grant-cli",
+                                        "Grant with GitHub CLI",
+                                    )
+                                    .style(ButtonStyle::Filled)
+                                    .start_icon(Icon::new(IconName::Terminal).size(IconSize::Small))
+                                    .on_click(|_, window, cx| open_grant_terminal(window, cx)),
+                                ),
+                        )
+                    })
                     .when(can_sign_in, |row| {
                         row.child(
                             Button::new("github-projects-sign-in", "Sign in with GitHub")
-                                .style(ButtonStyle::Filled)
+                                // Second to the CLI grant when the token is
+                                // the CLI's: signing in again is the longer
+                                // way to the same permission.
+                                .when(!grant_with_cli, |button| button.style(ButtonStyle::Filled))
                                 .on_click(cx.listener(|_, _, _window, cx| {
                                     cx.emit(ProjectsSectionEvent::SignInWithGithub)
                                 })),
@@ -291,4 +323,41 @@ impl ProjectsSection {
             _ => div().into_any_element(),
         }
     }
+}
+
+/// Opens a terminal in the editor and runs the CLI's permission grant in it.
+///
+/// The workspace is found from the window, since this section holds none of
+/// its own; the click runs outside any workspace update, so updating it here
+/// does not lease it twice.
+fn open_grant_terminal(window: &mut Window, cx: &mut App) {
+    let Some(workspace) = window
+        .root::<workspace::MultiWorkspace>()
+        .flatten()
+        .map(|multi_workspace| multi_workspace.read(cx).workspace().clone())
+    else {
+        return;
+    };
+    workspace.update(cx, |workspace, cx| {
+        let cwd = workspace
+            .project()
+            .read(cx)
+            .visible_worktrees(cx)
+            .next()
+            .map(|worktree| worktree.read(cx).abs_path().to_path_buf());
+        let terminal = terminal_view::terminal_panel::TerminalPanel::add_center_terminal(
+            workspace,
+            window,
+            cx,
+            move |project, cx| project.create_terminal_shell(cwd, cx),
+        );
+        cx.spawn_in(window, async move |_, cx| {
+            let terminal = terminal.await?;
+            terminal.update(cx, |terminal, _| {
+                terminal.input(GH_GRANT_PROJECT_COMMAND.as_bytes().to_vec());
+            })?;
+            anyhow::Ok(())
+        })
+        .detach_and_prompt_err("Failed to open a terminal", window, cx, |_, _, _| None);
+    });
 }

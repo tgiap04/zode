@@ -133,6 +133,8 @@ impl Workspace {
                         });
                     }
                 }
+            } else {
+                close_after_lifetime(id.clone(), notification.entity_id(), cx);
             }
             notification.into()
         });
@@ -1064,6 +1066,26 @@ pub fn show_app_notification<V: Notification + 'static>(
                     .ok(); // Doesn't matter if the windows are dropped
             }
         }
+
+        // Closed everywhere once its lifetime is up -- unless the same id has
+        // been shown again since, which stored a new builder and owns its own
+        // timer.
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(NOTIFICATION_LIFETIME).await;
+            cx.update(|cx| {
+                let still_this_one = GLOBAL_APP_NOTIFICATIONS
+                    .lock()
+                    .app_notifications
+                    .iter()
+                    .any(|(stored_id, stored)| {
+                        *stored_id == id && Arc::ptr_eq(stored, &build_notification)
+                    });
+                if still_this_one {
+                    dismiss_app_notification(&id, cx);
+                }
+            });
+        })
+        .detach();
     });
 }
 
@@ -1249,6 +1271,34 @@ where
     }
 }
 
+/// How long an in-app notification stays up before it closes itself.
+pub const NOTIFICATION_LIFETIME: Duration = Duration::from_secs(10);
+
+/// Closes the notification `view` shown under `id` once its lifetime is up.
+///
+/// Keyed on the view as well as the id: the same id shown again replaces the
+/// view, and the replacement keeps its own time rather than going with this
+/// one. A language server's prompt is not given this timer -- it already has
+/// its own, which the user sets (`lsp.notifications.dismiss_timeout_ms`, where
+/// 0 keeps it up).
+fn close_after_lifetime(id: NotificationId, view: gpui::EntityId, cx: &mut Context<Workspace>) {
+    cx.spawn(async move |workspace, cx| {
+        cx.background_executor().timer(NOTIFICATION_LIFETIME).await;
+        workspace
+            .update(cx, |workspace, cx| {
+                let still_shown = workspace
+                    .notifications
+                    .iter()
+                    .any(|(shown, shown_view)| *shown == id && shown_view.entity_id() == view);
+                if still_shown {
+                    workspace.dismiss_notification(&id, cx);
+                }
+            })
+            .ok();
+    })
+    .detach();
+}
+
 #[cfg(test)]
 mod tests {
     use fs::FakeFs;
@@ -1364,6 +1414,74 @@ mod tests {
 
         cx.executor().advance_clock(Duration::from_millis(1000));
         assert_eq!(count_notifications(&workspace, cx), 0);
+    }
+
+    /// An in-app notification closes itself after ten seconds. Shown again
+    /// under the same id, it gets ten seconds from then: the first one's timer
+    /// must not take the replacement with it.
+    #[gpui::test]
+    async fn test_a_notification_closes_after_ten_seconds(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        struct Finished;
+        let show = |workspace: &Entity<Workspace>, cx: &mut gpui::VisualTestContext| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.show_notification(NotificationId::unique::<Finished>(), cx, |cx| {
+                    cx.new(|cx| simple_message_notification::MessageNotification::new("Done", cx))
+                });
+            })
+        };
+        let count = |workspace: &Entity<Workspace>, cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| workspace.notification_ids().len())
+        };
+
+        show(&workspace, cx);
+        cx.executor().advance_clock(Duration::from_secs(9));
+        assert_eq!(count(&workspace, cx), 1, "still there at 9 s");
+        cx.executor().advance_clock(Duration::from_secs(2));
+        assert_eq!(count(&workspace, cx), 0, "gone after 10 s");
+
+        show(&workspace, cx);
+        cx.executor().advance_clock(Duration::from_secs(6));
+        show(&workspace, cx);
+        cx.executor().advance_clock(Duration::from_secs(6));
+        assert_eq!(
+            count(&workspace, cx),
+            1,
+            "the replacement keeps its own time"
+        );
+        cx.executor().advance_clock(Duration::from_secs(5));
+        assert_eq!(count(&workspace, cx), 0);
+    }
+
+    /// A notification shown across the app closes itself after ten seconds
+    /// too, in every workspace that shows it.
+    #[gpui::test]
+    async fn test_an_app_notification_closes_after_ten_seconds(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+            crate::MultiWorkspace::test_new(project.clone(), window, cx)
+        });
+        let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+        struct Updated;
+        cx.update(|_window, cx| {
+            show_app_notification(NotificationId::unique::<Updated>(), cx, |cx| {
+                cx.new(|cx| simple_message_notification::MessageNotification::new("Updated", cx))
+            })
+        });
+        cx.run_until_parked();
+        let count = |cx: &mut gpui::VisualTestContext| {
+            workspace.read_with(cx, |workspace, _| workspace.notification_ids().len())
+        };
+        assert_eq!(count(cx), 1);
+        cx.executor().advance_clock(Duration::from_secs(11));
+        cx.run_until_parked();
+        assert_eq!(count(cx), 0, "gone after 10 s");
     }
 
     #[gpui::test]

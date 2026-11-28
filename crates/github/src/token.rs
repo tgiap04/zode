@@ -129,6 +129,35 @@ pub trait GhHost: Send + Sync {
 
 pub type GhRunResult = Result<GhOutput, String>;
 
+/// Where package managers put `gh`, looked in when `PATH` does not have it.
+///
+/// Zode reads the login shell's `PATH` in the background after it starts, and
+/// a GitHub tab restored at launch can look for `gh` before that has arrived:
+/// a Dock launch starts with `/usr/bin:/bin:/usr/sbin:/sbin`, which has no
+/// Homebrew. `gh` not found read as "not signed in", with nothing on screen to
+/// say why, for someone whose `gh` was signed in all along.
+#[cfg(unix)]
+const GH_INSTALL_DIRECTORIES: &[&str] = &[
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/home/linuxbrew/.linuxbrew/bin",
+];
+#[cfg(not(unix))]
+const GH_INSTALL_DIRECTORIES: &[&str] = &[];
+
+/// `program` on `path`, or else in one of `installed_in`, in that order.
+pub fn find_program(
+    program: &str,
+    path: Option<std::ffi::OsString>,
+    installed_in: &[PathBuf],
+) -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    which::which_in(program, path, &cwd).ok().or_else(|| {
+        let installed_in = std::env::join_paths(installed_in).ok()?;
+        which::which_in(program, Some(installed_in), &cwd).ok()
+    })
+}
+
 /// This machine.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct LocalGhHost;
@@ -139,7 +168,8 @@ impl GhHost for LocalGhHost {
     }
 
     fn find_on_path(&self, program: &str) -> Option<PathBuf> {
-        which::which(program).ok()
+        let installed_in: Vec<PathBuf> = GH_INSTALL_DIRECTORIES.iter().map(PathBuf::from).collect();
+        find_program(program, std::env::var_os("PATH"), &installed_in)
     }
 
     fn run(&self, program: PathBuf, arguments: Vec<String>) -> BoxFuture<'static, GhRunResult> {

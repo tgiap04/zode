@@ -574,12 +574,18 @@ impl GpuiMode {
     }
 }
 
+/// How long a posted notification stays in the OS notification centre.
+pub const NOTIFICATION_LIFETIME: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Contains the state of the full application, and passed as a reference to a variety of callbacks.
 /// Other [Context] derefs to this type.
 /// You need a reference to an `App` to access the state of a [Entity].
 pub struct App {
     pub(crate) this: Weak<AppCell>,
     pub(crate) platform: Rc<dyn Platform>,
+    /// How many times each notification id has been posted, so the timer that
+    /// withdraws a notification can tell whether a newer post has replaced it.
+    posted_notification_generations: RefCell<HashMap<SharedString, u64>>,
     text_system: Arc<TextSystem>,
 
     pub(crate) actions: Rc<ActionRegistry>,
@@ -697,6 +703,7 @@ impl App {
                 text_system,
                 text_rendering_mode: Rc::new(Cell::new(TextRenderingMode::default())),
                 mode: GpuiMode::Production,
+                posted_notification_generations: RefCell::default(),
                 actions: Rc::new(ActionRegistry::default()),
                 flushing_effects: false,
                 pending_updates: 0,
@@ -1244,8 +1251,43 @@ impl App {
 
     /// Posts a notification to the OS notification centre. Does not block --
     /// see [`Platform::post_notification`].
+    ///
+    /// The notification is withdrawn from the notification centre after
+    /// [`NOTIFICATION_LIFETIME`], so announcements of finished work do not pile
+    /// up there. Posting the same id again restarts that time. One that
+    /// [awaits the user](Notification::awaits_user) stays.
     pub fn post_notification(&self, notification: Notification) {
+        let id = notification.id.clone();
+        let awaits_user = notification.awaits_user;
+        let generation = {
+            let mut generations = self.posted_notification_generations.borrow_mut();
+            let generation = generations.entry(id.clone()).or_default();
+            *generation += 1;
+            *generation
+        };
         self.platform.post_notification(notification);
+        if awaits_user {
+            // No timer of its own will clear the entry, so it goes now; an
+            // earlier post's timer finding no entry leaves this one alone.
+            self.posted_notification_generations
+                .borrow_mut()
+                .remove(&id);
+            return;
+        }
+        self.spawn(async move |cx| {
+            cx.background_executor().timer(NOTIFICATION_LIFETIME).await;
+            cx.update(|cx| {
+                let mut generations = cx.posted_notification_generations.borrow_mut();
+                // A newer post of this id owns its own timer.
+                if generations.get(&id) != Some(&generation) {
+                    return;
+                }
+                generations.remove(&id);
+                drop(generations);
+                cx.platform.withdraw_notification(&id);
+            });
+        })
+        .detach();
     }
 
     /// Whether [`App::post_notification`] can ever do anything on this platform.

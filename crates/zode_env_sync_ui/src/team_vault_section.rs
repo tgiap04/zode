@@ -1011,6 +1011,7 @@ impl Render for TeamVaultSection {
             .child(
                 IconButton::new("team-vault-refresh", IconName::RotateCw)
                     .icon_size(IconSize::Small)
+                    .loading(working)
                     .disabled(working)
                     .tooltip(Tooltip::text("Read the team's entries again"))
                     .on_click(cx.listener(|this, _, _window, cx| {

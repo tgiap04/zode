@@ -219,6 +219,7 @@ fn pairing_notification(session_id: u32, device_name: &str) -> Notification {
         id: format!("{PAIRING_NOTIFICATION_PREFIX}{session_id}").into(),
         title: title.into(),
         body: "Switch to Zode to compare the six digits.".into(),
+        awaits_user: true,
     }
 }
 

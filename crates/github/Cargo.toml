@@ -39,3 +39,4 @@ github = { path = ".", features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 http_client = { workspace = true, features = ["test-support"] }
 reqwest_client.workspace = true
+tempfile.workspace = true

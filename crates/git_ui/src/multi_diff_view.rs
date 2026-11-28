@@ -265,11 +265,7 @@ impl Item for MultiDiffView {
 
     fn tab_content(&self, params: TabContentParams, _window: &Window, _cx: &App) -> AnyElement {
         Label::new(self.title())
-            .color(if params.selected {
-                Color::Default
-            } else {
-                Color::Muted
-            })
+            .color(params.text_color())
             .into_any_element()
     }
 

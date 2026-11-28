@@ -156,7 +156,7 @@ async fn approval_notifies_once_per_pending_episode(cx: &mut TestAppContext) {
     turn(cx, &notifier, id, TurnEvent::ApprovalNeeded);
     let posted = cx.posted_notifications();
     assert_eq!(posted.len(), 1);
-    assert_eq!(posted[0].body.as_ref(), "Waiting for your approval");
+    assert_eq!(posted[0].body.as_ref(), "Waiting for your answer");
     assert_eq!(posted[0].id.as_ref(), format!("{id}-approval"));
 
     turn(cx, &notifier, id, TurnEvent::ApprovalCleared);
@@ -378,9 +378,9 @@ async fn an_exit_clears_the_approval_latch(cx: &mut TestAppContext) {
     assert_eq!(
         bodies(cx),
         [
-            "Waiting for your approval",
+            "Waiting for your answer",
             "Session ended",
-            "Waiting for your approval"
+            "Waiting for your answer"
         ]
     );
 }

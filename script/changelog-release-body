@@ -1,0 +1,51 @@
+#!/usr/bin/env node
+// Prints the GitHub release body for a stable release from its hand-written notes,
+// docs/changelog/v<version>.md: the English highlights and the changes, without the
+// frontmatter or the Vietnamese highlights (those are for the website).
+//
+//   script/changelog-release-body <version> [changelog dir]
+//
+// Exits non-zero, naming the file, when the notes are missing or incomplete: a stable
+// release does not ship without them (see docs/changelog/README.md).
+const fs = require("fs");
+const path = require("path");
+
+const [version, dir = path.join(__dirname, "..", "docs", "changelog")] = process.argv.slice(2);
+if (!version || !/^\d+\.\d+\.\d+$/.test(version)) {
+  console.error("Usage: script/changelog-release-body <major.minor.patch> [changelog dir]");
+  process.exit(2);
+}
+
+const file = path.join(dir, `v${version}.md`);
+const fail = (message) => {
+  console.error(`::error file=docs/changelog/v${version}.md::${message}`);
+  console.error(`See docs/changelog/README.md for the format and a template.`);
+  process.exit(1);
+};
+if (!fs.existsSync(file)) fail(`no release notes for ${version}: write docs/changelog/v${version}.md before tagging`);
+
+const text = fs.readFileSync(file, "utf8");
+const front = /^---\r?\n[\s\S]*?\r?\n---\r?\n?/.exec(text);
+if (!front) fail("the file has no frontmatter");
+if (!new RegExp(`^version:\\s*${version.replace(/\./g, "\\.")}\\s*$`, "m").test(front[0])) {
+  fail(`the frontmatter version is not ${version}`);
+}
+
+const sections = new Map();
+let current = null;
+for (const line of text.slice(front[0].length).split(/\r?\n/)) {
+  const heading = /^## (.+?)\s*$/.exec(line);
+  if (heading) {
+    current = heading[1];
+    sections.set(current, []);
+  } else if (current !== null) {
+    sections.get(current).push(line);
+  }
+}
+const section = (name) => (sections.get(name) || []).join("\n").trim();
+const highlights = section("Highlights");
+const changes = section("Changes");
+if (!highlights) fail("the file has no ## Highlights");
+if (!changes) fail("the file has no ## Changes");
+
+process.stdout.write(`## Highlights\n\n${highlights}\n\n## Changes\n\n${changes}\n`);

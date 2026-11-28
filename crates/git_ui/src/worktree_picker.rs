@@ -105,6 +105,7 @@ impl WorktreePicker {
             focus_handle: cx.focus_handle(),
             show_footer,
             reload_task: None,
+            reloading: false,
         };
 
         let picker = cx.new(|cx| {
@@ -238,6 +239,8 @@ struct WorktreePickerDelegate {
     focus_handle: FocusHandle,
     show_footer: bool,
     reload_task: Option<Task<()>>,
+    /// A `git worktree list` is out, which the reload button shows as a spinner.
+    reloading: bool,
 }
 
 impl WorktreePickerDelegate {
@@ -280,6 +283,7 @@ impl WorktreePickerDelegate {
             // Drop any fetch still in flight: with no repository to resolve, a late response
             // would repopulate a list this picker can no longer claim to be showing.
             picker.delegate.reload_task = None;
+            picker.delegate.reloading = false;
             return;
         };
         Self::reload_worktrees_for(picker, &repository, window, cx);
@@ -300,23 +304,29 @@ impl WorktreePickerDelegate {
 
         // Assigning over the previous task cancels it, so a slower earlier response can never
         // land on top of a newer list.
+        picker.delegate.reloading = true;
+        cx.notify();
         picker.delegate.reload_task = Some(cx.spawn_in(window, async move |picker, cx| {
             let worktrees = match request.await {
-                Ok(Ok(worktrees)) => worktrees,
+                Ok(Ok(worktrees)) => Some(worktrees),
                 Ok(Err(err)) => {
                     log::warn!("WorktreePicker: git worktree list failed: {err}");
-                    return;
+                    None
                 }
                 Err(_) => {
                     log::warn!("WorktreePicker: worktree request was cancelled");
-                    return;
+                    None
                 }
             };
 
+            // One way out of the task, so the spinner stops however it ends.
             picker
                 .update_in(cx, |picker, window, cx| {
-                    picker.delegate.all_worktrees =
-                        worktrees.into_iter().filter(|wt| !wt.is_bare).collect();
+                    picker.delegate.reloading = false;
+                    if let Some(worktrees) = worktrees {
+                        picker.delegate.all_worktrees =
+                            worktrees.into_iter().filter(|wt| !wt.is_bare).collect();
+                    }
                     picker.refresh(window, cx);
                 })
                 .log_err();
@@ -391,16 +401,16 @@ impl WorktreePickerDelegate {
             &other_live_worktrees,
         );
 
-        let detail = checkout_deletion::confirm_detail(&label, &path, &plan);
-        let buttons = checkout_deletion::confirm_buttons(&plan);
-        let cancel_index = buttons.len() - 1;
-        let plan_holds_sessions = !plan.is_empty();
+        let branch = worktree.branch_name().map(str::to_string);
+        let detail = checkout_deletion::confirm_detail(&label, &path, branch.as_deref(), &plan);
+        let choices = checkout_deletion::confirm_choices(&plan, branch.is_some());
+        let buttons: Vec<&str> = choices.iter().map(|(label, _)| *label).collect();
 
         let prompt = window.prompt(
             gpui::PromptLevel::Warning,
             "Delete this worktree?",
             Some(&detail),
-            buttons,
+            &buttons,
             cx,
         );
 
@@ -411,13 +421,9 @@ impl WorktreePickerDelegate {
         let window_handle = window.window_handle().downcast::<MultiWorkspace>();
 
         cx.spawn_in(window, async move |picker, cx| {
-            let Some(choice) = prompt.await.ok() else {
+            let Some(choice) = checkout_deletion::choice_for(&choices, prompt.await.ok()) else {
                 return Ok(());
             };
-            if choice == cancel_index {
-                return Ok(());
-            }
-            let take_sessions = plan_holds_sessions && choice == 0;
 
             let result = repo
                 .update(cx, |repo, _| repo.remove_worktree(path.clone(), false))
@@ -440,7 +446,26 @@ impl WorktreePickerDelegate {
                 return Ok(());
             }
 
-            if take_sessions {
+            // Only once the worktree is gone: git refuses to delete a branch
+            // still checked out anywhere, and `-d` keeps one holding commits
+            // that are not merged, so nothing here can lose work.
+            if choice.delete_branch
+                && let Some(branch) = branch
+            {
+                let deleted = repo
+                    .update(cx, |repo, _| repo.delete_branch(false, branch.clone()))
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("the repository went away")));
+                if let Err(error) = deleted
+                    && let Some(workspace) = workspace.upgrade()
+                {
+                    cx.update(|_window, cx| {
+                        show_error_toast(workspace, format!("branch -d {branch}"), error, cx)
+                    })?;
+                }
+            }
+
+            if choice.take_sessions {
                 let other_reachable_workspaces = match window_handle {
                     Some(handle) => handle
                         .update(cx, |multi_workspace, _window, _cx| {
@@ -1074,6 +1099,7 @@ impl PickerDelegate for WorktreePickerDelegate {
                         IconButton::new("worktree-reload", IconName::RotateCw)
                             .icon_size(IconSize::Small)
                             .icon_color(Color::Muted)
+                            .loading(self.reloading)
                             .tooltip(Tooltip::text("Reload the worktree list"))
                             .on_click(cx.listener(|picker, _, window, cx| {
                                 WorktreePickerDelegate::reload_worktrees(picker, window, cx);
@@ -1450,6 +1476,35 @@ mod tests {
         );
     }
 
+    /// The reload button spins while the list is being read, and stops once it
+    /// has been, so a press is seen to have done something.
+    #[gpui::test]
+    async fn the_reload_button_spins_while_the_list_is_read(cx: &mut TestAppContext) {
+        let (_fs, _project, worktree_picker, mut cx) = init_picker_test(cx).await;
+        let cx = &mut cx;
+        let reloading = |worktree_picker: &Entity<WorktreePicker>, cx: &mut VisualTestContext| {
+            worktree_picker.read_with(cx, |worktree_picker, cx| {
+                worktree_picker.picker.read(cx).delegate.reloading
+            })
+        };
+
+        worktree_picker.update_in(cx, |worktree_picker, window, cx| {
+            worktree_picker.picker.update(cx, |picker, cx| {
+                WorktreePickerDelegate::reload_worktrees(picker, window, cx);
+            });
+        });
+        assert!(
+            reloading(&worktree_picker, cx),
+            "spinning while the list is read"
+        );
+
+        cx.run_until_parked();
+        assert!(
+            !reloading(&worktree_picker, cx),
+            "and stops once it has been"
+        );
+    }
+
     /// The subscription goes through the same shared fetch as the button, but keeps the repository
     /// it subscribed to. This is the "a worktree created elsewhere shows up in an open picker"
     /// behaviour.
@@ -1656,18 +1711,155 @@ mod tests {
             targets: Vec::new(),
             total_bytes: 0,
         };
-        let expected = checkout_deletion::confirm_detail("wt-a", &path, &empty_plan);
+        let expected = checkout_deletion::confirm_detail("wt-a", &path, Some("wt-a"), &empty_plan);
         assert_eq!(detail, expected);
-        assert_eq!(
-            detail,
-            format!(
-                "wt-a\n\nThe worktree at {} will be removed. Its branch and its commits stay.",
-                path.display()
-            ),
-            "today's exact sentence must survive unchanged when the plan is empty"
-        );
 
         cx.simulate_prompt_answer("Cancel");
         cx.run_until_parked();
+    }
+
+    /// A worktree on `wt-a`, registered the way `git worktree add -b wt-a`
+    /// leaves it: an admin entry, a checkout whose `.git` file points back,
+    /// and the branch itself.
+    async fn add_worktree_on_its_own_branch(fs: &Arc<FakeFs>) {
+        fs.insert_branches(path!("/dir/.git").as_ref(), &["main", "wt-a"]);
+        fs.add_linked_worktree_for_repo(
+            path!("/dir/.git").as_ref(),
+            false,
+            git::repository::Worktree {
+                path: added_worktree_path("wt-a"),
+                ref_name: Some("refs/heads/wt-a".into()),
+                sha: "deadbeef".into(),
+                is_main: false,
+                is_bare: false,
+            },
+        )
+        .await;
+    }
+
+    fn branches(fs: &Arc<FakeFs>) -> Vec<String> {
+        let mut branches = fs
+            .with_git_state(path!("/dir/.git").as_ref(), false, |state| {
+                state.branches.iter().cloned().collect::<Vec<_>>()
+            })
+            .expect("the repository has git state");
+        branches.sort();
+        branches
+    }
+
+    /// What goes wrong between the prompt and the answer.
+    enum Mishap {
+        None,
+        /// The worktree's admin entry and `.git` file vanish, so git cannot
+        /// find it to remove.
+        RemovalFails,
+        /// The branch is checked out in the main repository, so `-d` refuses.
+        BranchRefused,
+    }
+
+    async fn delete_wt_a_answering(answer: &str, cx: &mut TestAppContext) -> Vec<String> {
+        delete_wt_a_answering_after(answer, Mishap::None, cx).await
+    }
+
+    async fn delete_wt_a_answering_after(
+        answer: &str,
+        mishap: Mishap,
+        cx: &mut TestAppContext,
+    ) -> Vec<String> {
+        let (fs, _project, worktree_picker, mut cx) = init_picker_test(cx).await;
+        let cx = &mut cx;
+        add_worktree_on_its_own_branch(&fs).await;
+        worktree_picker.update_in(cx, |worktree_picker, window, cx| {
+            worktree_picker.picker.update(cx, |picker, cx| {
+                WorktreePickerDelegate::reload_worktrees(picker, window, cx);
+            });
+        });
+        cx.run_until_parked();
+
+        let path = added_worktree_path("wt-a");
+        let ix = worktree_match_index(&worktree_picker, &path, cx);
+        worktree_picker.update_in(cx, |worktree_picker, window, cx| {
+            worktree_picker.picker.update(cx, |picker, cx| {
+                picker.delegate.delete_worktree(ix, window, cx);
+            });
+        });
+        cx.run_until_parked();
+        match mishap {
+            Mishap::None => {}
+            Mishap::RemovalFails => {
+                fs::Fs::remove_dir(
+                    fs.as_ref(),
+                    path!("/dir/.git/worktrees/wt-a").as_ref(),
+                    fs::RemoveOptions {
+                        recursive: true,
+                        ignore_if_not_exists: false,
+                    },
+                )
+                .await
+                .expect("the admin entry exists");
+                fs::Fs::remove_file(
+                    fs.as_ref(),
+                    &path.join(".git"),
+                    fs::RemoveOptions {
+                        recursive: false,
+                        ignore_if_not_exists: false,
+                    },
+                )
+                .await
+                .expect("the checkout's .git file exists");
+            }
+            Mishap::BranchRefused => {
+                fs.with_git_state(path!("/dir/.git").as_ref(), false, |state| {
+                    state.current_branch_name = Some("wt-a".into());
+                })
+                .expect("the repository has git state");
+            }
+        }
+        cx.simulate_prompt_answer(answer);
+        cx.run_until_parked();
+
+        if !matches!(mishap, Mishap::RemovalFails) {
+            assert!(
+                !fs::Fs::is_dir(fs.as_ref(), &path).await,
+                "the worktree itself is removed"
+            );
+        }
+        branches(&fs)
+    }
+
+    /// The branch goes only once its worktree has: a removal that fails
+    /// leaves both, so nothing is half-deleted.
+    #[gpui::test]
+    async fn a_failed_removal_keeps_the_branch(cx: &mut TestAppContext) {
+        let branches =
+            delete_wt_a_answering_after("Delete Worktree and Branch", Mishap::RemovalFails, cx)
+                .await;
+        assert_eq!(branches, vec!["main".to_string(), "wt-a".to_string()]);
+    }
+
+    /// When git refuses the branch, the worktree is still gone and the branch
+    /// stays; the refusal is reported, not swallowed into a crash.
+    #[gpui::test]
+    async fn a_refused_branch_delete_keeps_the_branch(cx: &mut TestAppContext) {
+        let branches =
+            delete_wt_a_answering_after("Delete Worktree and Branch", Mishap::BranchRefused, cx)
+                .await;
+        assert_eq!(branches, vec!["main".to_string(), "wt-a".to_string()]);
+    }
+
+    /// Deleting a worktree together with its branch leaves nothing behind
+    /// that would stop a worktree of the same name being created again --
+    /// the branch was what `git worktree add -b` tripped over.
+    #[gpui::test]
+    async fn deleting_with_the_branch_takes_the_branch_too(cx: &mut TestAppContext) {
+        let branches = delete_wt_a_answering("Delete Worktree and Branch", cx).await;
+        assert_eq!(branches, vec!["main".to_string()]);
+    }
+
+    /// And the reader who keeps the branch keeps it.
+    #[gpui::test]
+    async fn deleting_the_worktree_only_keeps_the_branch(cx: &mut TestAppContext) {
+        let branches = delete_wt_a_answering("Delete Worktree Only", cx).await;
+        assert_eq!(branches, vec!["main".to_string(), "wt-a".to_string()]);
     }
 }

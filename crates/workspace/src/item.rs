@@ -133,12 +133,22 @@ pub struct TabContentParams {
     pub preview: bool,
     /// Tab content should be deemphasized when active pane does not have focus.
     pub deemphasized: bool,
+    /// Drawn on the open tab's orange fill. Set only by a tab strip that paints
+    /// that fill; a picker row or a custom strip that reuses `selected` for its
+    /// own highlight must leave it off, or its text turns white on a light row.
+    pub filled: bool,
 }
 
 impl TabContentParams {
     /// Returns the text color to be used for the tab content.
+    ///
+    /// The filled tab is drawn on the app's orange fill, so its text is the
+    /// colour that reads on that fill, focused pane or not: the fill is what
+    /// says which tab is open, and dimming its text would only blur that.
     pub fn text_color(&self) -> Color {
-        if self.deemphasized {
+        if self.filled {
+            Color::OnBrand
+        } else if self.deemphasized {
             if self.selected {
                 Color::Muted
             } else {
@@ -1463,6 +1473,7 @@ pub mod test {
         pub nav_history: Option<ItemNavHistory>,
         pub tab_descriptions: Option<Vec<&'static str>>,
         pub tab_detail: Cell<Option<usize>>,
+        pub tab_filled: Cell<Option<bool>>,
         serialize: Option<Box<dyn Fn() -> Option<Task<anyhow::Result<()>>>>>,
         focus_handle: gpui::FocusHandle,
         pub child_focus_handles: Vec<gpui::FocusHandle>,
@@ -1555,6 +1566,7 @@ pub mod test {
                 nav_history: None,
                 tab_descriptions: None,
                 tab_detail: Default::default(),
+                tab_filled: Default::default(),
                 workspace_id: Default::default(),
                 focus_handle: cx.focus_handle(),
                 serialize: None,
@@ -1671,6 +1683,7 @@ pub mod test {
 
         fn tab_content(&self, params: TabContentParams, _window: &Window, _cx: &App) -> AnyElement {
             self.tab_detail.set(params.detail);
+            self.tab_filled.set(Some(params.filled));
             gpui::div().into_any_element()
         }
 
@@ -1753,6 +1766,7 @@ pub mod test {
                     nav_history: None,
                     tab_descriptions: None,
                     tab_detail: Default::default(),
+                    tab_filled: Default::default(),
                     workspace_id: self.workspace_id,
                     focus_handle: cx.focus_handle(),
                     serialize: None,

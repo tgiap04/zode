@@ -165,7 +165,7 @@ impl ContainerPanel {
                     )
                 };
                 let colour = if is_active {
-                    Color::Default
+                    Color::OnBrand
                 } else {
                     Color::Muted
                 };

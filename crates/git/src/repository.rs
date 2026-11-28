@@ -2195,15 +2195,24 @@ impl GitRepository for RealGitRepository {
 
         self.executor
             .spawn(async move {
-                std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
-                let git = git_binary?;
-                let output = git.build_command(&args).output().await?;
-                if output.status.success() {
-                    Ok(())
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    anyhow::bail!("git worktree add failed: {stderr}");
+                let parent = path.parent().unwrap_or(&path);
+                let made = missing_ancestors(parent);
+                std::fs::create_dir_all(parent)?;
+                let outcome = async {
+                    let git = git_binary?;
+                    let output = git.build_command(&args).output().await?;
+                    if output.status.success() {
+                        Ok(())
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        anyhow::bail!("git worktree add failed: {stderr}");
+                    }
                 }
+                .await;
+                if outcome.is_err() {
+                    remove_empty_directories(&made);
+                }
+                outcome
             })
             .boxed()
     }
@@ -4142,6 +4151,36 @@ fn checkpoint_author_envs() -> HashMap<String, String> {
     ])
 }
 
+/// The directories `create_dir_all(path)` would have to make, deepest first.
+fn missing_ancestors(path: &Path) -> Vec<PathBuf> {
+    path.ancestors()
+        .take_while(|ancestor| !ancestor.as_os_str().is_empty() && !ancestor.exists())
+        .map(Path::to_path_buf)
+        .collect()
+}
+
+/// Takes back the directories a failed worktree creation made for itself.
+///
+/// `remove_dir` rather than a recursive delete, deepest first: a directory
+/// that is not empty is one something else has put a file in since, and that
+/// is never this code's to remove -- the first refusal stops the walk.
+fn remove_empty_directories(made: &[PathBuf]) {
+    for directory in made {
+        if let Err(error) = std::fs::remove_dir(directory) {
+            // Already gone says nothing about its parent, which may still be
+            // ours and empty.
+            if error.kind() == std::io::ErrorKind::NotFound {
+                continue;
+            }
+            log::debug!(
+                "kept {} after a failed worktree creation: {error}",
+                directory.display()
+            );
+            break;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -5427,6 +5466,121 @@ mod tests {
         assert_eq!(
             new_worktree.path.canonicalize().unwrap(),
             worktree_path.canonicalize().unwrap(),
+        );
+    }
+
+    /// A creation git refuses leaves nothing on disk. The parent of the
+    /// worktree path is made before git runs, and a refusal -- here a branch
+    /// name already taken -- used to leave it behind as an empty folder in the
+    /// worktrees directory, named after a worktree that never existed.
+    #[gpui::test]
+    async fn test_failed_create_worktree_leaves_no_empty_directory(cx: &mut TestAppContext) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo_dir = temp_dir.path().join("repo");
+        let worktrees_dir = temp_dir.path().join("worktrees");
+        git2::Repository::init(&repo_dir).unwrap();
+        let repo = RealGitRepository::new(
+            &repo_dir.join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+        smol::fs::write(repo_dir.join("file.txt"), "content")
+            .await
+            .unwrap();
+        repo.stage_paths(vec![repo_path("file.txt")], Arc::new(HashMap::default()))
+            .await
+            .unwrap();
+        repo.commit(
+            "Initial commit".into(),
+            None,
+            CommitOptions::default(),
+            AskPassDelegate::new(&mut cx.to_async(), |_, _, _| {}),
+            Arc::new(checkpoint_author_envs()),
+        )
+        .await
+        .unwrap();
+        repo.create_branch("taken".to_string(), None).await.unwrap();
+
+        // Laid out the way the worktree service lays it out: the name is a
+        // folder of its own, and the checkout sits inside it.
+        let worktree_path = worktrees_dir.join("taken").join("repo");
+        let result = repo
+            .create_worktree(
+                CreateWorktreeTarget::NewBranch {
+                    branch_name: "taken".to_string(),
+                    base_sha: Some("HEAD".to_string()),
+                },
+                worktree_path.clone(),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "git must refuse a branch that already exists"
+        );
+        assert!(
+            !worktrees_dir.exists(),
+            "a refused creation must not leave the folders it made for itself"
+        );
+    }
+
+    /// A folder that is already gone does not stop the walk up: its parent
+    /// may still be one the failed creation made, and empty.
+    #[test]
+    fn test_cleanup_walks_past_a_folder_already_gone() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let outer = temp_dir.path().join("outer");
+        let inner = outer.join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+
+        remove_empty_directories(&[inner.join("gone"), inner.clone(), outer.clone()]);
+
+        assert!(!outer.exists(), "the empty folders above are removed too");
+    }
+
+    /// Only what the failed creation made is taken away: a worktrees folder
+    /// that was already there, with something in it, stays exactly as it was.
+    #[gpui::test]
+    async fn test_failed_create_worktree_keeps_directories_it_did_not_make(
+        cx: &mut TestAppContext,
+    ) {
+        disable_git_global_config();
+        cx.executor().allow_parking();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let repo_dir = temp_dir.path().join("repo");
+        let worktrees_dir = temp_dir.path().join("worktrees");
+        std::fs::create_dir_all(worktrees_dir.join("other")).unwrap();
+        git2::Repository::init(&repo_dir).unwrap();
+        let repo = RealGitRepository::new(
+            &repo_dir.join(".git"),
+            None,
+            Some("git".into()),
+            cx.executor(),
+        )
+        .unwrap();
+
+        // No commit yet, so `HEAD` names nothing and git refuses.
+        let result = repo
+            .create_worktree(
+                CreateWorktreeTarget::NewBranch {
+                    branch_name: "feature".to_string(),
+                    base_sha: Some("HEAD".to_string()),
+                },
+                worktrees_dir.join("feature").join("repo"),
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(!worktrees_dir.join("feature").exists());
+        assert!(
+            worktrees_dir.join("other").is_dir(),
+            "a folder this creation did not make must survive it"
         );
     }
 

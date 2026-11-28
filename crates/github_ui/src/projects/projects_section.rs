@@ -54,6 +54,9 @@ pub enum ProjectsSectionEvent {
 /// Nothing is read while the token is known to lack `read:project`.
 pub struct ProjectsSection {
     pub(crate) context: GithubContext,
+    /// The token came from the GitHub CLI, so a missing permission is granted
+    /// there (`gh auth refresh`) rather than by signing in again.
+    pub(crate) grant_with_cli: bool,
     pub(super) scopes: OAuthScopes,
     pub(super) missing_scope: bool,
     pub(super) projects: Vec<ProjectV2>,
@@ -114,6 +117,7 @@ impl ProjectsSection {
     pub fn new(context: GithubContext, scopes: OAuthScopes, cx: &mut Context<Self>) -> Self {
         Self {
             context,
+            grant_with_cli: false,
             scopes,
             missing_scope: false,
             projects: Vec::new(),

@@ -260,12 +260,12 @@ impl FloatingPane {
             .h(placement.size.height)
             .flex()
             .flex_col()
-            .rounded_lg()
+            .when(!self.maximized, |window| window.rounded_xl())
             .overflow_hidden()
             .bg(colors.elevated_surface_background)
             .border_1()
             .border_color(colors.border)
-            .shadow_lg()
+            .when(!self.maximized, |window| window.shadow_xl())
             // Re-handles the workspace's own pane-navigation actions here,
             // the same way `terminal_panel` does inside the dock: GPUI
             // dispatches from the focused element outward, so these only run
@@ -341,74 +341,134 @@ impl FloatingPane {
                             .into_any_element()
                     }),
             )
-            .children(
-                Grip::ALL
-                    .into_iter()
-                    .map(|grip| self.render_grip(grip, placement, cx)),
-            )
+            // A window that fills the layer has no edge left to pull.
+            .when(!self.maximized, |window| {
+                window.children(
+                    Grip::ALL
+                        .into_iter()
+                        .map(|grip| self.render_grip(grip, placement, cx)),
+                )
+            })
             .into_any_element()
     }
 
-    /// The strip that moves the window, with its minimise and close buttons, and
-    /// the `+` menu when the tab bar has none.
+    /// The strip that moves the window: the three window controls on the
+    /// left, the active tab's name in the middle, and the `+` menu on the
+    /// right when the tab bar has none.
+    ///
+    /// Laid out the way a macOS window is, because that is the window people
+    /// already know how to drive: red ends it, yellow puts it away, green
+    /// fills the space. The two outer columns share one width so the title
+    /// stays centred on the window rather than on whatever is left between
+    /// them.
     fn render_title_bar(&self, placement: Bounds<Pixels>, cx: &mut Context<Self>) -> AnyElement {
         // An empty window shows the same list as its body, and has no tab bar.
         let needs_plus = !workspace::tab_bar_buttons_shown(cx) && !self.is_empty(cx);
+        let maximized = self.maximized;
+        let colors = cx.theme().colors();
+        let status = cx.theme().status();
+        let title: SharedString = self
+            .active_pane
+            .read(cx)
+            .active_item()
+            .map(|item| item.tab_content_text(0, cx))
+            .unwrap_or_else(|| "Floating Window".into());
+        let side_width = px(64.);
+
         h_flex()
             .id("floating-pane-title")
             .h(Tab::container_height(cx))
             .flex_none()
-            .px_2()
-            .justify_end()
+            .px_3()
+            .bg(colors.tab_bar_background)
             .border_b_1()
-            .border_color(cx.theme().colors().border)
-            .cursor(gpui::CursorStyle::OpenHand)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, event: &MouseDownEvent, _window, _cx| {
-                    this.grab(Grab::Move, event, placement);
-                }),
-            )
-            .on_drag(DraggedFloatingPane, |_, _, _, cx| {
-                cx.new(|_| DraggedFloatingPane)
+            .border_color(colors.border)
+            // Filling the layer, it has nowhere to be moved to.
+            .when(!maximized, |title_bar| {
+                title_bar
+                    .cursor(gpui::CursorStyle::OpenHand)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _window, _cx| {
+                            this.grab(Grab::Move, event, placement);
+                        }),
+                    )
+                    .on_drag(DraggedFloatingPane, |_, _, _, cx| {
+                        cx.new(|_| DraggedFloatingPane)
+                    })
             })
             .child(
                 h_flex()
-                    .gap_0p5()
+                    .group(WINDOW_CONTROLS)
+                    .w(side_width)
+                    .flex_none()
+                    .gap_2()
+                    // Red and yellow, and the difference between them is the
+                    // whole reason both exist: one ends everything the window
+                    // holds, the other hides it and leaves everything running.
+                    .child(ui::window_control(
+                        "floating-pane-close",
+                        WINDOW_CONTROLS,
+                        status.error,
+                        IconName::Close,
+                        Tooltip::for_action_title(
+                            "Close \u{2014} ends its terminals and threads",
+                            &zode_actions::floating_pane::CloseFloatingPane,
+                        ),
+                        Some(Box::new(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.confirm_shut_down(window, cx)
+                        }))),
+                        cx,
+                    ))
+                    .child(ui::window_control(
+                        "floating-pane-minimise",
+                        WINDOW_CONTROLS,
+                        status.warning,
+                        IconName::Dash,
+                        Tooltip::for_action_title(
+                            "Minimise \u{2014} keeps its terminals running",
+                            &zode_actions::floating_pane::ToggleFloatingPane,
+                        ),
+                        Some(Box::new(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            this.toggle(window, cx)
+                        }))),
+                        cx,
+                    ))
+                    .child(ui::window_control(
+                        "floating-pane-maximise",
+                        WINDOW_CONTROLS,
+                        status.success,
+                        if maximized {
+                            IconName::Minimize
+                        } else {
+                            IconName::Maximize
+                        },
+                        Tooltip::for_action_title(
+                            if maximized { "Restore" } else { "Maximise" },
+                            &zode_actions::floating_pane::ToggleMaximizeFloatingPane,
+                        ),
+                        Some(Box::new(cx.listener(
+                            |this, _: &ClickEvent, _window, cx| this.toggle_maximized(cx),
+                        ))),
+                        cx,
+                    )),
+            )
+            .child(
+                h_flex().flex_1().min_w_0().justify_center().child(
+                    Label::new(title)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .truncate(),
+                ),
+            )
+            .child(
+                h_flex()
+                    .w(side_width)
+                    .flex_none()
+                    .justify_end()
                     .when(needs_plus, |buttons| {
                         buttons.child(crate::entries::title_bar_menu(cx.weak_entity()))
-                    })
-                    // Two buttons, and the difference between them is the whole
-                    // reason the second exists: one hides the window and leaves
-                    // everything running, the other ends it.
-                    .child(
-                        IconButton::new("floating-pane-minimise", IconName::Dash)
-                            .icon_size(IconSize::Small)
-                            .tooltip(|_window, cx| {
-                                Tooltip::for_action(
-                                    "Minimise \u{2014} keeps its terminals running",
-                                    &zode_actions::floating_pane::ToggleFloatingPane,
-                                    cx,
-                                )
-                            })
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.toggle(window, cx)
-                            })),
-                    )
-                    .child(
-                        IconButton::new("floating-pane-close", IconName::Close)
-                            .icon_size(IconSize::Small)
-                            .tooltip(|_window, cx| {
-                                Tooltip::for_action(
-                                    "Close \u{2014} ends its terminals and threads",
-                                    &zode_actions::floating_pane::CloseFloatingPane,
-                                    cx,
-                                )
-                            })
-                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                                this.confirm_shut_down(window, cx)
-                            })),
-                    ),
+                    }),
             )
             .into_any_element()
     }
@@ -593,3 +653,7 @@ impl FloatingPane {
             .into_any_element()
     }
 }
+
+/// The group the three window controls share, so hovering any one of them
+/// shows the glyph in all three -- the way a macOS window does.
+const WINDOW_CONTROLS: &str = "floating-pane-window-controls";

@@ -25,7 +25,7 @@ const TRANSLATE_SETTINGS_PATH: &str = "translate";
 pub struct SelectionSource {
     pub text: String,
     pub position: Point<Pixels>,
-    pub replace_target: Option<EditorReplaceTarget>,
+    pub replace_target: Option<ReplaceTarget>,
     /// The selection's length in characters when a source measured it over
     /// the limit without copying it; `text` is then empty.
     pub too_long: Option<usize>,
@@ -33,6 +33,50 @@ pub struct SelectionSource {
     /// something the user selected. It is shown for the user to confirm and
     /// sent only then.
     pub program_copy: bool,
+}
+
+/// Where a translation can be written back to.
+pub enum ReplaceTarget {
+    /// The selected span of an editor.
+    Editor(EditorReplaceTarget),
+    /// The input of the program in a terminal, replaced whole.
+    TerminalInput(crate::terminal_source::TerminalInputTarget),
+}
+
+impl ReplaceTarget {
+    fn check(&self, original: &str, cx: &App) -> Result<(), ReplaceBlocked> {
+        match self {
+            Self::Editor(target) => target.check(original, cx),
+            Self::TerminalInput(target) => target.check(),
+        }
+    }
+
+    fn replace(
+        &self,
+        original: &str,
+        replacement: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<(), ReplaceBlocked> {
+        match self {
+            Self::Editor(target) => target.replace(original, replacement, window, cx),
+            Self::TerminalInput(target) => target.replace(replacement, cx),
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Editor(_) => "Replace",
+            Self::TerminalInput(_) => "Replace Input",
+        }
+    }
+
+    fn tooltip(&self) -> &'static str {
+        match self {
+            Self::Editor(_) => "Replace the selection with the translation",
+            Self::TerminalInput(_) => "Clear the agent's input and paste the translation",
+        }
+    }
 }
 
 /// How much of a program's copy the confirmation shows.
@@ -81,6 +125,9 @@ pub struct TranslationPopover {
     state: PopoverState,
     /// How many hidden characters were removed from the shown translation.
     hidden_characters_removed: usize,
+    /// Why the last press of Replace did nothing, when the reason passes --
+    /// the agent still writing -- so the button stays to be pressed again.
+    replace_notice: Option<ReplaceBlocked>,
     /// Escape closes the popover only while the focus is in here, so it
     /// still reaches a modal, the command palette or vim elsewhere.
     escape_scope: Option<FocusHandle>,
@@ -208,6 +255,7 @@ impl TranslationPopover {
             to,
             state: PopoverState::Loading,
             hidden_characters_removed: 0,
+            replace_notice: None,
             escape_scope: None,
             hosted_in_menu: false,
             _translation: Task::ready(()),
@@ -326,13 +374,12 @@ impl TranslationPopover {
         let Some(target) = self.source.replace_target.as_ref() else {
             return;
         };
-        if target
-            .replace(&self.source.text, translation, window, cx)
-            .is_ok()
-        {
-            cx.emit(DismissEvent);
-        } else {
-            cx.notify();
+        match target.replace(&self.source.text, translation, window, cx) {
+            Ok(()) => cx.emit(DismissEvent),
+            Err(reason) => {
+                self.replace_notice = Some(reason);
+                cx.notify();
+            }
         }
     }
 
@@ -528,9 +575,17 @@ impl TranslationPopover {
         }
         let replace = self.replace_availability(cx).map(|availability| {
             let blocked_reason = availability.err().map(|reason| reason.to_string());
+            let notice = blocked_reason
+                .clone()
+                .or_else(|| self.replace_notice.map(|reason| reason.to_string()));
+            let (label, tooltip) = self
+                .source
+                .replace_target
+                .as_ref()
+                .map_or(("Replace", ""), |target| (target.label(), target.tooltip()));
             h_flex()
                 .gap_1()
-                .when_some(blocked_reason.clone(), |this, reason| {
+                .when_some(notice, |this, reason| {
                     this.child(
                         div()
                             .debug_selector(|| "translate-replace-blocked-reason".into())
@@ -543,11 +598,11 @@ impl TranslationPopover {
                 })
                 .child(
                     div().debug_selector(|| "translate-replace".into()).child(
-                        Button::new("translate-replace", "Replace")
+                        Button::new("translate-replace", label)
                             .style(ButtonStyle::Filled)
                             .label_size(LabelSize::Small)
                             .disabled(blocked_reason.is_some())
-                            .tooltip(Tooltip::text("Replace the selection with the translation"))
+                            .tooltip(Tooltip::text(tooltip))
                             .on_click(cx.listener(|this, _, window, cx| this.replace(window, cx))),
                     ),
                 )

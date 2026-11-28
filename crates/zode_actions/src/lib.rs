@@ -893,6 +893,12 @@ pub mod database {
             ToggleDatabase,
             /// Opens the dialog for adding a database connection.
             AddConnection,
+            /// Picks SQLite database files and adds each as a connection,
+            /// opening the first.
+            OpenDatabaseFile,
+            /// Picks a folder and adds the SQLite database files found directly
+            /// inside it.
+            OpenDatabaseFolder,
             /// Opens a second database tab beside the code, where `ToggleDatabase`
             /// brings the existing one forward.
             OpenInEditorTab,
@@ -1012,6 +1018,9 @@ pub mod floating_pane {
             /// bar: minimising hides the window and leaves everything running,
             /// this ends it. Asks first whenever there is anything to lose.
             CloseFloatingPane,
+            /// Fills the area the floating window floats over with it, or
+            /// puts it back where it was.
+            ToggleMaximizeFloatingPane,
             /// Opens a terminal as a tab in the floating window.
             NewTerminal,
             /// Opens an unsaved markdown note as a tab in the floating window.
@@ -1024,7 +1033,7 @@ pub mod floating_pane {
             /// focus sits inside a pane, so this is not a second code path —
             /// it is a window-scoped name a user can bind under the
             /// `FloatingPane` context without touching the editor's own split
-            /// bindings, matching the five siblings above.
+            /// bindings, matching the six siblings above.
             SplitRight,
             /// Splits the floating window's active pane to the left. See
             /// `SplitRight` for why this exists alongside `pane::SplitLeft`.

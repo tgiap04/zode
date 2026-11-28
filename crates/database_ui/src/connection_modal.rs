@@ -42,12 +42,31 @@ fn fallback_form() -> ConnectionForm {
 /// A stand-in engine for the URL-only path, so the second screen has a name and
 /// a driver like any other.
 /// Every engine, installed ones first.
-///
-/// Installed first, then alphabetically: an engine someone can actually reach
-/// today should not sit below one they cannot.
 fn sorted_catalogue(drivers: &DriverHost, cx: &mut App) -> Vec<CatalogueEntry> {
-    let mut engines = driver_registry::catalogue(drivers, cx);
-    engines.sort_by(|a, b| b.installed.cmp(&a.installed).then(a.name.cmp(&b.name)));
+    sort_engines(driver_registry::catalogue(drivers, cx))
+}
+
+/// Groups kept whole, in the order the catalogue first names them; inside a
+/// group, installed engines first and then by name.
+///
+/// The list is drawn as a header per run of one group, so sorting across groups
+/// -- installed first, then by name, which this used to do -- cut a group in two
+/// and showed its header twice. Sorting here rather than regrouping when drawn
+/// keeps the drawn order and the arrow-key order the same list.
+fn sort_engines(mut engines: Vec<CatalogueEntry>) -> Vec<CatalogueEntry> {
+    let mut group_order: Vec<SharedString> = Vec::new();
+    for engine in &engines {
+        if !group_order.contains(&engine.group) {
+            group_order.push(engine.group.clone());
+        }
+    }
+    let rank = |group: &SharedString| group_order.iter().position(|known| known == group);
+    engines.sort_by(|a, b| {
+        rank(&a.group)
+            .cmp(&rank(&b.group))
+            .then(b.installed.cmp(&a.installed))
+            .then(a.name.cmp(&b.name))
+    });
     engines
 }
 
@@ -613,6 +632,17 @@ pub(crate) struct Filled {
 }
 
 impl Filled {
+    /// A connection to a database that is one file: its URL is the file's
+    /// path, and it has no secret.
+    pub(crate) fn for_file(name: String, driver: &str, url: String) -> Self {
+        Self {
+            name,
+            driver: driver.to_string(),
+            url,
+            secret: None,
+        }
+    }
+
     /// Writes the connection into the user's settings, and its password into
     /// the keychain.
     ///
@@ -666,7 +696,12 @@ impl Filled {
     /// Deferred, because the node it opens does not exist yet: the settings
     /// write above is what creates it, and the panel only hears about that on
     /// the next settings notification.
-    fn connect(&self, workspace: &WeakEntity<Workspace>, window: &mut Window, cx: &mut App) {
+    pub(crate) fn connect(
+        &self,
+        workspace: &WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let (workspace, name) = (workspace.clone(), self.name.clone());
         window
             .spawn(cx, async move |cx| {
@@ -728,6 +763,41 @@ mod tests {
     use database::signature::SIGNED_MANIFEST_ASSET;
     use http_client::{FakeHttpClient, HttpClient};
     use tempfile::TempDir;
+
+    /// Each group is one run, so its header is drawn once; inside it the
+    /// engines that are installed come first.
+    #[test]
+    fn every_group_is_listed_once_and_whole() {
+        let entry = |name: &'static str, group: &'static str, installed: bool| CatalogueEntry {
+            name: SharedString::new_static(name),
+            group: SharedString::new_static(group),
+            installed,
+            ..engine(installed)
+        };
+        let sorted = sort_engines(vec![
+            entry("MariaDB", "Relational", false),
+            entry("MongoDB", "Document", false),
+            entry("MySQL", "Relational", true),
+            entry("CockroachDB", "Relational", false),
+            entry("Oracle", "Relational", false),
+        ]);
+        let names: Vec<_> = sorted.iter().map(|engine| engine.name.as_ref()).collect();
+        assert_eq!(
+            names,
+            ["MySQL", "CockroachDB", "MariaDB", "Oracle", "MongoDB"]
+        );
+        let mut seen: Vec<&str> = Vec::new();
+        for engine in &sorted {
+            if seen.last() != Some(&engine.group.as_ref()) {
+                assert!(
+                    !seen.contains(&engine.group.as_ref()),
+                    "{} appears in two places",
+                    engine.group
+                );
+                seen.push(engine.group.as_ref());
+            }
+        }
+    }
 
     fn engine(installed: bool) -> CatalogueEntry {
         CatalogueEntry {

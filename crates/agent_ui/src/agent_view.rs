@@ -2706,7 +2706,9 @@ impl workspace::item::Item for AgentView {
         let handle = self.self_handle.clone();
         // What `ui::Tab` paints behind this content. The mark floors its dots
         // against it, and the panel's background is not what a tab sits on.
-        let tab_background = if params.selected {
+        let tab_background = if params.filled {
+            ui::brand_solid(cx)
+        } else if params.selected {
             cx.theme().colors().tab_active_background
         } else {
             cx.theme().colors().tab_inactive_background

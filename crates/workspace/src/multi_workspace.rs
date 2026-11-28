@@ -8,7 +8,7 @@ use gpui::{
     WeakEntity, Window, WindowId, actions, deferred, px,
 };
 pub use project::ProjectGroupKey;
-use project::{DisableAiSettings, Project, ProjectActivity};
+use project::{DisableAiSettings, Project, ProjectActivity, WorktreePaths};
 use remote::RemoteConnectionOptions;
 use settings::Settings;
 use std::future::Future;
@@ -828,11 +828,11 @@ impl MultiWorkspace {
             move |this, _project, event, _window, cx| match event {
                 project::Event::WorktreePathsChanged { old_worktree_paths } => {
                     if let Some(workspace) = workspace.upgrade() {
-                        let host = workspace
-                            .read(cx)
-                            .project()
-                            .read(cx)
-                            .remote_connection_options(cx);
+                        let project = workspace.read(cx).project().read(cx);
+                        if lost_its_repository(old_worktree_paths, &project.worktree_paths(cx)) {
+                            return;
+                        }
+                        let host = project.remote_connection_options(cx);
                         let old_key =
                             ProjectGroupKey::from_worktree_paths(old_worktree_paths, host);
                         this.handle_project_group_key_change(&workspace, &old_key, cx);
@@ -1687,7 +1687,24 @@ impl MultiWorkspace {
         let remove_task = self.remove(
             workspaces,
             move |this, window, cx| {
-                if let Some(neighbor_key) = neighbor_key {
+                // A remote neighbour can only be handed over if it is already
+                // open: reopening it means a connection, and the UI that makes
+                // one lives above this crate. Opening its paths locally instead
+                // is what put a WSL project back on the rail as an empty local
+                // folder -- the Linux path does not exist on the Windows side,
+                // so it opened as a new file named after the project.
+                if let Some(neighbor_key) = neighbor_key.as_ref()
+                    && let Some(host) = neighbor_key.host()
+                {
+                    if let Some(workspace) = this.workspace_for_paths_excluding(
+                        neighbor_key.path_list(),
+                        Some(&host),
+                        &excluded_workspaces,
+                        cx,
+                    ) {
+                        return Task::ready(Ok(workspace));
+                    }
+                } else if let Some(neighbor_key) = neighbor_key {
                     return this.find_or_create_local_workspace(
                         neighbor_key.path_list().clone(),
                         Some(neighbor_key.clone()),
@@ -1699,7 +1716,8 @@ impl MultiWorkspace {
                     );
                 }
 
-                // No other project groups remain — create an empty workspace.
+                // No other project groups remain, or the only neighbour is a
+                // remote one that is not open — create an empty workspace.
                 let app_state = this.workspace().read(cx).app_state().clone();
                 let project = Project::local(
                     app_state.client.clone(),
@@ -3519,4 +3537,18 @@ impl Render for MultiWorkspace {
             },
         )
     }
+}
+
+/// Whether a workspace's paths changed only because a linked worktree stopped
+/// resolving to its main repository.
+///
+/// Deleting a linked worktree takes its `.git` file away before the folder,
+/// and from then on the worktree names itself rather than the repository it
+/// belonged to. That is the worktree going away, not the project changing
+/// identity: re-keying on it moved the main project's group onto the deleted
+/// folder and put a second, empty entry on the rail.
+fn lost_its_repository(old: &WorktreePaths, new: &WorktreePaths) -> bool {
+    old.folder_path_list() == new.folder_path_list()
+        && new.main_worktree_path_list() == new.folder_path_list()
+        && old.main_worktree_path_list() != old.folder_path_list()
 }

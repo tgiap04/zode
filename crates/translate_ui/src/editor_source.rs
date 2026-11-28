@@ -18,6 +18,10 @@ pub enum ReplaceBlocked {
     ReadOnly,
     TextChanged,
     SpansExcerpts,
+    TerminalClosed,
+    /// The program in the terminal is still writing: clearing its input now
+    /// could interrupt an agent mid-answer instead.
+    TerminalBusy,
 }
 
 impl std::fmt::Display for ReplaceBlocked {
@@ -27,6 +31,8 @@ impl std::fmt::Display for ReplaceBlocked {
             Self::ReadOnly => "The editor is read-only.",
             Self::TextChanged => "The text changed since it was translated.",
             Self::SpansExcerpts => "The selection spans more than one excerpt.",
+            Self::TerminalClosed => "The terminal was closed.",
+            Self::TerminalBusy => "The agent is still working. Replace once it stops.",
         })
     }
 }
@@ -235,7 +241,10 @@ fn selection_source(
         Some(SelectionSource {
             text,
             position,
-            replace_target: Some(EditorReplaceTarget::new(cx.weak_entity(), range)),
+            replace_target: Some(crate::ReplaceTarget::Editor(EditorReplaceTarget::new(
+                cx.weak_entity(),
+                range,
+            ))),
             too_long,
             program_copy: false,
         })

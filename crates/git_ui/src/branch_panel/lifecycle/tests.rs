@@ -1748,6 +1748,81 @@ mod confirm_delete_checkout {
         (panel, id, cx)
     }
 
+    /// A checkout on a branch of its own, so the delete prompt offers to take
+    /// the branch -- and the panel reads that branch from its own `repos`
+    /// rather than from the picker's list.
+    async fn delete_a_checkout_on_a_branch_answering(
+        answer: &str,
+        cx: &mut TestAppContext,
+    ) -> Vec<String> {
+        super::init_test(cx);
+        let fs = fs::FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            "/repos/zode",
+            serde_json::json!({ ".git": {}, "src": { "main.rs": "fn main() {}" } }),
+        )
+        .await;
+        fs.insert_branches("/repos/zode/.git".as_ref(), &["main", "wt-a"]);
+        fs.add_linked_worktree_for_repo(
+            "/repos/zode/.git".as_ref(),
+            false,
+            git::repository::Worktree {
+                path: PathBuf::from(TARGET),
+                ref_name: Some("refs/heads/wt-a".into()),
+                sha: "deadbeef".into(),
+                is_main: false,
+                is_bare: false,
+            },
+        )
+        .await;
+        let project = project::Project::test(fs.clone(), ["/repos/zode".as_ref()], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| workspace::Workspace::test_new(project, window, cx));
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            BranchPanel::new(workspace, window, cx)
+        });
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| {
+            panel.stale = true;
+            panel.refresh_if_stale(cx);
+        });
+        cx.run_until_parked();
+        let id = panel.read_with(cx, |panel, _| panel.repos[0].id);
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.confirm_delete_checkout(id, PathBuf::from(TARGET), "wt-a".into(), window, cx);
+        });
+        cx.run_until_parked();
+        let (_, detail) = cx.pending_prompt().expect("the delete must prompt");
+        assert!(
+            detail.contains("Its branch wt-a stays unless you delete it too"),
+            "the prompt names the branch it can take: {detail}"
+        );
+        cx.simulate_prompt_answer(answer);
+        cx.run_until_parked();
+
+        let mut branches = fs
+            .with_git_state("/repos/zode/.git".as_ref(), false, |state| {
+                state.branches.iter().cloned().collect::<Vec<_>>()
+            })
+            .expect("the repository has git state");
+        branches.sort();
+        branches
+    }
+
+    #[gpui::test]
+    async fn deleting_a_checkout_with_its_branch_takes_the_branch(cx: &mut TestAppContext) {
+        let branches =
+            delete_a_checkout_on_a_branch_answering("Delete Worktree and Branch", cx).await;
+        assert_eq!(branches, vec!["main".to_string()]);
+    }
+
+    #[gpui::test]
+    async fn deleting_a_checkout_only_keeps_its_branch(cx: &mut TestAppContext) {
+        let branches = delete_a_checkout_on_a_branch_answering("Delete Worktree Only", cx).await;
+        assert_eq!(branches, vec!["main".to_string(), "wt-a".to_string()]);
+    }
+
     /// The safety gate. `TARGET` is pinned first so a pruned pin is
     /// observable evidence that the delete ran at all -- proving cancel left
     /// it alone is only meaningful next to proof that answering would not

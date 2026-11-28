@@ -156,16 +156,31 @@ pub(crate) fn checkout_session_plan(
 /// sessions. Kept as its own function -- and its text copied verbatim from
 /// `checkout_menu`'s existing prompt rather than retyped -- so a plan holding
 /// nothing produces exactly the sentence a user already sees today.
-fn checkout_removal_detail(label: &str, path: &Path) -> String {
-    format!(
-        "{}\n\nThe worktree at {} will be removed. Its branch and its commits stay.",
-        label,
-        path.display()
-    )
+///
+/// A worktree on a branch says so by name: the branch outlives the worktree
+/// unless the reader takes it too, and a branch left behind is what makes
+/// creating a worktree of the same name fail later.
+fn checkout_removal_detail(label: &str, path: &Path, branch: Option<&str>) -> String {
+    match branch {
+        None => format!(
+            "{}\n\nThe worktree at {} will be removed. Its branch and its commits stay.",
+            label,
+            path.display()
+        ),
+        Some(branch) => format!(
+            "{}\n\nThe worktree at {} will be removed. Its branch {} stays unless you \
+             delete it too; it is kept anyway while it holds commits not yet merged \
+             into its upstream or the current branch.",
+            label,
+            path.display(),
+            branch
+        ),
+    }
 }
 
 /// The confirmation body for deleting the checkout at `path` (labelled
-/// `label`), given what `plan` would additionally take.
+/// `label`, on `branch` if it has one), given what `plan` would additionally
+/// take.
 ///
 /// An empty plan returns [`checkout_removal_detail`] unchanged -- there is
 /// nothing new to say. A non-empty plan appends `agent_ui::delete_all_detail`
@@ -174,8 +189,13 @@ fn checkout_removal_detail(label: &str, path: &Path) -> String {
 /// [`WORKTREE_SCOPE`]) plus one line naming the running agents this delete
 /// stops, so the prompt does not describe only the git half of what pressing
 /// the button does.
-pub(crate) fn confirm_detail(label: &str, path: &Path, plan: &agent_ui::DeleteAll) -> String {
-    let removal = checkout_removal_detail(label, path);
+pub(crate) fn confirm_detail(
+    label: &str,
+    path: &Path,
+    branch: Option<&str>,
+    plan: &agent_ui::DeleteAll,
+) -> String {
+    let removal = checkout_removal_detail(label, path, branch);
     if plan.is_empty() {
         return removal;
     }
@@ -190,20 +210,72 @@ pub(crate) fn confirm_detail(label: &str, path: &Path, plan: &agent_ui::DeleteAl
     )
 }
 
-/// The buttons for the confirmation: today's `["Delete", "Cancel"]` when the
-/// plan takes nothing beyond the checkout itself, and a third route once
-/// sessions are involved, so a user who wants to keep the transcripts is not
-/// forced to choose only between taking everything and cancelling outright.
-pub(crate) fn confirm_buttons(plan: &agent_ui::DeleteAll) -> &'static [&'static str] {
-    if plan.is_empty() {
-        &["Delete", "Cancel"]
-    } else {
-        &[
-            "Delete Worktree and Sessions",
-            "Delete Worktree Only",
-            "Cancel",
-        ]
-    }
+/// What a button in the delete-worktree prompt takes besides the worktree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DeleteChoice {
+    pub(crate) take_sessions: bool,
+    pub(crate) delete_branch: bool,
+}
+
+/// The prompt's buttons, each paired with what pressing it decides; `None` is
+/// Cancel, always last.
+///
+/// One list rather than a label array and a separate index mapping, so the
+/// button a reader presses and the thing it does cannot drift apart as routes
+/// are added. With nothing to take besides the worktree, it is today's
+/// `["Delete", "Cancel"]`. Each extra -- sessions, a branch -- adds the route
+/// that takes it, and "Delete Worktree Only" stays so keeping both is never
+/// reachable only through Cancel.
+pub(crate) fn confirm_choices(
+    plan: &agent_ui::DeleteAll,
+    has_branch: bool,
+) -> Vec<(&'static str, Option<DeleteChoice>)> {
+    let worktree_only = DeleteChoice {
+        take_sessions: false,
+        delete_branch: false,
+    };
+    let with_sessions = DeleteChoice {
+        take_sessions: true,
+        ..worktree_only
+    };
+    let with_branch = DeleteChoice {
+        delete_branch: true,
+        ..worktree_only
+    };
+    let everything = DeleteChoice {
+        take_sessions: true,
+        delete_branch: true,
+    };
+    let mut choices = match (plan.is_empty(), has_branch) {
+        (true, false) => vec![("Delete", Some(worktree_only))],
+        (true, true) => vec![
+            ("Delete Worktree and Branch", Some(with_branch)),
+            ("Delete Worktree Only", Some(worktree_only)),
+        ],
+        (false, false) => vec![
+            ("Delete Worktree and Sessions", Some(with_sessions)),
+            ("Delete Worktree Only", Some(worktree_only)),
+        ],
+        (false, true) => vec![
+            ("Delete Worktree, Branch and Sessions", Some(everything)),
+            ("Delete Worktree and Sessions", Some(with_sessions)),
+            ("Delete Worktree and Branch", Some(with_branch)),
+            ("Delete Worktree Only", Some(worktree_only)),
+        ],
+    };
+    choices.push(("Cancel", None));
+    choices
+}
+
+/// Reads the prompt's answer against the very list it was built from. A
+/// dismissed prompt, or an index past the end, is Cancel.
+pub(crate) fn choice_for(
+    choices: &[(&'static str, Option<DeleteChoice>)],
+    answer: Option<usize>,
+) -> Option<DeleteChoice> {
+    answer
+        .and_then(|index| choices.get(index))
+        .and_then(|(_, choice)| *choice)
 }
 
 /// Every agent tab this window can reach that is running in `worktree`,
@@ -464,19 +536,88 @@ mod tests {
             targets: Vec::new(),
             total_bytes: 0,
         };
-        let detail = confirm_detail("wt-a", Path::new("/repo/wt-a"), &plan);
+        let detail = confirm_detail("wt-a", Path::new("/repo/wt-a"), None, &plan);
         assert_eq!(
             detail,
             "wt-a\n\nThe worktree at /repo/wt-a will be removed. Its branch and its commits stay."
         );
-        assert_eq!(confirm_buttons(&plan), &["Delete", "Cancel"]);
+        assert_eq!(labels(&confirm_choices(&plan, false)), ["Delete", "Cancel"]);
+    }
+
+    fn labels(choices: &[(&'static str, Option<DeleteChoice>)]) -> Vec<&'static str> {
+        choices.iter().map(|(label, _)| *label).collect()
+    }
+
+    /// A worktree on a branch names it, and offers to take it: without that
+    /// route a deleted worktree's branch stays behind and blocks creating a
+    /// worktree of the same name again.
+    #[test]
+    fn a_worktree_on_a_branch_offers_to_delete_it() {
+        let plan = agent_ui::DeleteAll {
+            targets: Vec::new(),
+            total_bytes: 0,
+        };
+        let detail = confirm_detail("wt-a", Path::new("/repo/wt-a"), Some("feature"), &plan);
+        assert!(detail.contains("Its branch feature stays unless you delete it too"));
+
+        let choices = confirm_choices(&plan, true);
+        assert_eq!(
+            labels(&choices),
+            [
+                "Delete Worktree and Branch",
+                "Delete Worktree Only",
+                "Cancel"
+            ]
+        );
+        assert_eq!(
+            choice_for(&choices, Some(0)),
+            Some(DeleteChoice {
+                take_sessions: false,
+                delete_branch: true
+            })
+        );
+        assert_eq!(
+            choice_for(&choices, Some(1)),
+            Some(DeleteChoice {
+                take_sessions: false,
+                delete_branch: false
+            })
+        );
+        assert_eq!(choice_for(&choices, Some(2)), None);
+        assert_eq!(choice_for(&choices, None), None);
+    }
+
+    /// With sessions and a branch both in play, every combination that keeps
+    /// something is still one press away, and each button does what it says.
+    #[test]
+    fn sessions_and_a_branch_each_keep_their_own_route() {
+        let index = SessionIndex::new(vec![claude_session("a", "/repo/wt-a")]);
+        let plan = plan_session_deletion(&index, Path::new("/repo/wt-a"), &[]);
+        let choices = confirm_choices(&plan, true);
+        for (label, choice) in &choices {
+            let Some(choice) = choice else {
+                assert_eq!(*label, "Cancel");
+                continue;
+            };
+            assert_eq!(
+                label.contains("Sessions"),
+                choice.take_sessions,
+                "{label} must take sessions exactly when it says so"
+            );
+            assert_eq!(
+                label.contains("Branch"),
+                choice.delete_branch,
+                "{label} must take the branch exactly when it says so"
+            );
+        }
+        assert_eq!(choices.last().map(|(label, _)| *label), Some("Cancel"));
     }
 
     #[test]
     fn a_plan_holding_only_trashed_sessions_says_they_are_recoverable() {
         let index = SessionIndex::new(vec![claude_session("a", "/repo/wt-a")]);
         let plan = plan_session_deletion(&index, Path::new("/repo/wt-a"), &[]);
-        let detail = confirm_detail("wt-a", Path::new("/repo/wt-a"), &plan);
+        let detail = confirm_detail("wt-a", Path::new("/repo/wt-a"), None, &plan);
         assert!(detail.contains("will move to the trash"));
         assert!(detail.contains("can be recovered from there"));
         assert!(detail.contains(WORKTREE_SCOPE));
@@ -488,7 +629,7 @@ mod tests {
     fn a_plan_holding_an_opencode_session_says_it_cannot_be_undone() {
         let index = SessionIndex::new(vec![opencode_session("a", "/repo/wt-a")]);
         let plan = plan_session_deletion(&index, Path::new("/repo/wt-a"), &[]);
-        let detail = confirm_detail("wt-a", Path::new("/repo/wt-a"), &plan);
+        let detail = confirm_detail("wt-a", Path::new("/repo/wt-a"), None, &plan);
         assert!(detail.contains("their agents' own"));
         assert!(detail.contains("This cannot be undone."));
         assert!(detail.contains(WORKTREE_SCOPE));
@@ -501,7 +642,7 @@ mod tests {
             opencode_session("commanded", "/repo/wt-a"),
         ]);
         let plan = plan_session_deletion(&index, Path::new("/repo/wt-a"), &[]);
-        let detail = confirm_detail("wt-a", Path::new("/repo/wt-a"), &plan);
+        let detail = confirm_detail("wt-a", Path::new("/repo/wt-a"), None, &plan);
         assert!(detail.contains("1 session will move to the trash"));
         assert!(detail.contains("1 session will be deleted from their"));
         assert!(detail.contains("This cannot be undone."));
@@ -516,7 +657,7 @@ mod tests {
         ]);
         let plan = plan_session_deletion(&index, Path::new("/repo/wt-a"), &[]);
         assert_eq!(plan.total_bytes, 2048);
-        let detail = confirm_detail("wt-a", Path::new("/repo/wt-a"), &plan);
+        let detail = confirm_detail("wt-a", Path::new("/repo/wt-a"), None, &plan);
         assert!(detail.contains("2 sessions will move to the trash (2 KB)"));
     }
 
@@ -525,8 +666,8 @@ mod tests {
         let index = SessionIndex::new(vec![claude_session("a", "/repo/wt-a")]);
         let plan = plan_session_deletion(&index, Path::new("/repo/wt-a"), &[]);
         assert_eq!(
-            confirm_buttons(&plan),
-            &[
+            labels(&confirm_choices(&plan, false)),
+            [
                 "Delete Worktree and Sessions",
                 "Delete Worktree Only",
                 "Cancel"

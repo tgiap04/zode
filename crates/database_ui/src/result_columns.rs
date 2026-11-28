@@ -34,6 +34,14 @@ pub(crate) fn column_width_rems(longest_characters: usize) -> f32 {
         .clamp(MIN_COLUMN_REMS, MAX_COLUMN_REMS)
 }
 
+/// What the header asks room for, in characters: the name, the type beside
+/// it, and a gap and an icon's worth for the key or the sort arrow. Counting
+/// the name alone cut a short column such as `id integer` to an ellipsis.
+fn header_characters(name: &str, type_name: &str) -> usize {
+    let type_characters = type_name.chars().count();
+    name.chars().count() + type_characters + if type_characters > 0 { 1 } else { 0 } + 2
+}
+
 fn starting_widths(result: &ResultSet) -> Vec<AbsoluteLength> {
     result
         .columns
@@ -48,7 +56,7 @@ fn starting_widths(result: &ResultSet) -> Vec<AbsoluteLength> {
                 .map(|cell| cell_text(cell).chars().count())
                 .max()
                 .unwrap_or(0);
-            let longest = column.name.chars().count().max(longest_value);
+            let longest = header_characters(&column.name, &column.type_name).max(longest_value);
             AbsoluteLength::Rems(rems(column_width_rems(longest)))
         })
         .collect()
@@ -100,5 +108,14 @@ mod tests {
             "a longer name gets a wider column"
         );
         assert_eq!(column_width_rems(10_000), MAX_COLUMN_REMS);
+    }
+
+    /// A short name with its type beside it still fits, rather than starting
+    /// cut to an ellipsis.
+    #[test]
+    fn the_header_counts_the_type_beside_the_name() {
+        assert_eq!(header_characters("id", "integer"), 2 + 1 + 7 + 2);
+        assert_eq!(header_characters("id", ""), 2 + 2);
+        assert!(column_width_rems(header_characters("id", "integer")) > MIN_COLUMN_REMS);
     }
 }

@@ -779,3 +779,46 @@ async fn a_move_that_lands_during_a_long_read_survives_it(cx: &mut TestAppContex
         "the landed move is kept when the read commits: {shown:?}"
     );
 }
+
+/// A token from the GitHub CLI is missing a permission, not a sign-in: the way
+/// out it is offered first is granting that permission through the CLI, not
+/// signing in again -- which read as being asked to log in once more.
+#[gpui::test]
+async fn a_cli_token_without_read_project_is_offered_the_cli_grant(cx: &mut TestAppContext) {
+    let backend = Arc::new(backend());
+    let scopes = OAuthScopes::Granted(vec!["repo".into(), "read:org".into()]);
+    let (_workspace, _view, cx) = projects_tab(backend, scopes, cx).await;
+    assert!(
+        cx.debug_bounds("github-projects-grant-cli").is_some(),
+        "the GitHub CLI grant is offered"
+    );
+}
+
+/// A token that is not the GitHub CLI's is not offered the CLI grant: `gh auth
+/// refresh` would change a different token, or none.
+#[gpui::test]
+async fn a_token_from_elsewhere_is_not_offered_the_cli_grant(cx: &mut TestAppContext) {
+    let backend = Arc::new(backend());
+    let scopes = OAuthScopes::Granted(vec!["repo".into(), "read:org".into()]);
+    let (_workspace, view, cx) = projects_tab(backend.clone(), scopes.clone(), cx).await;
+    view.update(cx, |view, cx| {
+        view.set_auth(
+            crate::github_view::AuthState::SignedIn(crate::github_view::Session {
+                login: "octocat".into(),
+                token_source: github::TokenSource::Keychain,
+                backend: Arc::new(super::projects_section_tests::backend()),
+                scopes,
+            }),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("github-projects-guidance").is_some(),
+        "the guidance is still drawn"
+    );
+    assert!(
+        cx.debug_bounds("github-projects-grant-cli").is_none(),
+        "but without the GitHub CLI grant"
+    );
+}

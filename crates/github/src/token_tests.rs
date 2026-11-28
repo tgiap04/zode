@@ -379,3 +379,37 @@ fn fake_gh_path() -> PathBuf {
         PathBuf::from("/opt/homebrew/bin/gh")
     }
 }
+
+/// Zode reads the login shell's `PATH` in the background after starting, so a
+/// tab restored at launch can look for `gh` before that `PATH` has arrived --
+/// under the bare one a Dock launch starts with, where Homebrew's directory is
+/// not. `gh` found nowhere then read as "not signed in", with nothing to say
+/// why. It is looked for where it is installed as well as on `PATH`.
+#[cfg(unix)]
+#[test]
+fn gh_is_found_where_it_is_installed_even_off_path() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let installed = tempfile::tempdir().expect("a temporary directory");
+    let gh = installed.path().join("gh");
+    std::fs::write(&gh, "#!/bin/sh\n").expect("the stand-in gh is written");
+    std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755))
+        .expect("the stand-in gh is executable");
+    let elsewhere = tempfile::tempdir().expect("a temporary directory");
+
+    let found = crate::token::find_program(
+        "gh",
+        Some(elsewhere.path().as_os_str().to_owned()),
+        &[installed.path().to_path_buf()],
+    );
+    assert_eq!(
+        found.map(|path| path.canonicalize().unwrap_or(path)),
+        Some(gh.canonicalize().unwrap_or(gh)),
+    );
+
+    assert_eq!(
+        crate::token::find_program("gh", Some(elsewhere.path().as_os_str().to_owned()), &[]),
+        None,
+        "and nowhere is still nowhere"
+    );
+}

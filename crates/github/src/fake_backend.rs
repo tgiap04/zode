@@ -104,6 +104,8 @@ struct FakeState {
     /// Every assignable-user query asked for, in order.
     assignable_user_queries: Vec<String>,
     held_assignable_users: VecDeque<oneshot::Receiver<()>>,
+    /// Asking who the token belongs to never gets an answer.
+    viewer_hangs: bool,
 }
 
 pub struct FakeGithubBackend {
@@ -233,6 +235,11 @@ impl FakeGithubBackend {
     /// Every assignable-user query asked for, in order.
     pub fn assignable_user_queries(&self) -> Vec<String> {
         self.state.lock().assignable_user_queries.clone()
+    }
+
+    /// A GitHub that never answers who the token belongs to.
+    pub fn with_viewer_hanging(self) -> Self {
+        self.with_state(|state| state.viewer_hangs = true)
     }
 
     /// The next assignable-user query is recorded when asked for but answers
@@ -790,6 +797,9 @@ fn of_repository<T: Clone>(items: &[(RepositoryId, T)], repository: &RepositoryI
 
 impl GithubBackend for FakeGithubBackend {
     fn viewer(&self) -> GithubFuture<Viewer> {
+        if self.state.lock().viewer_hangs {
+            return futures::future::pending().boxed();
+        }
         self.answer(|state| state.viewer.clone().ok_or(GithubError::NotSignedIn))
     }
 

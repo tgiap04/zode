@@ -41,7 +41,8 @@ use terminal_view::TerminalView;
 use workspace::Workspace;
 
 pub use editor_source::{EditorReplaceTarget, ReplaceBlocked};
-pub use translation_popover::{PopoverState, SelectionSource, TranslationPopover};
+pub use terminal_source::TerminalInputTarget;
+pub use translation_popover::{PopoverState, ReplaceTarget, SelectionSource, TranslationPopover};
 
 /// Translates the selected text from one language to another and shows the
 /// result next to the selection. Bind one key per language pair, for example

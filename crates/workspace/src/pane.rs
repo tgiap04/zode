@@ -2822,6 +2822,13 @@ impl Pane {
         cx: &mut Context<Pane>,
     ) -> impl IntoElement + use<> {
         let is_active = ix == self.active_item_index;
+        // Icons on the open tab sit on its orange fill, so they take the colour
+        // that reads there rather than the grey they rest in elsewhere.
+        let muted_on_tab = if is_active {
+            Color::OnBrand
+        } else {
+            Color::Muted
+        };
         let is_preview = self
             .preview_item_id
             .map(|id| id == item.item_id())
@@ -2833,6 +2840,7 @@ impl Pane {
                 selected: is_active,
                 preview: is_preview,
                 deemphasized: !self.has_focus(window, cx),
+                filled: is_active,
             },
             window,
             cx,
@@ -2862,7 +2870,7 @@ impl Pane {
             };
 
             Some(DecoratedIcon::new(
-                icon.size(IconSize::Small).color(Color::Muted),
+                icon.size(IconSize::Small).color(muted_on_tab),
                 Some(
                     IconDecoration::new(icon_decoration, knockout_item_color, cx)
                         .color(icon_color.color(cx))
@@ -2880,7 +2888,7 @@ impl Pane {
                 Some(&DiagnosticSeverity::WARNING) => None,
                 _ => item
                     .tab_icon(window, cx)
-                    .map(|icon| icon.color(Color::Muted)),
+                    .map(|icon| icon.color(muted_on_tab)),
             }
             .map(|icon| icon.size(IconSize::Small))
         } else {
@@ -3027,7 +3035,7 @@ impl Pane {
                     end_slot_tooltip_text = "Unpin Tab";
                     IconButton::new("unpin tab", IconName::Pin)
                         .shape(IconButtonShape::Square)
-                        .icon_color(Color::Muted)
+                        .icon_color(muted_on_tab)
                         .size(ButtonSize::None)
                         .icon_size(IconSize::Small)
                         .on_click(cx.listener(move |pane, _, window, cx| {
@@ -3047,7 +3055,7 @@ impl Pane {
                         ShowCloseButton::Hidden => return this,
                     }
                     .shape(IconButtonShape::Square)
-                    .icon_color(Color::Muted)
+                    .icon_color(muted_on_tab)
                     .size(ButtonSize::None)
                     .icon_size(IconSize::Small)
                     .on_click(cx.listener(move |pane, _, window, cx| {
@@ -5068,9 +5076,10 @@ impl Render for DraggedTab {
         let label = self.item.tab_content(
             TabContentParams {
                 detail: Some(self.detail),
-                selected: false,
+                selected: self.is_active,
                 preview: false,
                 deemphasized: false,
+                filled: self.is_active,
             },
             window,
             cx,
@@ -8522,13 +8531,86 @@ mod tests {
         // moves whenever the centre pane's own width does. Flush it is -39.5; the
         // centre's own margin and border take 3+1 off each side, which is the 8px
         // to -47.5. It read -63.5 while the sidebar and docks carried surfaces of
-        // their own too. The assertions either side are the behaviour this test
+        // their own too. Flat tabs carry an inset hover surface instead of side
+        // borders, about 5px wider each, which across five tabs is the 25px to
+        // -72.5. The assertions either side are the behaviour this test
         // actually guards.
-        assert_eq!(scroll_offset.x, px(-47.5));
+        assert_eq!(scroll_offset.x, px(-72.5));
         assert!(
             !tab_bounds.intersects(&new_tab_button_bounds),
             "Tab should not overlap with the new tab button, if this is failing check if there's been a redesign!"
         );
+    }
+
+    /// The active tab has to be told apart from the others at a glance, focused
+    /// pane or not: an unfocused pane mutes every tab's label alike, so the
+    /// fill is what is left to say which one is open.
+    #[gpui::test]
+    async fn test_active_tab_is_filled_inside_itself(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        cx.simulate_resize(size(px(600.), px(300.)));
+
+        add_labeled_item(&pane, "first", false, cx);
+        add_labeled_item(&pane, "second", false, cx);
+        cx.run_until_parked();
+
+        let fill = cx
+            .debug_bounds("TAB_ACTIVE_FILL")
+            .expect("the active tab is filled");
+        let active_tab = cx.debug_bounds("TAB-1").expect("the second tab is drawn");
+        assert!(
+            active_tab.contains(&fill.center()),
+            "the fill belongs to the active tab: {fill:?} in {active_tab:?}"
+        );
+        assert!(
+            fill.size.width > px(0.) && fill.size.height > px(0.),
+            "{fill:?}"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_only_the_open_tab_is_drawn_on_the_fill(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+
+        let first = add_labeled_item(&pane, "first", false, cx);
+        let second = add_labeled_item(&pane, "second", false, cx);
+        cx.run_until_parked();
+
+        assert_eq!(
+            first.read_with(cx, |item, _| item.tab_filled.get()),
+            Some(false)
+        );
+        assert_eq!(
+            second.read_with(cx, |item, _| item.tab_filled.get()),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_white_text_belongs_to_the_fill_alone() {
+        let params = |selected, deemphasized, filled| TabContentParams {
+            selected,
+            deemphasized,
+            filled,
+            ..Default::default()
+        };
+        assert_eq!(params(true, false, true).text_color(), Color::OnBrand);
+        assert_eq!(params(true, true, true).text_color(), Color::OnBrand);
+        // A picker row passes `selected` for its own highlight, on no fill.
+        assert_eq!(params(true, false, false).text_color(), Color::Default);
+        assert_eq!(params(true, true, false).text_color(), Color::Muted);
+        assert_eq!(params(false, false, false).text_color(), Color::Muted);
+        assert_eq!(params(false, true, false).text_color(), Color::Hidden);
     }
 
     #[gpui::test]

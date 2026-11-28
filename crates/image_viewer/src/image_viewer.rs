@@ -474,7 +474,10 @@ impl Item for ImageView {
     fn tab_content(&self, params: TabContentParams, _window: &Window, cx: &App) -> AnyElement {
         let project_path = self.image_item.read(cx).project_path(cx);
 
-        let label_color = if ItemSettings::get_global(cx).git_status {
+        // A git colour on the orange fill would be unreadable.
+        let label_color = if params.filled {
+            params.text_color()
+        } else if ItemSettings::get_global(cx).git_status {
             let git_status = self
                 .project
                 .read(cx)

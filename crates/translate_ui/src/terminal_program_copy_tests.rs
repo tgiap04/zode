@@ -339,3 +339,277 @@ async fn a_terminal_selection_is_sent_without_a_confirmation(cx: &mut TestAppCon
     assert_eq!(harness.shared.provider.request(0).text, selected);
     assert_eq!(harness.confirmation(), None);
 }
+
+impl TerminalHarness {
+    /// A drag on a program that reads the mouse, as Claude Code does: the
+    /// release goes to the program, which then copies what was dragged over.
+    fn drag_on_the_program(&mut self) {
+        self.terminal.update(&mut self.shared.cx, |terminal, cx| {
+            // DECSET 1000 and 1006: report button presses, in SGR form.
+            terminal.write_output(b"\x1b[?1000h\x1b[?1006h", cx);
+        });
+        self.sync();
+        let center = self.bounds().center();
+        self.terminal.update(&mut self.shared.cx, |terminal, cx| {
+            terminal.mouse_up(
+                &gpui::MouseUpEvent {
+                    button: gpui::MouseButton::Left,
+                    position: center,
+                    modifiers: Modifiers::none(),
+                    click_count: 1,
+                },
+                cx,
+            );
+        });
+    }
+}
+
+/// Text a program copies right after the user dragged across it is the
+/// user's own selection, made on the program's screen: it is translated at
+/// once, without telling the user they did not select it.
+#[gpui::test]
+async fn a_copy_right_after_a_drag_on_the_program_is_the_users(cx: &mut TestAppContext) {
+    let mut harness = TerminalHarness::new_in(TERMINAL_CONTEXT, in_agent_tab, cx).await;
+    harness.drag_on_the_program();
+    harness.program_copies(OSC_52_COPY);
+    harness.take_input();
+
+    harness.shared.press();
+
+    assert_eq!(harness.confirmation(), None, "no confirmation step");
+    assert_eq!(harness.shared.provider.call_count(), 1, "sent at once");
+    assert!(
+        harness
+            .shared
+            .cx
+            .debug_bounds("translate-program-copy-notice")
+            .is_none(),
+        "and no notice that the user did not select it"
+    );
+}
+
+/// In the agent's input, Replace clears what is typed there and pastes the
+/// translation in its place.
+#[gpui::test]
+async fn replace_input_clears_the_agents_input_and_pastes(cx: &mut TestAppContext) {
+    let mut harness = TerminalHarness::new_in(TERMINAL_CONTEXT, in_agent_tab, cx).await;
+    harness.drag_on_the_program();
+    harness.program_copies(OSC_52_COPY);
+    harness.take_input();
+    harness.shared.press();
+    harness.shared.provider.answer(0, Ok("Hello".into()));
+    harness
+        .shared
+        .cx
+        .executor()
+        .advance_clock(Duration::from_secs(3));
+    harness.shared.cx.run_until_parked();
+
+    let button = harness
+        .shared
+        .cx
+        .debug_bounds("translate-replace")
+        .expect("Replace is offered for the agent's input");
+    harness
+        .shared
+        .cx
+        .simulate_click(button.center(), Modifiers::none());
+    harness.shared.cx.run_until_parked();
+
+    let sent: Vec<u8> = harness.take_input().concat();
+    assert_eq!(sent.first(), Some(&0x03), "Ctrl+C clears the input first");
+    assert!(
+        String::from_utf8_lossy(&sent).contains("Hello"),
+        "then the translation is pasted: {sent:?}"
+    );
+    assert!(harness.shared.popover().is_none(), "and the popover closes");
+}
+
+/// While the agent is still writing, Replace sends nothing: Ctrl+C to an agent
+/// mid-answer interrupts it instead of clearing its input. The popover says
+/// so and keeps the button for once it stops.
+#[gpui::test]
+async fn replace_input_waits_while_the_agent_is_writing(cx: &mut TestAppContext) {
+    let mut harness = TerminalHarness::new_in(TERMINAL_CONTEXT, in_agent_tab, cx).await;
+    harness.drag_on_the_program();
+    harness.program_copies(OSC_52_COPY);
+    harness.take_input();
+    harness.shared.press();
+    harness.shared.provider.answer(0, Ok("Hello".into()));
+    harness.shared.cx.run_until_parked();
+    // Fed the way a pty's output arrives, which is what counts as writing.
+    for _ in 0..5 {
+        harness
+            .terminal
+            .update(&mut harness.shared.cx, |terminal, cx| {
+                terminal.feed_remote_output(b"still answering\r\n", cx)
+            });
+    }
+    harness.sync();
+
+    let button = harness
+        .shared
+        .cx
+        .debug_bounds("translate-replace")
+        .expect("Replace is offered");
+    harness
+        .shared
+        .cx
+        .simulate_click(button.center(), Modifiers::none());
+    harness.shared.cx.run_until_parked();
+
+    assert!(harness.take_input().is_empty(), "nothing reaches the agent");
+    assert!(harness.shared.popover().is_some(), "the popover stays");
+    assert!(
+        harness
+            .shared
+            .cx
+            .debug_bounds("translate-replace-blocked-reason")
+            .is_some(),
+        "and says why"
+    );
+}
+
+/// The window is what makes a program's copy the user's: one that comes
+/// later is the program's own doing again, whatever the user clicked before.
+#[gpui::test]
+async fn a_copy_long_after_a_drag_still_asks(cx: &mut TestAppContext) {
+    let mut harness = TerminalHarness::new_in(TERMINAL_CONTEXT, in_agent_tab, cx).await;
+    harness.drag_on_the_program();
+    harness
+        .shared
+        .cx
+        .executor()
+        .advance_clock(terminal::USER_COPY_WINDOW + Duration::from_secs(1));
+    harness.program_copies(OSC_52_COPY);
+    harness.take_input();
+
+    harness.shared.press();
+
+    assert_eq!(harness.confirmation(), Some((COPIED.to_string(), 8)));
+    assert_eq!(harness.shared.provider.call_count(), 0, "not sent unasked");
+}
+
+/// A copy the program made before the user touched it was not the user's.
+/// The click reaches the program as input, which forgets the copy outright.
+#[gpui::test]
+async fn a_copy_before_the_drag_is_not_sent_unasked(cx: &mut TestAppContext) {
+    let mut harness = TerminalHarness::new_in(TERMINAL_CONTEXT, in_agent_tab, cx).await;
+    harness.program_copies(OSC_52_COPY);
+    harness
+        .shared
+        .cx
+        .executor()
+        .advance_clock(Duration::from_millis(100));
+    harness.drag_on_the_program();
+    harness.take_input();
+
+    harness.shared.press();
+
+    assert_eq!(harness.shared.provider.call_count(), 0, "not sent unasked");
+}
+
+/// One release vouches for one copy: a second copy the program makes on its
+/// own straight after is not the user's.
+#[gpui::test]
+async fn one_drag_vouches_for_one_copy(cx: &mut TestAppContext) {
+    let mut harness = TerminalHarness::new_in(TERMINAL_CONTEXT, in_agent_tab, cx).await;
+    harness.drag_on_the_program();
+    harness.program_copies(OSC_52_COPY);
+    harness.take_input();
+    harness.shared.press();
+    assert_eq!(harness.shared.provider.call_count(), 1, "the user's copy");
+    harness.shared.cx.simulate_keystrokes("escape");
+    harness.shared.cx.run_until_parked();
+
+    harness.program_copies(OSC_52_COPY);
+    harness.take_input();
+    harness.shared.press();
+
+    assert_eq!(harness.confirmation(), Some((COPIED.to_string(), 8)));
+    assert_eq!(harness.shared.provider.call_count(), 1, "not sent again");
+}
+
+/// A translation is typed as text only: control characters in it would act
+/// as keys, and a line break as Enter.
+#[gpui::test]
+async fn replace_input_types_no_control_characters(cx: &mut TestAppContext) {
+    let mut harness = TerminalHarness::new_in(TERMINAL_CONTEXT, in_agent_tab, cx).await;
+    harness.drag_on_the_program();
+    harness.program_copies(OSC_52_COPY);
+    harness.take_input();
+    harness.shared.press();
+    harness
+        .shared
+        .provider
+        .answer(0, Ok("Good\x03 day\x1b[2J\nthere".into()));
+    harness
+        .shared
+        .cx
+        .executor()
+        .advance_clock(Duration::from_secs(3));
+    harness.shared.cx.run_until_parked();
+
+    let button = harness
+        .shared
+        .cx
+        .debug_bounds("translate-replace")
+        .expect("Replace is offered");
+    harness
+        .shared
+        .cx
+        .simulate_click(button.center(), Modifiers::none());
+    harness.shared.cx.run_until_parked();
+
+    let sent: Vec<u8> = harness.take_input().concat();
+    assert_eq!(
+        sent.iter().filter(|byte| **byte == 0x03).count(),
+        1,
+        "only the clearing Ctrl+C: {sent:?}"
+    );
+    let text = String::from_utf8_lossy(&sent);
+    assert!(text.contains("day") && text.contains("there"), "{text:?}");
+    assert!(!text.contains('\r'), "no Enter: {text:?}");
+}
+
+#[test]
+fn a_line_break_stays_one_only_inside_a_bracketed_paste() {
+    use crate::terminal_source::text_for_input;
+    assert_eq!(text_for_input("a\nb\tc\x07", true), "a\nb c");
+    assert_eq!(text_for_input("a\r\nb", false), "a  b");
+    assert_eq!(text_for_input("", false), "");
+}
+
+/// Two writes in the window still read as an idle agent; the third is one
+/// that is answering.
+#[gpui::test]
+async fn replace_input_goes_through_below_the_busy_threshold(cx: &mut TestAppContext) {
+    let mut harness = TerminalHarness::new_in(TERMINAL_CONTEXT, in_agent_tab, cx).await;
+    harness.drag_on_the_program();
+    harness.program_copies(OSC_52_COPY);
+    harness.take_input();
+    harness.shared.press();
+    harness.shared.provider.answer(0, Ok("Hello".into()));
+    harness.shared.cx.run_until_parked();
+    for _ in 0..2 {
+        harness
+            .terminal
+            .update(&mut harness.shared.cx, |terminal, cx| {
+                terminal.feed_remote_output(b"cursor blink", cx)
+            });
+    }
+    harness.sync();
+
+    let button = harness
+        .shared
+        .cx
+        .debug_bounds("translate-replace")
+        .expect("Replace is offered");
+    harness
+        .shared
+        .cx
+        .simulate_click(button.center(), Modifiers::none());
+    harness.shared.cx.run_until_parked();
+
+    assert_eq!(harness.take_input().concat().first(), Some(&0x03));
+}

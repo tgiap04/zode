@@ -205,6 +205,86 @@ mod dispatch {
             );
         });
     }
+
+    /// The three window controls sit on the left of the title bar, in the
+    /// order a macOS window puts them: close, minimise, maximise.
+    #[gpui::test]
+    async fn the_window_controls_sit_on_the_left_in_macos_order(cx: &mut TestAppContext) {
+        let (pane, cx) = a_painted_window(cx).await;
+        let container = pane
+            .read_with(cx, |pane, _| pane.last_container)
+            .expect("the canvas measured the layer");
+        let window = pane.read_with(cx, |pane, _| pane.bounds_within(container));
+
+        let control = |name: &'static str, cx: &mut VisualTestContext| {
+            cx.debug_bounds(name)
+                .unwrap_or_else(|| panic!("the title bar draws {name}"))
+        };
+        let close = control("floating-pane-close", cx);
+        let minimise = control("floating-pane-minimise", cx);
+        let maximise = control("floating-pane-maximise", cx);
+
+        assert!(close.origin.x < minimise.origin.x);
+        assert!(minimise.origin.x < maximise.origin.x);
+        assert!(
+            maximise.origin.x < window.origin.x + window.size.width / 2.,
+            "the controls belong to the left of the window"
+        );
+        assert!(
+            close.origin.y < window.origin.y + px(40.),
+            "and to its title bar"
+        );
+    }
+
+    /// The title-bar button fills the layer, and a filled window offers nothing
+    /// to drag: no grip and no title-bar move.
+    ///
+    /// Pressed through real dispatch rather than by calling the method, so a
+    /// button drawn without its click handler fails here.
+    #[gpui::test]
+    async fn the_maximise_button_fills_the_layer_and_holds_it_there(cx: &mut TestAppContext) {
+        let (pane, cx) = a_painted_window(cx).await;
+        let container = pane
+            .read_with(cx, |pane, _| pane.last_container)
+            .expect("the canvas measured the layer");
+
+        let button = cx
+            .debug_bounds("floating-pane-maximise")
+            .expect("the title bar draws a maximise button");
+        cx.simulate_click(button.center(), Modifiers::default());
+        cx.run_until_parked();
+
+        let bounds = pane.read_with(cx, |pane, _| pane.bounds_within(container));
+        assert_eq!(bounds.origin, Point::default(), "it starts at the corner");
+        assert_eq!(bounds.size, container, "and covers the whole layer");
+
+        let inside = px(3.);
+        for point in [
+            Point {
+                x: inside,
+                y: inside,
+            },
+            Point {
+                x: container.width - inside,
+                y: container.height - inside,
+            },
+            Point {
+                x: container.width / 2.,
+                y: px(20.),
+            },
+        ] {
+            pane.update(cx, |pane, _| pane.dragging = None);
+            cx.simulate_mouse_down(point, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(point, MouseButton::Left, Modifiers::default());
+            pane.read_with(cx, |pane, _| {
+                assert_eq!(
+                    pane.dragging.map(|dragging| dragging.grab),
+                    None,
+                    "a press at {point:?} must neither move nor resize a filled window"
+                );
+            });
+        }
+    }
 }
 
 /// The geometry, which is where a floating window is either usable or a trap.
@@ -212,6 +292,49 @@ mod geometry {
     use super::*;
 
     const CONTAINER: Size<gpui::Pixels> = size(px(1200.), px(800.));
+
+    /// Filling the layer forgets nothing: restoring puts the window back where
+    /// it was, at the size it was, and a container that changes while it is
+    /// filled is still filled exactly.
+    #[gpui::test]
+    async fn maximising_remembers_where_the_window_was(cx: &mut TestAppContext) {
+        let (window, cx) = a_window(cx).await;
+        window.update(cx, |window, cx| {
+            window.move_to(
+                Point {
+                    x: px(100.),
+                    y: px(120.),
+                },
+                CONTAINER,
+            );
+            let before = window.bounds_within(CONTAINER);
+
+            window.toggle_maximized(cx);
+            assert!(window.maximized);
+            let filled = window.bounds_within(CONTAINER);
+            assert_eq!(filled.origin, Point::default());
+            assert_eq!(filled.size, CONTAINER);
+            let smaller = size(px(900.), px(500.));
+            assert_eq!(window.bounds_within(smaller).size, smaller);
+
+            window.toggle_maximized(cx);
+            assert!(!window.maximized);
+            assert_eq!(window.bounds_within(CONTAINER), before);
+        });
+    }
+
+    /// Close ends the window; the next one opens at its normal size, the way
+    /// a minimised one comes back maximised only because it never ended.
+    #[gpui::test]
+    async fn closing_forgets_that_it_was_maximised(cx: &mut TestAppContext) {
+        let (window, cx) = a_window(cx).await;
+        window.update_in(cx, |window, view_window, cx| {
+            window.toggle_maximized(cx);
+            assert!(window.maximized);
+            window.shut_down(view_window, cx);
+            assert!(!window.maximized);
+        });
+    }
 
     /// A window is opened by the button, so it opens near the button.
     #[gpui::test]

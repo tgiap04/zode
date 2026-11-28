@@ -61,6 +61,7 @@ pub(crate) struct TestPlatform {
     /// test, oldest first. Standing in for the OS notification centre so a
     /// test can assert on what was posted without one.
     pub posted_notifications: RefCell<Vec<Notification>>,
+    pub withdrawn_notifications: RefCell<Vec<String>>,
     /// Whether `post_notification` can do anything at all. Defaults to
     /// `false`, the same "cannot" a platform with no implementation gives,
     /// so a test that does not opt in is not silently posting notifications.
@@ -175,6 +176,7 @@ impl TestPlatform {
             outside_mouse_down: Default::default(),
             display_wake_supported: RefCell::new(true),
             posted_notifications: Default::default(),
+            withdrawn_notifications: Default::default(),
             notifications_supported: RefCell::new(false),
             notification_activated: Default::default(),
             text_system,
@@ -323,6 +325,12 @@ impl Platform for TestPlatform {
 
     fn post_notification(&self, notification: Notification) {
         self.posted_notifications.borrow_mut().push(notification);
+    }
+
+    fn withdraw_notification(&self, id: &str) {
+        self.withdrawn_notifications
+            .borrow_mut()
+            .push(id.to_string());
     }
 
     fn can_post_notifications(&self) -> bool {

@@ -139,6 +139,20 @@ pub(crate) fn post(notification: Notification) {
     }
 }
 
+/// Removes the notification posted under `identifier` from Notification
+/// Centre, if it is still there. Guarded like [`post`]: without a bundle
+/// identity there is nothing posted to remove, and asking aborts the process.
+pub(crate) fn withdraw(identifier: &str) {
+    if !supported() {
+        return;
+    }
+    unsafe {
+        let center: id = msg_send![class!(UNUserNotificationCenter), currentNotificationCenter];
+        let identifiers: id = msg_send![class!(NSArray), arrayWithObject: ns_string(identifier)];
+        let _: () = msg_send![center, removeDeliveredNotificationsWithIdentifiers: identifiers];
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
