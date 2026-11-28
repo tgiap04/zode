@@ -26,6 +26,7 @@ mod grid_edit_bar;
 mod grid_edit_save;
 mod grid_editing;
 mod grid_selection;
+mod open_database;
 mod panel_connections;
 mod panel_credentials;
 mod panel_layout;
@@ -100,6 +101,16 @@ pub fn init(cx: &mut App) {
         // that takes a workspace handle and calls `update` on it aborts the
         // process. Both buttons dispatch this action rather than one of them
         // taking a shorter road that happens to work.
+        workspace.register_action(
+            |workspace, _: &zode_actions::database::OpenDatabaseFile, window, cx| {
+                open_database::open_files(workspace, window, cx);
+            },
+        );
+        workspace.register_action(
+            |workspace, _: &zode_actions::database::OpenDatabaseFolder, window, cx| {
+                open_database::open_folder(workspace, window, cx);
+            },
+        );
         workspace.register_action(
             |workspace, _: &zode_actions::database::AddConnection, window, cx| {
                 let handle = cx.weak_entity();

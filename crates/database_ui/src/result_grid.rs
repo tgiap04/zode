@@ -125,13 +125,24 @@ impl DatabasePanel {
                             },
                         )
                         .striped()
+                        .header_background(cx.theme().colors().tab_bar_background)
                         .header(
                             result
                                 .columns
                                 .iter()
                                 .enumerate()
                                 .map(|(index, column)| {
-                                    header_cell(&panel, index, &column.name, sortable.as_ref())
+                                    let is_key = page.browse.as_ref().is_some_and(|browse| {
+                                        browse.key_columns.contains(&column.name)
+                                    });
+                                    header_cell(
+                                        &panel,
+                                        index,
+                                        &column.name,
+                                        &column.type_name,
+                                        is_key,
+                                        sortable.as_ref(),
+                                    )
                                 })
                                 .collect::<Vec<_>>(),
                         )
@@ -295,8 +306,9 @@ impl DatabasePanel {
                 .h(Tab::container_height(cx))
                 .px_2()
                 .justify_between()
+                .bg(cx.theme().colors().tab_bar_background)
                 .border_t_1()
-                .border_color(cx.theme().colors().border)
+                .border_color(cx.theme().colors().border_variant)
                 .child(
                     // Gives way to the buttons on a narrow view: the page
                     // controls are what is used, the counts only read.
@@ -305,18 +317,12 @@ impl DatabasePanel {
                         .min_w_0()
                         .gap_2()
                         .overflow_hidden()
-                        .child(
-                            Label::new(label)
-                                .size(LabelSize::Small)
-                                .color(Color::Muted)
-                                .truncate(),
-                        )
-                        .child(
-                            Label::new(format!("{elapsed} ms"))
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted)
-                                .truncate(),
-                        )
+                        .child(status_chip(None, label.into(), cx))
+                        .child(status_chip(
+                            Some(IconName::Clock),
+                            format!("{elapsed} ms").into(),
+                            cx,
+                        ))
                         .children(edit_notice.map(|text| {
                             Label::new(text)
                                 .size(LabelSize::XSmall)
@@ -430,17 +436,60 @@ impl DatabasePanel {
     }
 }
 
-/// A column's name, which on a table opened from the tree is also the button
-/// that sorts by it, with an arrow once it does.
+/// A small rounded figure in the status bar: what a page holds, and how long
+/// it took. Chips rather than loose grey text, so the two read as two facts.
+fn status_chip(icon: Option<IconName>, text: SharedString, cx: &App) -> impl IntoElement {
+    h_flex()
+        .flex_none()
+        .gap_1()
+        .px_1p5()
+        .py_px()
+        .rounded_md()
+        .bg(cx.theme().colors().element_background)
+        .when_some(icon, |chip, icon| {
+            chip.child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted))
+        })
+        .child(Label::new(text).size(LabelSize::XSmall).color(Color::Muted))
+}
+
+/// A column's name over its type, with a key for the column a table is keyed
+/// on. On a table opened from the tree it is also the button that sorts by it,
+/// with an arrow once it does.
+///
+/// The type is the engine's own word for it, muted and small: enough to tell a
+/// `text` id from an `integer` one at a glance without widening the column.
 fn header_cell(
     panel: &WeakEntity<DatabasePanel>,
     index: usize,
     name: &str,
+    type_name: &str,
+    is_key: bool,
     sortable: Option<&TableBrowse>,
 ) -> AnyElement {
-    let label = Label::new(name.to_string())
-        .size(LabelSize::Small)
-        .truncate();
+    let label = h_flex()
+        .min_w_0()
+        .gap_1()
+        .when(is_key, |label| {
+            label.child(
+                Icon::new(IconName::Hash)
+                    .size(IconSize::XSmall)
+                    .color(Color::Warning),
+            )
+        })
+        .child(
+            Label::new(name.to_string())
+                .size(LabelSize::Small)
+                .weight(gpui::FontWeight::SEMIBOLD)
+                .truncate(),
+        )
+        .when(!type_name.is_empty(), |label| {
+            label.child(
+                Label::new(type_name.to_lowercase())
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted)
+                    .truncate(),
+            )
+        });
     let Some(browse) = sortable else {
         return label.into_any_element();
     };
@@ -461,7 +510,7 @@ fn header_cell(
                     IconName::ArrowUp
                 })
                 .size(IconSize::XSmall)
-                .color(Color::Muted),
+                .color(Color::Accent),
             )
         })
         .on_click(move |_event, window, cx| {

@@ -3,11 +3,11 @@ use crate::panel_layout::{DraggedSplit, Split};
 use crate::panel_queries::RunScope;
 use crate::query::QueryState;
 use gpui::{Context, DragMoveEvent, Window, uniform_list};
-use ui::{Tab, Tooltip, prelude::*};
+use ui::{ContextMenu, PopoverMenu, Tab, Tooltip, prelude::*};
 use zode_actions::database as actions;
 
-impl Render for DatabasePanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl DatabasePanel {
+    fn render_contents(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_result_columns(cx);
         // No surface card here. `Dock::render` draws one -- the inset, the
         // rounding, the border and the background -- around *every* dock,
@@ -207,30 +207,89 @@ impl DatabasePanel {
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let can_run = self.active.is_some();
         let running = matches!(self.query, QueryState::Running { .. });
+        // Where the reader is, on the left, the way a macOS toolbar names its
+        // document: the connection with a dot for its state, then the table
+        // open in it. The tab above already says "Database", so this does not.
+        let colors = cx.theme().colors();
+        let status = cx.theme().status();
+        let location = self
+            .active
+            .and_then(|index| self.connections.get(index))
+            .map(|node| {
+                let dot = match node.state {
+                    crate::database_panel::NodeState::Connected(_) => status.success,
+                    crate::database_panel::NodeState::Connecting => status.warning,
+                    crate::database_panel::NodeState::Failed(_) => status.error,
+                    crate::database_panel::NodeState::Idle => colors.icon_muted,
+                };
+                // The table whose rows are on screen, else the one described
+                // in the tree: a table opened for its data has no `open_table`.
+                let table = match &self.query {
+                    QueryState::Done(page) => {
+                        page.browse.as_ref().map(|browse| browse.table.clone())
+                    }
+                    _ => None,
+                }
+                .or_else(|| self.open_table.as_ref().map(|open| open.table.clone()));
+                h_flex()
+                    .min_w_0()
+                    .gap_1p5()
+                    .child(div().flex_none().size(px(7.)).rounded_full().bg(dot))
+                    .child(
+                        Label::new(node.config.name.clone())
+                            .size(LabelSize::Small)
+                            .truncate(),
+                    )
+                    .when_some(table, |location, table| {
+                        location
+                            .child(
+                                Icon::new(IconName::ChevronRight)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Disabled),
+                            )
+                            .child(
+                                Label::new(table)
+                                    .size(LabelSize::Small)
+                                    .color(Color::Muted)
+                                    .truncate(),
+                            )
+                    })
+            });
         h_flex()
             .flex_none()
             .w_full()
             .h(Tab::container_height(cx))
             .px_2()
+            .gap_2()
             .justify_between()
+            .bg(colors.tab_bar_background)
             .border_b_1()
-            .border_color(cx.theme().colors().border)
-            .child(Label::new("Database").size(LabelSize::Small))
+            .border_color(colors.border_variant)
+            .child(h_flex().flex_1().min_w_0().children(location))
             .child(
                 h_flex()
+                    .flex_none()
                     .gap_0p5()
+                    // The one action this toolbar exists for, so it is the one
+                    // control drawn as a button with words and the brand fill.
                     .when(can_run, |element| {
-                        element.child(
-                            IconButton::new("database-run", IconName::PlayFilled)
-                                .icon_size(IconSize::Small)
-                                .loading(running)
-                                .tooltip(|_window, cx| {
-                                    Tooltip::for_action("Run Statement", &actions::RunQuery, cx)
-                                })
-                                .on_click(cx.listener(|this, _event, window, cx| {
-                                    this.run_query(RunScope::Statement, window, cx);
-                                })),
-                        )
+                        element
+                            .child(
+                                Button::new("database-run", "Run")
+                                    .style(ButtonStyle::Brand)
+                                    .label_size(LabelSize::Small)
+                                    .start_icon(
+                                        Icon::new(IconName::PlayFilled).size(IconSize::XSmall),
+                                    )
+                                    .loading(running)
+                                    .tooltip(|_window, cx| {
+                                        Tooltip::for_action("Run Statement", &actions::RunQuery, cx)
+                                    })
+                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                        this.run_query(RunScope::Statement, window, cx);
+                                    })),
+                            )
+                            .child(div().w_px().h_4().mx_1().bg(colors.border_variant))
                     })
                     .when(can_run, |element| {
                         element.child(
@@ -255,6 +314,12 @@ impl DatabasePanel {
                     .child(
                         IconButton::new("database-refresh", IconName::RotateCw)
                             .icon_size(IconSize::Small)
+                            // A schema read still out for the open connection.
+                            .loading(
+                                self.active
+                                    .and_then(|index| self.connections.get(index))
+                                    .is_some_and(|node| node.schemas_load != 0),
+                            )
                             .disabled(!can_run)
                             .tooltip(|_window, cx| {
                                 Tooltip::for_action("Refresh", &actions::RefreshDatabase, cx)
@@ -286,17 +351,30 @@ impl DatabasePanel {
                                 window.dispatch_action(Box::new(actions::OpenInFloatingWindow), cx)
                             }),
                     )
+                    // One `+` for every way a connection arrives: typed into
+                    // the dialog, or picked from disk. Each entry dispatches
+                    // the workspace action, the one road to it.
                     .child(
-                        IconButton::new("database-add-connection", IconName::Plus)
-                            .icon_size(IconSize::Small)
-                            .tooltip(|_window, cx| {
-                                Tooltip::for_action("Add Connection", &actions::AddConnection, cx)
-                            })
-                            // Dispatched, not called: the workspace action is
-                            // the one road to this dialog, so both buttons that
-                            // open it behave identically.
-                            .on_click(|_event, window, cx| {
-                                window.dispatch_action(Box::new(actions::AddConnection), cx)
+                        PopoverMenu::new("database-add-menu")
+                            .trigger_with_tooltip(
+                                IconButton::new("database-add-connection", IconName::Plus)
+                                    .icon_size(IconSize::Small),
+                                Tooltip::text("Add Connection"),
+                            )
+                            .anchor(gpui::Anchor::TopRight)
+                            .menu(|window, cx| {
+                                Some(ContextMenu::build(window, cx, |menu, _, _| {
+                                    menu.action("Add Connection…", Box::new(actions::AddConnection))
+                                        .separator()
+                                        .action(
+                                            "Open Database File…",
+                                            Box::new(actions::OpenDatabaseFile),
+                                        )
+                                        .action(
+                                            "Open Folder…",
+                                            Box::new(actions::OpenDatabaseFolder),
+                                        )
+                                }))
                             }),
                     ),
             )
@@ -316,14 +394,42 @@ impl DatabasePanel {
             )
             .child(Label::new("No database connections").color(Color::Muted))
             .child(
-                div().pt_1().child(
-                    Button::new("database-empty-add", "Add a Connection")
-                        .style(ButtonStyle::Filled)
-                        .start_icon(Icon::new(IconName::Plus).size(IconSize::Small))
-                        .on_click(|_event, window, cx| {
-                            window.dispatch_action(Box::new(actions::AddConnection), cx)
-                        }),
-                ),
+                v_flex()
+                    .pt_1()
+                    .gap_1()
+                    .items_center()
+                    .child(
+                        Button::new("database-empty-add", "Add a Connection")
+                            .style(ButtonStyle::Filled)
+                            .start_icon(Icon::new(IconName::Plus).size(IconSize::Small))
+                            .on_click(|_event, window, cx| {
+                                window.dispatch_action(Box::new(actions::AddConnection), cx)
+                            }),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new("database-empty-open-file", "Open File…")
+                                    .start_icon(Icon::new(IconName::File).size(IconSize::Small))
+                                    .on_click(|_event, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(actions::OpenDatabaseFile),
+                                            cx,
+                                        )
+                                    }),
+                            )
+                            .child(
+                                Button::new("database-empty-open-folder", "Open Folder…")
+                                    .start_icon(Icon::new(IconName::Folder).size(IconSize::Small))
+                                    .on_click(|_event, window, cx| {
+                                        window.dispatch_action(
+                                            Box::new(actions::OpenDatabaseFolder),
+                                            cx,
+                                        )
+                                    }),
+                            ),
+                    ),
             )
     }
 
@@ -455,5 +561,15 @@ impl DatabasePanel {
             })
             .debug_selector(|| "database-data-view".into())
             .child(self.render_results(window, cx))
+    }
+}
+
+impl Render for DatabasePanel {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // In the terminal's font, as every tool panel is, so a column of
+        // names and statuses reads the same as the shell beside it.
+        terminal_view::terminal_font_scope(cx)
+            .size_full()
+            .child(self.render_contents(window, cx))
     }
 }

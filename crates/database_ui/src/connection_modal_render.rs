@@ -7,6 +7,7 @@
 use crate::connection_modal::{ConnectionModal, Step, TestState};
 use crate::driver_registry::{self, CatalogueEntry};
 use gpui::{ClickEvent, Entity, Focusable as _, Render, Window};
+use ui::window_control;
 use ui::{
     CommonAnimationExt as _, KeyBinding, ListItem, ListItemSpacing, Modal, ModalFooter,
     ModalHeader, ProgressBar, Section, Tooltip, prelude::*,
@@ -16,10 +17,16 @@ use ui_input::InputField;
 /// Wide enough for a description to sit on one line beside its name, which is
 /// the whole reason the descriptions are there.
 const DIALOG_WIDTH: Rems = rems(40.);
+const TITLE_BAR_HEIGHT: Rems = rems(2.25);
+const OTHER_WAYS_HEIGHT: Rems = rems(2.5);
 const DIALOG_MAX_HEIGHT: Rems = rems(40.);
 /// About seven rows. Past that the list scrolls rather than the dialog growing
 /// until it outruns a laptop screen.
-const LIST_HEIGHT: Rems = rems(22.5);
+/// What the engine list keeps of the dialog's height once the title bar and
+/// the other-ways row have theirs. The list is the one part that scrolls, so it
+/// is the part that gives way: taking the room from the ceiling instead let the
+/// dialog outgrow a short window and clip the footer, its only way forward.
+const LIST_HEIGHT: Rems = rems(22.5 - 2.25 - 2.5);
 
 impl Render for ConnectionModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -43,10 +50,90 @@ impl Render for ConnectionModal {
             .on_action(cx.listener(|this, _: &menu::SelectPrevious, _window, cx| {
                 this.select_next(false, cx)
             }))
-            .child(match &self.step {
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .child(self.render_title_bar(cx))
+            // `Modal` is `size_full`: drawn straight under the title bar it
+            // would take the whole dialog's height again and push its own
+            // footer out of the bottom by exactly the title bar's height. In a
+            // box that takes what the title bar leaves, it fits.
+            .child(div().flex_1().min_h_0().child(match &self.step {
                 Step::PickEngine => self.render_picker(cx).into_any_element(),
                 _ => self.render_form(cx).into_any_element(),
-            })
+            }))
+    }
+}
+
+/// The group the title bar's dots share, so hovering one shows all three.
+const TITLE_BAR_CONTROLS: &str = "database-dialog-controls";
+
+impl ConnectionModal {
+    /// A macOS-style title bar, matching the floating window: the dots on the
+    /// left and the step's name centred over the dialog.
+    ///
+    /// Only red does anything. A dialog has nothing to minimise and nothing to
+    /// fill the screen with, so the other two are drawn as macOS draws a
+    /// control a window does not offer -- greyed, and inert.
+    fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let title: SharedString = match self.engine() {
+            Some(engine) => format!("New {} Connection", engine.name).into(),
+            None => "New Connection".into(),
+        };
+        let status = cx.theme().status();
+        let side = px(56.);
+        h_flex()
+            .h(TITLE_BAR_HEIGHT)
+            .flex_none()
+            .px_3()
+            .bg(cx.theme().colors().title_bar_background)
+            .border_b_1()
+            .border_color(cx.theme().colors().border_variant)
+            .child(
+                h_flex()
+                    .group(TITLE_BAR_CONTROLS)
+                    .w(side)
+                    .flex_none()
+                    .gap_2()
+                    .child(window_control(
+                        "database-dialog-close",
+                        TITLE_BAR_CONTROLS,
+                        status.error,
+                        IconName::Close,
+                        Tooltip::text("Cancel"),
+                        Some(Box::new(cx.listener(
+                            |this, _: &ClickEvent, _window, cx| this.cancel(cx),
+                        ))),
+                        cx,
+                    ))
+                    .child(window_control(
+                        "database-dialog-minimise",
+                        TITLE_BAR_CONTROLS,
+                        status.warning,
+                        IconName::Dash,
+                        Tooltip::text("Not available in a dialog"),
+                        None,
+                        cx,
+                    ))
+                    .child(window_control(
+                        "database-dialog-maximise",
+                        TITLE_BAR_CONTROLS,
+                        status.success,
+                        IconName::Maximize,
+                        Tooltip::text("Not available in a dialog"),
+                        None,
+                        cx,
+                    )),
+            )
+            .child(
+                h_flex().flex_1().min_w_0().justify_center().child(
+                    Label::new(title)
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                        .truncate(),
+                ),
+            )
+            .child(div().w(side).flex_none())
     }
 }
 
@@ -163,6 +250,11 @@ impl ConnectionModal {
             .when_some(self.error.clone(), |modal, error| {
                 modal.section(Section::new().child(inline_error(error)))
             })
+            .section(
+                Section::new()
+                    .padded(false)
+                    .child(self.render_other_ways(cx)),
+            )
             .footer(self.render_picker_footer(cx))
     }
 
@@ -263,6 +355,60 @@ impl ConnectionModal {
             .into_any_element()
     }
 
+    /// The ways in that skip the engine list: a URL, a database file, or a
+    /// folder of them. A row of their own above the footer, so the footer keeps
+    /// only what ends the dialog.
+    fn render_other_ways(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .w_full()
+            .h(OTHER_WAYS_HEIGHT)
+            .px(DynamicSpacing::Base12.rems(cx))
+            .gap_2()
+            .border_t_1()
+            .border_color(cx.theme().colors().border_variant)
+            .child(
+                Label::new("Or connect from")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Button::new("database-import-url", "Import from URL…")
+                            .start_icon(Icon::new(IconName::Link).size(IconSize::Small))
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.import_from_url(window, cx);
+                            })),
+                    )
+                    // Closes the dialog first: the file picker and anything it
+                    // opens take over from here, and a dialog left behind would
+                    // be one more thing to dismiss.
+                    .child(
+                        Button::new("database-open-file", "Open File…")
+                            .start_icon(Icon::new(IconName::File).size(IconSize::Small))
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.cancel(cx);
+                                window.dispatch_action(
+                                    Box::new(zode_actions::database::OpenDatabaseFile),
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        Button::new("database-open-folder", "Open Folder…")
+                            .start_icon(Icon::new(IconName::Folder).size(IconSize::Small))
+                            .on_click(cx.listener(|this, _event, window, cx| {
+                                this.cancel(cx);
+                                window.dispatch_action(
+                                    Box::new(zode_actions::database::OpenDatabaseFolder),
+                                    cx,
+                                );
+                            })),
+                    ),
+            )
+    }
+
     fn render_picker_footer(&self, cx: &mut Context<Self>) -> ModalFooter {
         let selected = self.selected_engine();
         let installed = selected.is_some_and(|engine| engine.installed);
@@ -278,35 +424,27 @@ impl ConnectionModal {
             ("Continue", None)
         };
 
-        ModalFooter::new()
-            .start_slot(
-                Button::new("database-import-url", "Import from URL…")
-                    .start_icon(Icon::new(IconName::Link).size(IconSize::Small))
-                    .on_click(cx.listener(|this, _event, window, cx| {
-                        this.import_from_url(window, cx);
-                    })),
-            )
-            .end_slot(
-                h_flex()
-                    .gap_1()
-                    .debug_selector(|| "database-modal-actions".into())
-                    .child(
-                        Button::new("database-picker-cancel", "Cancel")
-                            .on_click(cx.listener(|this, _event, _window, cx| this.cancel(cx))),
-                    )
-                    .child(
-                        Button::new("database-picker-continue", label)
-                            .style(ButtonStyle::Filled)
-                            .when_some(icon, |button, icon| {
-                                button.start_icon(Icon::new(icon).size(IconSize::Small))
-                            })
-                            .disabled(!can_continue)
-                            .key_binding(self.confirm_hint(cx))
-                            .on_click(cx.listener(|this, _event, window, cx| {
-                                this.advance(window, cx);
-                            })),
-                    ),
-            )
+        ModalFooter::new().end_slot(
+            h_flex()
+                .gap_1()
+                .debug_selector(|| "database-modal-actions".into())
+                .child(
+                    Button::new("database-picker-cancel", "Cancel")
+                        .on_click(cx.listener(|this, _event, _window, cx| this.cancel(cx))),
+                )
+                .child(
+                    Button::new("database-picker-continue", label)
+                        .style(ButtonStyle::Filled)
+                        .when_some(icon, |button, icon| {
+                            button.start_icon(Icon::new(icon).size(IconSize::Small))
+                        })
+                        .disabled(!can_continue)
+                        .key_binding(self.confirm_hint(cx))
+                        .on_click(cx.listener(|this, _event, window, cx| {
+                            this.advance(window, cx);
+                        })),
+                ),
+        )
     }
 
     // ---- Second screen: fill the driver's form ------------------------------
