@@ -387,13 +387,21 @@ impl BranchPanel {
             &other_live_worktrees,
         );
 
-        let detail = checkout_deletion::confirm_detail(&label, &path, &plan);
-        let buttons = checkout_deletion::confirm_buttons(&plan);
+        let branch = self
+            .repos
+            .iter()
+            .find(|repo| repo.id == id)
+            .and_then(|repo| repo.worktrees.iter().find(|worktree| worktree.path == path))
+            .and_then(|worktree| worktree.branch_name())
+            .map(str::to_string);
+        let detail = checkout_deletion::confirm_detail(&label, &path, branch.as_deref(), &plan);
+        let choices = checkout_deletion::confirm_choices(&plan, branch.is_some());
+        let buttons: Vec<&str> = choices.iter().map(|(label, _)| *label).collect();
         let prompt = window.prompt(
             gpui::PromptLevel::Warning,
             "Delete this worktree?",
             Some(&detail),
-            buttons,
+            &buttons,
             cx,
         );
 
@@ -406,21 +414,43 @@ impl BranchPanel {
         let window_handle = window.window_handle().downcast::<MultiWorkspace>();
 
         cx.spawn_in(window, async move |panel, cx| {
-            let choice = delete_choice_for(buttons, prompt.await.ok());
-            if matches!(choice, DeleteChoice::Cancel) {
+            let Some(choice) = checkout_deletion::choice_for(&choices, prompt.await.ok()) else {
                 return;
-            }
+            };
 
             let receiver = repo.update(cx, |repo, _| repo.remove_worktree(path.clone(), false));
             // The channel closing means the repository went away mid-delete;
             // there is nothing to report and nothing to retry.
             let Ok(result) = receiver.await else { return };
 
-            // Worktree-only is today's behaviour exactly, whatever `result`
-            // says. A failed removal on the combined route takes the same
-            // path: nothing about sessions has happened yet, so nothing
+            // Only once the worktree is gone: git refuses to delete a branch
+            // still checked out anywhere, and `-d` keeps one holding commits
+            // that are not merged, so nothing here can lose work.
+            if result.is_ok()
+                && choice.delete_branch
+                && let Some(branch) = branch
+            {
+                let receiver = repo.update(cx, |repo, _| repo.delete_branch(false, branch));
+                let deleted = receiver
+                    .await
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("the repository went away")));
+                panel
+                    .update_in(cx, |panel, window, cx| {
+                        panel.report_failure(
+                            gpui::Task::ready(deleted),
+                            "git branch -d",
+                            window,
+                            cx,
+                        );
+                    })
+                    .ok();
+            }
+
+            // Keeping the sessions is today's behaviour exactly, whatever
+            // `result` says. A failed removal on the combined route takes the
+            // same path: nothing about sessions has happened yet, so nothing
             // about sessions should.
-            if matches!(choice, DeleteChoice::WorktreeOnly) || result.is_err() {
+            if !choice.take_sessions || result.is_err() {
                 panel
                     .update_in(cx, |panel, window, cx| {
                         panel.prune_checkout_state(&path, cx);
@@ -506,77 +536,5 @@ impl BranchPanel {
             order.retain(|kept| kept != &path_string);
             state.set_order(order, cx);
         });
-    }
-}
-
-/// What pressing a button in the delete-worktree prompt actually decided.
-enum DeleteChoice {
-    Cancel,
-    WorktreeOnly,
-    WorktreeAndSessions,
-}
-
-/// Reads `answer` against `buttons` -- the exact array
-/// `checkout_deletion::confirm_buttons` produced for this plan -- so the
-/// two-button and three-button layouts cannot drift into meaning different
-/// things at the same index without this and the prompt disagreeing out
-/// loud. A two-button layout's `Some(0)` is [`DeleteChoice::WorktreeOnly`]:
-/// with nothing to add, "Delete" removes only the worktree, the same as it
-/// does today.
-fn delete_choice_for(buttons: &[&str], answer: Option<usize>) -> DeleteChoice {
-    match (buttons.len(), answer) {
-        (2, Some(0)) => DeleteChoice::WorktreeOnly,
-        (3, Some(0)) => DeleteChoice::WorktreeAndSessions,
-        (3, Some(1)) => DeleteChoice::WorktreeOnly,
-        _ => DeleteChoice::Cancel,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The whole safety property of the three-button prompt rests on this
-    /// mapping. Both layouts are checked from the one array
-    /// `confirm_buttons` actually returns for each plan shape, so a change
-    /// to the button order shows up here rather than silently swapping which
-    /// route a click takes.
-    #[test]
-    fn the_answer_index_maps_to_the_button_it_names() {
-        let two_buttons: &[&str] = &["Delete", "Cancel"];
-        assert!(matches!(
-            delete_choice_for(two_buttons, Some(0)),
-            DeleteChoice::WorktreeOnly
-        ));
-        assert!(matches!(
-            delete_choice_for(two_buttons, Some(1)),
-            DeleteChoice::Cancel
-        ));
-        assert!(matches!(
-            delete_choice_for(two_buttons, None),
-            DeleteChoice::Cancel
-        ));
-
-        let three_buttons: &[&str] = &[
-            "Delete Worktree and Sessions",
-            "Delete Worktree Only",
-            "Cancel",
-        ];
-        assert!(matches!(
-            delete_choice_for(three_buttons, Some(0)),
-            DeleteChoice::WorktreeAndSessions
-        ));
-        assert!(matches!(
-            delete_choice_for(three_buttons, Some(1)),
-            DeleteChoice::WorktreeOnly
-        ));
-        assert!(matches!(
-            delete_choice_for(three_buttons, Some(2)),
-            DeleteChoice::Cancel
-        ));
-        assert!(matches!(
-            delete_choice_for(three_buttons, None),
-            DeleteChoice::Cancel
-        ));
     }
 }

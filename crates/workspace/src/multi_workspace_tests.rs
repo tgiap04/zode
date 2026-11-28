@@ -3724,3 +3724,143 @@ async fn test_vibrancy_opacity_applies_as_soon_as_it_changes(cx: &mut TestAppCon
     assert_eq!(set_share(0.7, cx), 0.7);
     assert_eq!(set_share(0.5, cx), 0.5, "a second change shows too");
 }
+
+/// Removing the active project hands the window to the next project on the
+/// rail. When that neighbour lives on a WSL distro, it must not be reopened as
+/// a *local* folder: the Linux path does not exist on the Windows side, so a
+/// local workspace on it showed the project again with nothing in it, and
+/// opened the missing folder as a new file -- a tab named after the project.
+#[gpui::test]
+async fn removing_the_active_project_never_reopens_a_remote_neighbour_locally(
+    cx: &mut TestAppContext,
+) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/local-project"), json!({ "file.txt": "" }))
+        .await;
+    cx.update(|cx| <dyn Fs>::set_global(fs.clone(), cx));
+    let project = Project::test(fs.clone(), [path!("/local-project").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+    multi_workspace.update(cx, |mw, cx| mw.test_enable_background_retention(cx));
+    cx.run_until_parked();
+
+    let local_key = project.read_with(cx, |project, cx| project.project_group_key(cx));
+    let remote_paths = PathList::new(&[PathBuf::from("/home/someone/wsl-project")]);
+    let remote_key = ProjectGroupKey::new(
+        Some(RemoteConnectionOptions::Wsl(remote::WslConnectionOptions {
+            distro_name: "Ubuntu".into(),
+            user: None,
+        })),
+        remote_paths.clone(),
+    );
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        let workspace = mw.workspace().clone();
+        mw.activate(workspace, None, window, cx);
+        mw.test_add_project_group(ProjectGroup {
+            key: remote_key.clone(),
+            workspaces: Vec::new(),
+            expanded: true,
+        });
+    });
+    cx.run_until_parked();
+
+    let removal = multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.remove_project_group(&local_key, window, cx)
+    });
+    cx.run_until_parked();
+    removal.await.expect("the removal completes");
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, cx| {
+        let local_on_remote_paths = ProjectGroupKey::new(None, remote_paths.clone());
+        assert!(
+            mw.workspaces()
+                .all(|workspace| workspace.read(cx).project_group_key(cx) != local_on_remote_paths),
+            "the WSL project must not be reopened as a local folder"
+        );
+        assert!(
+            !mw.project_group_keys().contains(&local_on_remote_paths),
+            "and the rail must not gain a local copy of it"
+        );
+        let active_project = mw.workspace().read(cx).project().read(cx);
+        assert!(
+            active_project.is_local() && active_project.visible_worktrees(cx).next().is_none(),
+            "what is left in front is an empty workspace, not a stand-in for the WSL one"
+        );
+    });
+}
+
+/// Deleting a linked worktree takes its `.git` file away, so the workspace
+/// open on it stops resolving to the main repository and its key collapses to
+/// the worktree's own (now missing) folder. That must not put a project for
+/// the deleted folder on the rail, nor move the main project's group onto it.
+#[gpui::test]
+async fn deleting_a_linked_worktree_does_not_add_it_to_the_rail(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree(path!("/main-repo"), json!({ ".git": {}, "file.txt": "" }))
+        .await;
+    fs.add_linked_worktree_for_repo(
+        std::path::Path::new(path!("/main-repo/.git")),
+        false,
+        git::repository::Worktree {
+            path: PathBuf::from(path!("/linked")),
+            ref_name: Some("refs/heads/feature".into()),
+            sha: "abc123".into(),
+            is_main: false,
+            is_bare: false,
+        },
+    )
+    .await;
+    fs.write(path!("/linked/file.txt").as_ref(), b"")
+        .await
+        .unwrap();
+
+    let main_project = Project::test(fs.clone(), [path!("/main-repo").as_ref()], cx).await;
+    let linked_project = Project::test(fs.clone(), [path!("/linked").as_ref()], cx).await;
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(main_project.clone(), window, cx));
+    multi_workspace.update(cx, |mw, cx| mw.test_enable_background_retention(cx));
+    cx.run_until_parked();
+
+    let main_key = main_project.read_with(cx, |project, cx| project.project_group_key(cx));
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        let workspace = mw.workspace().clone();
+        mw.activate(workspace, None, window, cx);
+        mw.test_add_workspace(linked_project.clone(), window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        linked_project.read_with(cx, |project, cx| project.project_group_key(cx)),
+        main_key,
+        "a linked worktree belongs to its main repository's group"
+    );
+
+    // `git worktree remove` empties the checkout before it removes the folder,
+    // so the scanner sees the `.git` file go while the root is still there.
+    fs.remove_file(path!("/linked/.git").as_ref(), fs::RemoveOptions::default())
+        .await
+        .unwrap();
+    cx.run_until_parked();
+    fs.remove_worktree_for_repo(
+        std::path::Path::new(path!("/main-repo/.git")),
+        true,
+        "refs/heads/feature",
+    )
+    .await;
+    cx.run_until_parked();
+
+    let deleted_key = ProjectGroupKey::new(None, PathList::new(&[path!("/linked")]));
+    multi_workspace.read_with(cx, |mw, _cx| {
+        let keys = mw.project_group_keys();
+        assert!(
+            !keys.contains(&deleted_key),
+            "the deleted worktree must not appear on the rail: {keys:?}"
+        );
+        assert!(
+            keys.contains(&main_key),
+            "the main project stays where it was: {keys:?}"
+        );
+    });
+}
