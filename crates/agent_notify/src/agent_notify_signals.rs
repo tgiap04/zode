@@ -143,10 +143,14 @@ impl AgentNotifier {
                 if !posts_to_the_desktop(cx) {
                     return;
                 }
+                // "Answer" rather than "approval": the same wait covers a
+                // permission dialog, a plan to approve and a question the
+                // agent asked, and only the first is an approval.
                 cx.post_notification(Notification {
                     id: format!("{id}-approval").into(),
                     title,
-                    body: "Waiting for your approval".into(),
+                    body: "Waiting for your answer".into(),
+                    awaits_user: true,
                 });
                 watched.approval_notified = true;
             }
@@ -192,6 +196,7 @@ impl AgentNotifier {
             id: format!("{id}-answer").into(),
             title: title.clone(),
             body: "Finished answering".into(),
+            awaits_user: false,
         });
         watched.notified = true;
     }
@@ -270,6 +275,7 @@ impl AgentNotifier {
             id: format!("{id}-exit").into(),
             title: title.clone(),
             body: "Session ended".into(),
+            awaits_user: false,
         });
     }
 

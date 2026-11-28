@@ -420,6 +420,12 @@ impl TestAppContext {
         self.test_platform.posted_notifications.borrow().clone()
     }
 
+    /// The ids of notifications taken back out of the notification centre, in
+    /// order.
+    pub fn withdrawn_notifications(&self) -> Vec<String> {
+        self.test_platform.withdrawn_notifications.borrow().clone()
+    }
+
     /// Sets whether the platform can post notifications at all. `false`
     /// stands in for a platform with no implementation.
     pub fn set_notifications_supported(&self, supported: bool) {
@@ -1173,6 +1179,7 @@ mod notification_tests {
             id: "agent-finished".into(),
             title: "Agent finished".into(),
             body: "The task completed successfully.".into(),
+            awaits_user: false,
         };
         cx.app.borrow().post_notification(notification.clone());
 
@@ -1181,6 +1188,98 @@ mod notification_tests {
         assert_eq!(posted[0].id, notification.id);
         assert_eq!(posted[0].title, notification.title);
         assert_eq!(posted[0].body, notification.body);
+    }
+
+    fn notification(id: &str) -> Notification {
+        Notification {
+            id: id.to_string().into(),
+            title: "Agent finished".into(),
+            body: "Finished answering".into(),
+            awaits_user: false,
+        }
+    }
+
+    /// A question waits for whoever comes back to the machine; withdrawing it
+    /// would leave them nothing to find.
+    #[gpui::test]
+    fn a_notification_awaiting_the_user_stays(cx: &mut TestAppContext) {
+        cx.app.borrow().post_notification(Notification {
+            awaits_user: true,
+            ..notification("approval")
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(60));
+        cx.run_until_parked();
+        assert!(cx.withdrawn_notifications().is_empty());
+        assert!(
+            cx.app
+                .borrow()
+                .posted_notification_generations
+                .borrow()
+                .is_empty(),
+            "a question leaves nothing behind to track"
+        );
+    }
+
+    /// Reposted as a question, an id is no longer withdrawn by the timer its
+    /// earlier post started.
+    #[gpui::test]
+    fn an_earlier_timer_does_not_take_a_question_away(cx: &mut TestAppContext) {
+        cx.app.borrow().post_notification(notification("tab"));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(5));
+        cx.run_until_parked();
+        cx.app.borrow().post_notification(Notification {
+            awaits_user: true,
+            ..notification("tab")
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(60));
+        cx.run_until_parked();
+        assert!(cx.withdrawn_notifications().is_empty());
+    }
+
+    /// A posted notification leaves the notification centre after ten
+    /// seconds, so finished work does not pile up there.
+    #[gpui::test]
+    fn a_notification_is_withdrawn_after_ten_seconds(cx: &mut TestAppContext) {
+        cx.app.borrow().post_notification(notification("done"));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(9));
+        cx.run_until_parked();
+        assert!(
+            cx.withdrawn_notifications().is_empty(),
+            "still there at 9 s"
+        );
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+        assert_eq!(cx.withdrawn_notifications(), vec!["done".to_string()]);
+    }
+
+    /// Posting the same id again replaces the notification, and the new one
+    /// gets its own ten seconds rather than going with the old one's.
+    #[gpui::test]
+    fn a_reposted_notification_keeps_its_own_ten_seconds(cx: &mut TestAppContext) {
+        cx.app.borrow().post_notification(notification("approval"));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        cx.app.borrow().post_notification(notification("approval"));
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        assert!(
+            cx.withdrawn_notifications().is_empty(),
+            "the first post's timer must not take the second one away"
+        );
+
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(5));
+        cx.run_until_parked();
+        assert_eq!(cx.withdrawn_notifications(), vec!["approval".to_string()]);
     }
 
     #[gpui::test]

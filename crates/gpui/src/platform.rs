@@ -277,6 +277,12 @@ pub trait Platform: 'static {
     /// implements this rather than a stand-in for one that hasn't yet.
     fn post_notification(&self, _notification: Notification) {}
 
+    /// Takes a notification posted under `id` back out of the OS notification
+    /// centre, if it is still there. Must not block, like
+    /// [`Platform::post_notification`]. The default does nothing: a platform
+    /// that cannot withdraw leaves the notification for the user to dismiss.
+    fn withdraw_notification(&self, _id: &str) {}
+
     /// Whether [`Platform::post_notification`] can ever do anything here.
     ///
     /// Asked before building anything that depends on it, so a platform with
@@ -423,6 +429,11 @@ pub struct Notification {
     pub title: SharedString,
     /// The notification's body text.
     pub body: SharedString,
+    /// Something the user still has to act on -- a question, a pairing
+    /// request, a reminder. Left in the notification centre for whoever comes
+    /// back to the machine, rather than withdrawn after
+    /// [`crate::NOTIFICATION_LIFETIME`] like news of finished work.
+    pub awaits_user: bool,
 }
 
 /// A request that the display stay lit, withdrawn when this value is dropped.

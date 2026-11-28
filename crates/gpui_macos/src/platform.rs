@@ -540,6 +540,10 @@ impl Platform for MacPlatform {
         notifications::post(notification);
     }
 
+    fn withdraw_notification(&self, id: &str) {
+        notifications::withdraw(id);
+    }
+
     fn can_post_notifications(&self) -> bool {
         notifications::supported()
     }

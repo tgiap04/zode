@@ -328,12 +328,19 @@ impl TurnTracker {
     }
 }
 
-/// Whether the terminal's visible tail is Claude's permission dialog.
+/// Whether the terminal's visible tail is Claude waiting on the user mid-turn:
+/// a permission dialog, a plan waiting to be approved, or a question it asked.
 ///
-/// A question line ("Do you want to proceed?", "Do you want to make this edit
-/// to …", "Do you want to create …") with a first option, `1. Yes`, somewhere
-/// below it. Both, because either alone is ordinary text: the first is
-/// something an agent says in prose, and the second is any numbered list.
+/// The first two are a question line ("Do you want to proceed?", "Do you want
+/// to make this edit to …", "Would you like to proceed?") with a first option,
+/// `1. Yes`, somewhere below it. Both, because either alone is ordinary text:
+/// the first is something an agent says in prose, and the second is any
+/// numbered list.
+///
+/// A question the agent asks has no fixed wording, so it is recognised by its
+/// menu instead: the selection cursor on a numbered option, and the menu's
+/// "Enter to select" hint below it. Again both, since a reply can hold a
+/// numbered list and can quote the hint.
 ///
 /// Wrong in one direction only. A dialog worded differently is missed, and the
 /// cost of that is one lost notification; the caller only asks while a tool
@@ -341,11 +348,23 @@ impl TurnTracker {
 /// merely talking.
 pub fn screen_asks_for_approval(lines: &[String]) -> bool {
     lines.iter().enumerate().any(|(index, line)| {
-        strip_frame(line).starts_with("Do you want to")
-            && lines[index + 1..]
-                .iter()
-                .any(|below| below.contains("1. Yes"))
+        let line = strip_frame(line);
+        let below = &lines[index + 1..];
+        let yes_or_no = (line.starts_with("Do you want to")
+            || line.starts_with("Would you like to"))
+            && below.iter().any(|below| below.contains("1. Yes"));
+        let menu =
+            is_selected_option(line) && below.iter().any(|below| below.contains("Enter to select"));
+        yes_or_no || menu
     })
+}
+
+/// A numbered option with the selection cursor on it: `❯ 1. …`, `❯ 2. …`.
+fn is_selected_option(line: &str) -> bool {
+    line.strip_prefix('❯')
+        .map(str::trim_start)
+        .and_then(|rest| rest.split_once(". "))
+        .is_some_and(|(number, _)| !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// How many pty writes in the approval window still read as a quiet terminal.
@@ -1167,6 +1186,49 @@ mod tests {
             "│ Do you want to make this edit to agent_view.rs? │",
             "│ ❯ 1. Yes                                        │",
             "│   3. No                                         │",
+        ])));
+    }
+
+    /// The agent asking the user to choose: a question, its options with the
+    /// selection cursor on one, and the menu's own key hints under them. The
+    /// turn is not over -- the answer goes back into it -- so this is a wait,
+    /// not an end, and it needs announcing as one.
+    #[test]
+    fn a_question_the_agent_asks_is_recognised() {
+        assert!(screen_asks_for_approval(&screen(&[
+            "☐ Layout",
+            "Which layout should the panel use?",
+            "❯ 1. Side by side",
+            "     Tree on the left, rows on the right",
+            "  2. Stacked",
+            "  3. Type something.",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ])));
+    }
+
+    /// Leaving plan mode asks whether to go ahead with the plan.
+    #[test]
+    fn a_plan_waiting_to_be_approved_is_recognised() {
+        assert!(screen_asks_for_approval(&screen(&[
+            "Would you like to proceed?",
+            "❯ 1. Yes, and auto-accept edits",
+            "  2. Yes, and manually approve edits",
+            "  3. No, keep planning",
+        ])));
+    }
+
+    /// A numbered list in a reply, even one with an arrow in front of an item,
+    /// is not a menu without the menu's key hints under it.
+    #[test]
+    fn a_list_in_a_reply_is_not_a_question() {
+        assert!(!screen_asks_for_approval(&screen(&[
+            "Here is what I changed:",
+            "❯ 1. The parser",
+            "  2. The tests",
+        ])));
+        assert!(!screen_asks_for_approval(&screen(&[
+            "Enter to select is what the hint says.",
+            "1. Yes",
         ])));
     }
 

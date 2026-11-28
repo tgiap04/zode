@@ -225,6 +225,7 @@ fn deliver(reminders: &Entity<Reminders>, event: ReminderEvent, cx: &mut App) {
                 id: id.into(),
                 title,
                 body,
+                awaits_user: true,
             });
         }
     }
