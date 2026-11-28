@@ -48,8 +48,12 @@ fn now_unix() -> u64 {
         .map_or(0, |duration| duration.as_secs())
 }
 
-impl Render for GithubView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+impl GithubView {
+    fn render_contents(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         v_flex()
             .key_context("GithubView")
             .track_focus(&self.focus_handle)
@@ -99,16 +103,19 @@ impl GithubView {
                         .color(Color::Muted),
                 )
             })
-            .when(
-                !matches!(self.auth, AuthState::SigningIn(_) | AuthState::Checking),
-                |row| {
-                    row.child(
+            // Offered while a check is still waiting, too: a check that never
+            // ends would otherwise leave nothing on screen to try again with.
+            // Not while signing in, which has its own Cancel.
+            .when(!matches!(self.auth, AuthState::SigningIn(_)), |row| {
+                row.child(
+                    div().debug_selector(|| "github-reload".into()).child(
                         IconButton::new("github-reload", IconName::RotateCw)
+                            .loading(matches!(self.auth, AuthState::Checking))
                             .tooltip(ui::Tooltip::text("Reload"))
                             .on_click(cx.listener(|this, _, _window, cx| this.reload(cx))),
-                    )
-                },
-            )
+                    ),
+                )
+            })
     }
 
     fn render_account(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -336,10 +343,15 @@ impl GithubView {
                             .map_or(std::cmp::Ordering::Greater, |selected| index.cmp(&selected)),
                     )
                 };
+                let active = section == self.section;
                 Tab::new(("github-section", index))
                     .position(position)
-                    .toggle_state(section == self.section)
-                    .child(Label::new(section.label()).size(LabelSize::Small))
+                    .toggle_state(active)
+                    .child(
+                        Label::new(section.label())
+                            .size(LabelSize::Small)
+                            .color(if active { Color::OnBrand } else { Color::Muted }),
+                    )
                     .on_click(
                         cx.listener(move |this, _, _window, cx| this.select_section(section, cx)),
                     )
@@ -386,5 +398,15 @@ impl GithubView {
             .flex_1()
             .child(Label::new(text).color(Color::Muted))
             .into_any_element()
+    }
+}
+
+impl Render for GithubView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // In the terminal's font, as every tool panel is, so a column of
+        // names and statuses reads the same as the shell beside it.
+        terminal_view::terminal_font_scope(cx)
+            .size_full()
+            .child(self.render_contents(window, cx))
     }
 }

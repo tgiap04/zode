@@ -181,6 +181,10 @@ impl Focusable for GithubView {
     }
 }
 
+/// How long asking GitHub who the token belongs to may take before the tab
+/// says it could not reach GitHub.
+const SIGN_IN_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 impl GithubView {
     /// Silent: builds the view and reads the project's remotes, nothing more.
     /// [`Self::connect`] is what looks for a token.
@@ -410,7 +414,18 @@ impl GithubView {
         let backend = (environment.make_backend)(token, cx);
         self.set_auth(AuthState::Checking, cx);
         self.session_task = Some(cx.spawn(async move |this, cx| {
-            let viewer = backend.viewer().await;
+            // Bounded: an answer that never comes left the tab on "Checking"
+            // for good, with no error and nothing to try again with.
+            let timer = cx.background_executor().timer(SIGN_IN_CHECK_TIMEOUT);
+            let viewer = match futures::future::select(backend.viewer(), Box::pin(timer)).await {
+                futures::future::Either::Left((viewer, _)) => viewer,
+                futures::future::Either::Right(_) => Err(GithubError::Network {
+                    message: format!(
+                        "GitHub did not answer within {} seconds",
+                        SIGN_IN_CHECK_TIMEOUT.as_secs()
+                    ),
+                }),
+            };
             this.update(cx, |this, cx| {
                 this.rate_limits = backend.rate_limits();
                 this.token_identity = Some(identity);

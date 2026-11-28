@@ -60,8 +60,13 @@ impl GithubView {
             return;
         }
         let scopes = session.scopes.clone();
+        // Only for a local project: in a remote one the terminal would open on
+        // the remote host, whose `gh` is not the one this token was read from.
+        let grant_with_cli =
+            session.token_source == github::TokenSource::GhCli && self.project.read(cx).is_local();
         let section = cx.new(|cx| {
             let mut section = ProjectsSection::new(context, scopes, cx);
+            section.grant_with_cli = grant_with_cli;
             section.reload(cx);
             section
         });

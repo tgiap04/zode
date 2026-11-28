@@ -991,3 +991,47 @@ async fn sign_in_with_github_is_available_only_with_a_client_id(cx: &mut TestApp
         assert!(sign_in_with_github_available(cx));
     });
 }
+
+fn hanging_viewer(_: &GithubToken) -> FakeGithubBackend {
+    FakeGithubBackend::new().with_viewer_hanging()
+}
+
+/// A GitHub that does not answer leaves the tab saying why, and with Reload
+/// at hand the whole time. Before, the check waited for ever: the tab read
+/// "Checking GitHub…" with no error, and Reload was hidden while it did.
+#[gpui::test]
+async fn a_github_that_never_answers_is_reported_and_reload_stays(cx: &mut TestAppContext) {
+    install(
+        Setup {
+            gh: FakeGhHost::signed_in("gho_personal"),
+            backend: hanging_viewer,
+            ..Setup::default()
+        },
+        cx,
+    );
+    let fs = fs::FakeFs::new(cx.executor());
+    let (workspace, cx) = workspace_over(fs, &[] as &[&std::path::Path], cx).await;
+    press_toggle(cx);
+    let view = github_tab(&workspace, cx);
+    cx.run_until_parked();
+
+    assert!(matches!(auth(&view, cx), AuthState::Checking));
+    assert!(
+        cx.debug_bounds("github-reload").is_some(),
+        "Reload is offered while the check is still waiting"
+    );
+
+    advance(19, cx);
+    assert!(
+        matches!(auth(&view, cx), AuthState::Checking),
+        "a slow answer is still waited for"
+    );
+    advance(2, cx);
+    let AuthState::Failed(error) = auth(&view, cx) else {
+        panic!("a check GitHub never answers ends in an error, not a wait");
+    };
+    assert!(
+        matches!(error, github::GithubError::Network { .. }),
+        "{error:?}"
+    );
+}
